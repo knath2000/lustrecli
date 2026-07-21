@@ -1,4 +1,5 @@
 import Foundation
+import Network
 
 public struct HTTPPage: Sendable {
     public let body: String
@@ -33,7 +34,7 @@ public enum ProviderResolverError: Error, LocalizedError, Sendable {
 public struct StaticProviderResolver: Sendable {
     public typealias Fetch = @Sendable (URL, [String: String]) async throws -> HTTPPage
 
-    private let fetch: Fetch
+    public let pageFetch: Fetch
     private let randomSuffix: @Sendable () -> String
     private let nowMilliseconds: @Sendable () -> String
 
@@ -46,7 +47,7 @@ public struct StaticProviderResolver: Sendable {
         randomSuffix: @escaping @Sendable () -> String,
         nowMilliseconds: @escaping @Sendable () -> String
     ) {
-        self.fetch = fetch
+        self.pageFetch = fetch
         self.randomSuffix = randomSuffix
         self.nowMilliseconds = nowMilliseconds
     }
@@ -131,19 +132,33 @@ public struct StaticProviderResolver: Sendable {
     }
 
     private func resolveMixDrop(url: URL) async throws -> ProviderResolution {
-        let page = try await fetchProviderPage(url, headers: htmlHeaders(referer: nil))
-        let html = normalize(page.body)
-        guard let mediaURL = mixDropMediaURL(in: html, relativeTo: page.finalURL) else {
-            throw ProviderResolverError.noMediaFound
+        let initialPage = try await fetchProviderPage(url, headers: htmlHeaders(referer: nil))
+        if let resolution = mixDropResolution(from: initialPage, requestedURL: url, usedFallbackMirror: false) {
+            return resolution
         }
+        if let mirrorURL = mixDropFallbackMirrorURL(for: initialPage.finalURL) {
+            let mirrorPage = try await fetchProviderPage(mirrorURL, headers: htmlHeaders(referer: nil))
+            if let resolution = mixDropResolution(from: mirrorPage, requestedURL: url, usedFallbackMirror: true) {
+                return resolution
+            }
+        }
+        throw ProviderResolverError.noMediaFound
+    }
+
+    private func mixDropResolution(from page: HTTPPage, requestedURL: URL, usedFallbackMirror: Bool) -> ProviderResolution? {
+        let html = normalize(page.body)
+        guard let mediaURL = mixDropMediaURL(in: html, relativeTo: page.finalURL) else { return nil }
         let headers = ["User-Agent": NetworkConstants.chromeUserAgent, "Referer": page.finalURL.absoluteString]
+        var trace = ["Fetched \(page.finalURL.host ?? "MixDrop") static page."]
+        if usedFallbackMirror { trace.append("Fetched current MixDrop fallback mirror.") }
+        trace.append("Resolved static MixDrop media configuration.")
         return ProviderResolution(
-            sourcePageURL: url,
+            sourcePageURL: requestedURL,
             provider: .mixDrop,
             title: title(in: html) ?? "MixDrop Video",
             thumbnailURL: imageURL(in: html, relativeTo: page.finalURL),
             qualities: [ResolvedQuality(label: "Video", url: mediaURL, headers: headers, resolutionMethod: "Static MixDrop resolver")],
-            trace: ["Fetched \(page.finalURL.host ?? "MixDrop") static page.", "Resolved static MixDrop media configuration."]
+            trace: trace
         )
     }
 
@@ -170,7 +185,9 @@ public struct StaticProviderResolver: Sendable {
     }
 
     private func fetchProviderPage(_ url: URL, headers: [String: String]) async throws -> HTTPPage {
-        let page = try await fetch(url, headers)
+        guard URLSafetyPolicy.isAllowed(url) else { throw ProviderResolverError.invalidURL }
+        let page = try await pageFetch(url, headers)
+        guard URLSafetyPolicy.isAllowed(page.finalURL) else { throw ProviderResolverError.invalidURL }
         if isCloudflareChallenge(page) { throw ProviderResolverError.cloudflareChallenge }
         guard (200...299).contains(page.statusCode) else {
             throw ProviderResolverError.network("Provider returned HTTP \(page.statusCode).")
@@ -215,12 +232,18 @@ public struct StaticProviderResolver: Sendable {
     }
 
     private static func fetchPage(url: URL, headers: [String: String]) async throws -> HTTPPage {
+        guard URLSafetyPolicy.isAllowed(url) else { throw ProviderResolverError.invalidURL }
         var request = URLRequest(url: url)
         request.timeoutInterval = 20
         headers.forEach { request.setValue($0.value, forHTTPHeaderField: $0.key) }
+        let redirectDelegate = SafeRedirectDelegate()
+        let session = URLSession(configuration: .ephemeral, delegate: redirectDelegate, delegateQueue: nil)
+        defer { session.invalidateAndCancel() }
         do {
-            let (data, response) = try await URLSession.shared.data(for: request)
-            guard let http = response as? HTTPURLResponse, let body = String(data: data, encoding: .utf8) else {
+            let (data, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse,
+                  URLSafetyPolicy.isAllowed(http.url ?? url),
+                  let body = String(data: data, encoding: .utf8) else {
                 throw ProviderResolverError.network("Provider returned an invalid response.")
             }
             return HTTPPage(body: body, finalURL: http.url ?? url, statusCode: http.statusCode)
@@ -248,11 +271,53 @@ public enum URLSafetyPolicy {
               host != "localhost", !host.hasSuffix(".local"), !host.contains("%") else {
             return false
         }
-        if host == "127.0.0.1" || host == "::1" || host.hasPrefix("10.") || host.hasPrefix("192.168.") || host.hasPrefix("169.254.") {
-            return false
+        if let address = IPv4Address(host) {
+            return !isDisallowedIPv4(Array(address.rawValue))
         }
-        let octets = host.split(separator: ".").compactMap { Int($0) }
-        return octets.count != 4 || !(octets[0] == 172 && (16...31).contains(octets[1]))
+        if let address = IPv6Address(host) {
+            return !isDisallowedIPv6(Array(address.rawValue))
+        }
+        return true
+    }
+
+    private static func isDisallowedIPv4(_ bytes: [UInt8]) -> Bool {
+        guard bytes.count == 4 else { return true }
+        return bytes[0] == 0 || bytes[0] == 10 || bytes[0] == 127
+            || (bytes[0] == 100 && (64...127).contains(bytes[1]))
+            || (bytes[0] == 169 && bytes[1] == 254)
+            || (bytes[0] == 172 && (16...31).contains(bytes[1]))
+            || (bytes[0] == 192 && bytes[1] == 168)
+            || (bytes[0] == 198 && (18...19).contains(bytes[1]))
+    }
+
+    private static func isDisallowedIPv6(_ bytes: [UInt8]) -> Bool {
+        guard bytes.count == 16 else { return true }
+        if bytes.allSatisfy({ $0 == 0 }) || (bytes.dropLast().allSatisfy({ $0 == 0 }) && bytes.last == 1) {
+            return true
+        }
+        if bytes[0] & 0xfe == 0xfc || (bytes[0] == 0xfe && bytes[1] & 0xc0 == 0x80) {
+            return true
+        }
+        if bytes.prefix(10).allSatisfy({ $0 == 0 }), bytes[10] == 0xff, bytes[11] == 0xff {
+            return isDisallowedIPv4(Array(bytes.suffix(4)))
+        }
+        return false
+    }
+}
+
+private final class SafeRedirectDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping @Sendable (URLRequest?) -> Void
+    ) {
+        guard let redirectURL = request.url ?? task.originalRequest?.url ?? response.url else {
+            completionHandler(nil)
+            return
+        }
+        completionHandler(URLSafetyPolicy.isAllowed(redirectURL) ? request : nil)
     }
 }
 
@@ -279,6 +344,20 @@ private func isMixDropHost(_ host: String?) -> Bool {
 private func isPlaymogoHost(_ host: String?) -> Bool {
     guard let host = host?.lowercased() else { return false }
     return host == "playmogo.com" || host == "ds2play.com" || host.hasSuffix(".playmogo.com") || host.hasSuffix(".ds2play.com")
+}
+
+private func mixDropFallbackMirrorURL(for url: URL) -> URL? {
+    guard let host = url.host?.lowercased(), host != "miiiixdrop.net", host != "www.miiiixdrop.net",
+          let fileCode = url.path.split(separator: "/").last, !fileCode.isEmpty,
+          var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+        return nil
+    }
+    components.scheme = "https"
+    components.host = "miiiixdrop.net"
+    components.path = "/f/\(fileCode)"
+    components.query = nil
+    components.fragment = nil
+    return components.url
 }
 
 private func isStreamTapeHost(_ host: String?) -> Bool {
@@ -351,15 +430,25 @@ private func mixDropMediaURL(in html: String, relativeTo pageURL: URL) -> URL? {
     guard let raw = firstMatch(patterns, in: html) else { return nil }
     let normalized = raw.replacingOccurrences(of: "\\/", with: "/")
     guard let url = URL(string: normalized, relativeTo: pageURL)?.absoluteURL else { return nil }
-    let host = url.host?.lowercased() ?? ""
-    return host == "mxcontent.net" || host.hasSuffix(".mxcontent.net") ? url : nil
+    return isMixDropMediaURL(url) ? url : nil
+}
+
+private func isMixDropMediaURL(_ url: URL) -> Bool {
+    guard let host = url.host?.lowercased(), host == "mxcontent.net" || host.hasSuffix(".mxcontent.net") else {
+        return false
+    }
+    let path = url.path.lowercased()
+    if path.contains(".mp4") { return true }
+    let segments = path.split(separator: "/", omittingEmptySubsequences: true)
+    return segments.count >= 3 && segments[0] == "d" && !segments[1].isEmpty && !segments[2].isEmpty
 }
 
 private func streamTapeCandidate(in html: String, relativeTo pageURL: URL) -> URL? {
     let patterns = [
         #"sources\s*:\s*\[\{file\s*:\s*['\"]([^'\"]+)['\"]"#,
         #"data-src\s*=\s*['\"]([^'\"]+)['\"]"#,
-        #"(?:video_url|url)\s*[=:]\s*['\"]([^'\"]*/get_video[^'\"]*)['\"]"#
+        #"(?:video_url|url)\s*[=:]\s*['\"]([^'\"]*/get_video[^'\"]*)['\"]"#,
+        #"(https?://[^\"'\s<>]*streamtape[^\"'\s<>]*/get_video[^\"'\s<>]*)"#
     ]
     guard let raw = firstMatch(patterns, in: html) else { return nil }
     return URL(string: raw.replacingOccurrences(of: "\\/", with: "/"), relativeTo: pageURL)?.absoluteURL
@@ -367,5 +456,7 @@ private func streamTapeCandidate(in html: String, relativeTo pageURL: URL) -> UR
 
 private func isStreamTapeMediaURL(_ url: URL) -> Bool {
     let host = url.host?.lowercased() ?? ""
-    return host == "streamtape.com" || host == "streamtape.net" || host == "streamta.pe" || host.hasSuffix(".streamtape.com") || host.hasSuffix(".streamtape.net") || host.hasSuffix(".streamta.pe")
+    return host == "tapecontent.net" || host.hasSuffix(".tapecontent.net")
+        || host == "streamtape.com" || host == "streamtape.net" || host == "streamta.pe"
+        || host.hasSuffix(".streamtape.com") || host.hasSuffix(".streamtape.net") || host.hasSuffix(".streamta.pe")
 }

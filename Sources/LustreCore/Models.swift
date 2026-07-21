@@ -17,11 +17,58 @@ public enum JobAction: String, Codable, Sendable {
     case retry
 }
 
+public struct JobLogEntry: Codable, Equatable, Sendable {
+    public enum Level: String, Codable, Sendable {
+        case info
+        case error
+    }
+
+    public let timestamp: Date
+    public let level: Level
+    public let message: String
+
+    public init(timestamp: Date = .now, level: Level, message: String) {
+        self.timestamp = timestamp
+        self.level = level
+        self.message = message
+    }
+}
+
 public enum ProviderKind: String, Codable, Sendable {
     case direct
+    case allPornStream
     case doodStream
     case mixDrop
     case streamTape
+}
+
+public enum ProviderAttemptOutcome: String, Codable, Sendable {
+    case resolved
+    case failed
+    case verificationRequired
+    case timedOut
+}
+
+public struct ProviderAttempt: Codable, Equatable, Sendable {
+    public let providerName: String
+    public let sourceURL: URL?
+    public let outcome: ProviderAttemptOutcome
+    public let resolutionMethod: String?
+    public let reason: String?
+
+    public init(
+        providerName: String,
+        sourceURL: URL?,
+        outcome: ProviderAttemptOutcome,
+        resolutionMethod: String? = nil,
+        reason: String? = nil
+    ) {
+        self.providerName = providerName
+        self.sourceURL = sourceURL
+        self.outcome = outcome
+        self.resolutionMethod = resolutionMethod
+        self.reason = reason
+    }
 }
 
 public struct ResolvedQuality: Codable, Equatable, Sendable {
@@ -63,6 +110,21 @@ public struct ProviderResolution: Codable, Equatable, Sendable {
     }
 }
 
+public struct DownloadProgress: Equatable, Sendable {
+    public let bytesWritten: Int64
+    public let totalBytes: Int64?
+
+    public init(bytesWritten: Int64, totalBytes: Int64? = nil) {
+        self.bytesWritten = bytesWritten
+        self.totalBytes = totalBytes
+    }
+
+    public var fraction: Double? {
+        guard let totalBytes, totalBytes > 0 else { return nil }
+        return min(max(Double(bytesWritten) / Double(totalBytes), 0), 1)
+    }
+}
+
 public struct DownloadJob: Codable, Identifiable, Equatable, Sendable {
     public let id: UUID
     public let sourcePageURL: URL
@@ -70,7 +132,11 @@ public struct DownloadJob: Codable, Identifiable, Equatable, Sendable {
     public var destination: String
     public var status: JobStatus
     public var message: String
+    public var progress: Double?
+    public var downloadedBytes: Int64?
+    public var totalBytes: Int64?
     public var attempts: Int
+    public var logs: [JobLogEntry]?
     public let createdAt: Date
     public var updatedAt: Date
 
@@ -81,7 +147,11 @@ public struct DownloadJob: Codable, Identifiable, Equatable, Sendable {
         destination: String = "local",
         status: JobStatus = .queued,
         message: String = "Waiting for the resolver worker.",
+        progress: Double? = nil,
+        downloadedBytes: Int64? = nil,
+        totalBytes: Int64? = nil,
         attempts: Int = 0,
+        logs: [JobLogEntry]? = nil,
         createdAt: Date = .now,
         updatedAt: Date = .now
     ) {
@@ -91,7 +161,11 @@ public struct DownloadJob: Codable, Identifiable, Equatable, Sendable {
         self.destination = destination
         self.status = status
         self.message = message
+        self.progress = progress
+        self.downloadedBytes = downloadedBytes
+        self.totalBytes = totalBytes
         self.attempts = attempts
+        self.logs = logs
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }
@@ -103,19 +177,22 @@ public struct ExtractionResult: Codable, Equatable, Sendable {
     public let resolutionState: String
     public let trace: [String]
     public let resolution: ProviderResolution?
+    public let providerAttempts: [ProviderAttempt]
 
     public init(
         sourcePageURL: URL,
         isDirectMedia: Bool,
         resolutionState: String,
         trace: [String],
-        resolution: ProviderResolution? = nil
+        resolution: ProviderResolution? = nil,
+        providerAttempts: [ProviderAttempt] = []
     ) {
         self.sourcePageURL = sourcePageURL
         self.isDirectMedia = isDirectMedia
         self.resolutionState = resolutionState
         self.trace = trace
         self.resolution = resolution
+        self.providerAttempts = providerAttempts
     }
 }
 

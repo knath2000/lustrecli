@@ -4,11 +4,13 @@ import Foundation
 public enum JobStoreError: Error, LocalizedError {
     case sqlite(String)
     case jobNotFound(UUID)
+    case invalidAction(JobAction, JobStatus)
 
     public var errorDescription: String? {
         switch self {
         case .sqlite(let message): message
         case .jobNotFound(let id): "No job exists with id \(id.uuidString)."
+        case .invalidAction(let action, let status): "Cannot \(action.rawValue) a job while it is \(status.rawValue)."
         }
     }
 }
@@ -67,6 +69,7 @@ public actor JobStore {
 
     public func apply(_ action: JobAction, to id: UUID) throws -> DownloadJob {
         guard var job = try job(id: id) else { throw JobStoreError.jobNotFound(id) }
+        guard job.status.allows(action) else { throw JobStoreError.invalidAction(action, job.status) }
         switch action {
         case .pause:
             job.status = .paused
@@ -85,6 +88,10 @@ public actor JobStore {
         job.updatedAt = .now
         try replace(job)
         return job
+    }
+
+    public func update(_ job: DownloadJob) throws {
+        try replace(job)
     }
 
     private func replace(_ job: DownloadJob) throws {
@@ -122,6 +129,22 @@ public actor JobStore {
     private func step(_ statement: OpaquePointer?) throws {
         guard sqlite3_step(statement) == SQLITE_DONE else {
             throw JobStoreError.sqlite(handle.database.map { String(cString: sqlite3_errmsg($0)) } ?? "SQLite write failed.")
+        }
+    }
+}
+
+private extension JobStatus {
+    func allows(_ action: JobAction) -> Bool {
+        switch (self, action) {
+        case (.queued, .pause), (.queued, .cancel),
+             (.running, .pause), (.running, .cancel),
+             (.paused, .resume), (.paused, .cancel),
+             (.failed, .retry),
+             (.cancelled, .retry),
+             (.verificationRequired, .retry), (.verificationRequired, .cancel):
+            true
+        default:
+            false
         }
     }
 }

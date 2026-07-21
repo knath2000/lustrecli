@@ -16,9 +16,17 @@ swift run lustre queue https://example.com/watch-page
 swift run lustre status
 ```
 
-The first run stores a local API token in the login Keychain and records the active loopback port under Application Support. `lustre token` prints the token for entering in the web panel.
+The first run stores a local API token in the login Keychain. `lustre token` prints the token for entering in the web panel. Open `http://127.0.0.1:63406`, enter that token, then queue URLs, choose a macOS folder with the native picker, and monitor job state, live download percentage, and timestamped worker/error events. The token remains only in the current browser tab. The loopback port is fixed at `63406` across agent restarts.
 
-Direct media URLs plus static Dood/Playmogo, MixDrop, and StreamTape resolution are available. Static resolution emits the request headers needed for the resolved media URL. Downloads, transfers, and a verification bridge remain separate next steps; jobs retain the original source page URL so those stages can re-resolve instead of persisting expired CDN URLs.
+Direct media URLs plus static Dood/Playmogo, MixDrop, and StreamTape resolution are available. Queue acknowledgement is immediate; queued local jobs re-resolve their original source page in the background immediately before downloading, preserve the resolved media headers, write through a `.part` file, and save completed files under `~/Downloads/Lustre`. Select an exact quality label with `--quality`, for example `DOODSTREAM · Video`; omit it to use the first resolved quality. Jobs retain the original source page URL rather than persisting expired CDN URLs. Interactive browser verification remains a separate next step.
+
+## Remote WebDAV destinations
+
+The web panel can save named WebDAV destinations. Enter a profile name, HTTPS WebDAV base URL, username, password, and remote folder, then select it in the queue form. Passwords stay in the login Keychain; durable jobs reference only `webdav:<profile-id>` and never contain credentials.
+
+Use **Test connection** before queueing a remote job. Lustre authenticates, creates the configured remote directory when needed, writes a uniquely named temporary file, then deletes it. A passing test confirms reachability, authentication, and write permission.
+
+TLS validation is strict by default. If a private/self-signed certificate or an intentional IP-address endpoint cannot be corrected to use the certificate's DNS name, the profile form has an explicit **Trust an invalid certificate for this exact server** option. Enable it only for a server you control: it is scoped to that saved profile's exact host; other hosts retain normal system certificate validation.
 
 ## API
 
@@ -28,7 +36,12 @@ All `/v1` endpoints require `Authorization: Bearer <token>`.
 - `GET /v1/jobs`
 - `POST /v1/extract` with `{"url":"https://..."}`
 - `POST /v1/jobs` with `{"sourcePageURL":"https://...","preferredQualityLabel":"1080p","destination":"local"}`
+- `POST /v1/folders/select` opens the local macOS folder picker and returns `{"path":"/absolute/path"}`
 - `POST /v1/jobs/:id/action` with `{"action":"pause|resume|cancel|retry"}`
+- `GET /v1/destinations` lists saved non-secret WebDAV profiles
+- `POST /v1/destinations/webdav` saves a WebDAV profile and its Keychain password
+- `POST /v1/destinations/:id/test` checks WebDAV reachability, authentication, remote-directory creation, temporary write, and cleanup
+- `DELETE /v1/destinations/:id` removes a saved profile and its Keychain password
 
 ## LaunchAgent
 

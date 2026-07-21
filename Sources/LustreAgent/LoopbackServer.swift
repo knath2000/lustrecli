@@ -11,7 +11,7 @@ public final class LoopbackServer: @unchecked Sendable {
 
     public init(service: AgentService, token: String) throws {
         let parameters = NWParameters.tcp
-        parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
+        parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: AgentPaths.loopbackPort)!)
         self.listener = try NWListener(using: parameters)
         self.service = service
         self.token = token
@@ -63,6 +63,28 @@ public final class LoopbackServer: @unchecked Sendable {
             if request.method == "GET", request.path == "/v1/jobs" {
                 return json(status: 200, value: try await service.allJobs())
             }
+            if request.method == "GET", request.path == "/v1/destinations" {
+                return json(status: 200, value: await service.allRemoteDestinations())
+            }
+            if request.method == "POST", request.path == "/v1/destinations/webdav" {
+                let input = try decoder.decode(WebDAVDestinationRequest.self, from: request.body)
+                return json(status: 201, value: try await service.saveWebDAVDestination(input))
+            }
+            if request.method == "POST", request.path.hasPrefix("/v1/destinations/"), request.path.hasSuffix("/test") {
+                let segments = request.path.split(separator: "/")
+                guard segments.count == 4, let id = UUID(uuidString: String(segments[2])) else {
+                    return json(status: 400, value: ErrorResponse(error: "Invalid destination id."))
+                }
+                return json(status: 200, value: try await service.testRemoteDestination(id: id))
+            }
+            if request.method == "DELETE", request.path.hasPrefix("/v1/destinations/") {
+                let segments = request.path.split(separator: "/")
+                guard segments.count == 3, let id = UUID(uuidString: String(segments[2])) else {
+                    return json(status: 400, value: ErrorResponse(error: "Invalid destination id."))
+                }
+                try await service.removeRemoteDestination(id: id)
+                return json(status: 200, value: ["status": "removed"])
+            }
             if request.method == "POST", request.path == "/v1/extract" {
                 let input = try decoder.decode(ExtractRequest.self, from: request.body)
                 return json(status: 200, value: try await service.extract(url: input.url))
@@ -71,9 +93,12 @@ public final class LoopbackServer: @unchecked Sendable {
                 let input = try decoder.decode(CreateJobRequest.self, from: request.body)
                 return json(status: 201, value: try await service.createJob(input))
             }
+            if request.method == "POST", request.path == "/v1/folders/select" {
+                return json(status: 200, value: FolderSelection(path: try await service.selectDownloadFolder()))
+            }
             if request.method == "POST", request.path.hasPrefix("/v1/jobs/"), request.path.hasSuffix("/action") {
                 let segments = request.path.split(separator: "/")
-                guard segments.count == 5, let id = UUID(uuidString: String(segments[2])) else {
+                guard segments.count == 4, let id = UUID(uuidString: String(segments[2])) else {
                     return json(status: 400, value: ErrorResponse(error: "Invalid job id."))
                 }
                 let input = try decoder.decode(ActionRequest.self, from: request.body)
@@ -100,6 +125,10 @@ private struct ExtractRequest: Decodable {
 
 private struct ActionRequest: Decodable {
     let action: JobAction
+}
+
+private struct FolderSelection: Encodable {
+    let path: String
 }
 
 private struct HTTPRequest {

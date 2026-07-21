@@ -9,6 +9,12 @@ public enum AgentPaths {
 
     public static let database = applicationSupport.appending(path: "jobs.sqlite3")
     public static let endpoint = applicationSupport.appending(path: "endpoint.json")
+    public static let remoteDestinations = applicationSupport.appending(path: "remote-destinations.json")
+    public static let loopbackPort: UInt16 = 63406
+    public static let downloads: URL = {
+        let base = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask)[0]
+        return base.appending(path: "Lustre", directoryHint: .isDirectory)
+    }()
 
     public static func prepare() throws {
         try FileManager.default.createDirectory(at: applicationSupport, withIntermediateDirectories: true)
