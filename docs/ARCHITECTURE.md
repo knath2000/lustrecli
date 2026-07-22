@@ -16,6 +16,12 @@ Lustre Agent is a macOS 14+ local control plane for the LustreStudio download pi
 | `lustre` | Thin CLI client for extraction, queue mutation, status, and job actions. |
 | `web` | Next.js/React/TypeScript development UI for the future hosted product; currently uses a server-side loopback bridge to exercise the real local agent API. |
 
+### Runtime roles and packaging direction
+
+The persistent-worker boundary is essential even though the executable packaging may change. Downloads, retries, durable scheduling, browser control, remote commands, filesystem access, and WebDAV uploads must continue after a short-lived command exits. Today `lustre-agent` provides that lifetime while `lustre` is an optional thin API client for scripting, diagnostics, token retrieval, queue mutation, and job control.
+
+The capabilities can be shipped in one executable without collapsing those runtime roles: a future `lustre daemon` mode could host `LustreAgent` under `launchd`, while ordinary `lustre` invocations remain short-lived clients. This would remove a separately named binary and manual agent management, not the persistent local worker architecture. A foreground-only CLI would intentionally give up durable queues, browser/remote control, retry scheduling, reboot recovery, and transfers that survive terminal closure.
+
 ## Resolution contract
 
 `StaticProviderResolver` returns a `ProviderResolution` containing the original source page, provider, trace, media qualities, request headers, and resolution method. Resolved CDN URLs are response data only: queued jobs persist the original page URL and preferred quality label so future worker, retry, and resume paths can resolve fresh media URLs.
@@ -74,11 +80,15 @@ The root loopback page is an authenticated Monitor/Operate surface at `http://12
 
 ## Lustre Cloud web application
 
-`web/` is the first implementation slice of the MyJDownloader-style product direction. It is a Next.js 16 App Router application with React, TypeScript, Tailwind CSS, and a liquid-glass design system derived from the Google Stitch workspace. The current device workspace and Queue Transfer sheet are real Monitor/Operate surfaces rather than static mockups:
+`web/` is the first implementation slice of the MyJDownloader-style product direction. It is a Next.js 16 App Router application with React, TypeScript, Tailwind CSS, and a liquid-glass design system derived from the Google Stitch workspace. The current device workspace, Downloads ledger and inspector, Destinations manager, Activity timeline, Settings surface, and Queue Transfer sheet are real operational surfaces rather than static mockups:
 
 - The browser keeps the local agent token in React memory only; it is discarded on disconnect or tab reload.
 - A server-side catch-all route forwards authenticated `/v1/*` calls only to `127.0.0.1:63406`. Path validation prevents traversal or proxying arbitrary hosts.
-- Two-second polling displays durable jobs, byte progress, status messages, supported state actions, saved non-secret WebDAV profiles, and bounded worker logs from the Swift agent.
+- Session-configurable polling displays durable jobs, byte progress, status messages, supported state actions, saved non-secret WebDAV profiles, and bounded worker logs from the Swift agent.
+- The Downloads surface filters and searches the complete live job collection client-side, resolves destination profile names, and exposes a selected job's source, quality, progress, timestamps, valid actions, and complete bounded worker event log.
+- The Destinations surface shows the built-in local target and saved WebDAV profiles, derives real per-target job usage, creates profiles through the authenticated agent, runs the agent's write-and-cleanup connection test, and removes profiles after explicit confirmation. Password fields are never retained after submission or returned by the agent.
+- The Activity surface derives a searchable, categorized, severity-aware timeline from the bounded durable logs already attached to agent jobs. It does not fabricate device-wide events that the current API cannot provide.
+- Settings controls the current browser tab's real polling cadence, manual refresh, and disconnect behavior. Unsupported agent settings are explicitly identified rather than represented by non-functional controls.
 - Queue Transfer submits real `CreateJobRequest` values and can target local storage or an existing `webdav:<profile-id>` destination. WebDAV passwords remain in the agent's Keychain.
 - Swift's default `JSONEncoder` emits `Date` as Foundation reference-date seconds. The web boundary normalizes those numeric values while also accepting ISO-8601 strings, so sorting and time display remain compatible with a future API encoding change.
 
@@ -87,7 +97,7 @@ This bridge is deliberately development-only. The hosted service must not attemp
 ## Deliberate next seams
 
 1. Add hosted account authentication, device enrollment, revocation, and an outbound agent realtime channel without exposing the loopback API.
-2. Add device selection and transfer-detail/history screens to the shared web design system.
+2. Add device enrollment/selection and server-backed pagination as job histories grow.
 3. Add a configurable bounded transfer scheduler with global and per-destination concurrency limits.
 4. Port Vidara's API/HLS resolver.
 5. Add resumable `.part` transfers and bounded automatic re-resolution for expired media responses.
@@ -95,4 +105,4 @@ This bridge is deliberately development-only. The hosted service must not attemp
 
 ## Validation
 
-`swift test` verifies SQLite persistence, AllPornStream metadata pairing/concurrency/diagnostics, Agent-to-Core resolution wiring, Playmogo URL/header construction, MixDrop mirror/media validation, StreamTape redirect handling, Cloudflare challenge classification, and queued-job re-resolution/header handoff. `swift build -c release` validates the production executables. In `web/`, `npm test`, `npm run lint`, and `npm run build` validate agent-date compatibility, loopback proxy restrictions, frontend quality, and the production Next.js bundle.
+`swift test` verifies SQLite persistence, AllPornStream metadata pairing/concurrency/diagnostics, Agent-to-Core resolution wiring, Playmogo URL/header construction, MixDrop mirror/media validation, StreamTape redirect handling, Cloudflare challenge classification, and queued-job re-resolution/header handoff. `swift build -c release` validates the production executables. In `web/`, `npm test`, `npm run lint`, and `npm run build` validate agent-date compatibility, loopback proxy restrictions, Downloads filtering, destination presentation, Activity derivation/filtering, session polling settings, frontend quality, and the production Next.js bundle.
