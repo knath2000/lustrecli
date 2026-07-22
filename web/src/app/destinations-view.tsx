@@ -82,6 +82,7 @@ export function DestinationsView({ destinations, jobs, error, onSave, onTest, on
     if (!window.confirm(`Remove ${profile.name}? Existing job records will keep their destination identifier, but new transfers cannot use this profile.`)) return;
     setDeletingId(profile.id);
     try { await onDelete(profile.id); }
+    catch (reason) { setTests((current) => ({ ...current, [profile.id]: { kind: "error", message: reason instanceof Error ? reason.message : "Unable to remove this destination." } })); }
     finally { setDeletingId(null); }
   };
 

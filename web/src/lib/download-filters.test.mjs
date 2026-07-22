@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { filterAndSortJobs, jobProgressLabel, jobStatusCounts } from "./download-filters.ts";
+import { filterAndSortJobs, jobProgressLabel, jobProgressPercent, jobStatusCounts } from "./download-filters.ts";
 
 const jobs = [
   { id: "completed", sourcePageURL: "https://example.com/archive.zip", message: "Completed", destination: "local", status: "completed", updatedAt: 100 },
@@ -32,4 +32,11 @@ test("jobProgressLabel does not describe terminal jobs as working", () => {
   assert.equal(jobProgressLabel("completed", undefined), "Completed");
   assert.equal(jobProgressLabel("running", undefined), "Working");
   assert.equal(jobProgressLabel("running", 0.42), "42%");
+});
+
+test("jobProgressPercent clamps malformed or transient API progress", () => {
+  assert.equal(jobProgressPercent(-0.1), 0);
+  assert.equal(jobProgressPercent(0.456), 46);
+  assert.equal(jobProgressPercent(1.4), 100);
+  assert.equal(jobProgressPercent(Number.NaN), undefined);
 });
