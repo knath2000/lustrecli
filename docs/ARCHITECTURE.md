@@ -14,6 +14,7 @@ Lustre Agent is a macOS 14+ local control plane for the LustreStudio download pi
 | `LustreAgent` | Agent service, local download execution, authenticated `127.0.0.1` HTTP server, and bundled web panel. |
 | `lustre-agent` | Long-running per-user executable; creates the Keychain token, binds the fixed loopback endpoint `127.0.0.1:63406`, and can generate a LaunchAgent plist. |
 | `lustre` | Thin CLI client for extraction, queue mutation, status, and job actions. |
+| `web` | Next.js/React/TypeScript development UI for the future hosted product; currently uses a server-side loopback bridge to exercise the real local agent API. |
 
 ## Resolution contract
 
@@ -71,13 +72,27 @@ Creating a `destination: "local"` job durably acknowledges it as `queued` immedi
 
 The root loopback page is an authenticated Monitor/Operate surface at `http://127.0.0.1:63406`. It holds the token in the browser tab only, queues URLs with an optional exact quality label, opens the macOS folder chooser through the authenticated local API, manages named WebDAV destinations, can test their reachability/writeability, polls job state and live percentage every two seconds, exposes only valid state actions (pause/cancel, resume, or retry), and displays each durable job's bounded worker/event log. The UI escapes all server-provided text before rendering it.
 
+## Lustre Cloud web application
+
+`web/` is the first implementation slice of the MyJDownloader-style product direction. It is a Next.js 16 App Router application with React, TypeScript, Tailwind CSS, and a liquid-glass design system derived from the Google Stitch workspace. The current device workspace and Queue Transfer sheet are real Monitor/Operate surfaces rather than static mockups:
+
+- The browser keeps the local agent token in React memory only; it is discarded on disconnect or tab reload.
+- A server-side catch-all route forwards authenticated `/v1/*` calls only to `127.0.0.1:63406`. Path validation prevents traversal or proxying arbitrary hosts.
+- Two-second polling displays durable jobs, byte progress, status messages, supported state actions, saved non-secret WebDAV profiles, and bounded worker logs from the Swift agent.
+- Queue Transfer submits real `CreateJobRequest` values and can target local storage or an existing `webdav:<profile-id>` destination. WebDAV passwords remain in the agent's Keychain.
+- Swift's default `JSONEncoder` emits `Date` as Foundation reference-date seconds. The web boundary normalizes those numeric values while also accepting ISO-8601 strings, so sorting and time display remain compatible with a future API encoding change.
+
+This bridge is deliberately development-only. The hosted service must not attempt to call a visitor's loopback address. Production remote control will keep the Swift agent authoritative for downloads, paths, SQLite state, and Keychain secrets while the agent establishes an outbound authenticated realtime connection to the cloud control plane. Browser account identity and paired-device identity remain separate trust domains.
+
 ## Deliberate next seams
 
-1. Port Vidara's API/HLS resolver.
-2. Add download byte counts and resumable `.part` transfers.
-3. Add bounded automatic re-resolution for expired media responses.
-4. Isolate WebKit in a visible verification bridge for actual interactive challenges; it must not enter `LustreCore`.
+1. Add hosted account authentication, device enrollment, revocation, and an outbound agent realtime channel without exposing the loopback API.
+2. Add device selection and transfer-detail/history screens to the shared web design system.
+3. Add a configurable bounded transfer scheduler with global and per-destination concurrency limits.
+4. Port Vidara's API/HLS resolver.
+5. Add resumable `.part` transfers and bounded automatic re-resolution for expired media responses.
+6. Isolate WebKit in a visible verification bridge for actual interactive challenges; it must not enter `LustreCore`.
 
 ## Validation
 
-`swift test` verifies SQLite persistence, AllPornStream metadata pairing/concurrency/diagnostics, Agent-to-Core resolution wiring, Playmogo URL/header construction, MixDrop mirror/media validation, StreamTape redirect handling, Cloudflare challenge classification, and queued-job re-resolution/header handoff. `swift build -c release` validates the production executables.
+`swift test` verifies SQLite persistence, AllPornStream metadata pairing/concurrency/diagnostics, Agent-to-Core resolution wiring, Playmogo URL/header construction, MixDrop mirror/media validation, StreamTape redirect handling, Cloudflare challenge classification, and queued-job re-resolution/header handoff. `swift build -c release` validates the production executables. In `web/`, `npm test`, `npm run lint`, and `npm run build` validate agent-date compatibility, loopback proxy restrictions, frontend quality, and the production Next.js bundle.
