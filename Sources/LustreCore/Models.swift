@@ -1,5 +1,16 @@
 import Foundation
 
+public enum PornHubAuthState: String, Codable, Equatable, Sendable { case signedOut, signingIn, signedIn, expired }
+
+public struct PornHubAuthStatus: Codable, Equatable, Sendable {
+    public let state: PornHubAuthState
+    public let displayName: String?
+    public let lastValidatedAt: Date?
+    public init(state: PornHubAuthState, displayName: String? = nil, lastValidatedAt: Date? = nil) {
+        self.state = state; self.displayName = displayName; self.lastValidatedAt = lastValidatedAt
+    }
+}
+
 public enum JobStatus: String, Codable, Sendable {
     case queued
     case running
@@ -15,6 +26,7 @@ public enum JobAction: String, Codable, Sendable {
     case resume
     case cancel
     case retry
+    case forceStart
 }
 
 public struct JobLogEntry: Codable, Equatable, Sendable {
@@ -37,10 +49,14 @@ public struct JobLogEntry: Codable, Equatable, Sendable {
 public enum ProviderKind: String, Codable, Sendable {
     case direct
     case allPornStream
+    case hqPorner = "hqporner"
     case doodStream
     case myDaddy
     case mixDrop
     case streamTape
+    case luluStream
+    case vidara
+    case pornHub = "pornhub"
 }
 
 public enum ProviderAttemptOutcome: String, Codable, Sendable {
@@ -72,17 +88,41 @@ public struct ProviderAttempt: Codable, Equatable, Sendable {
     }
 }
 
+public enum MediaKind: String, Codable, Sendable {
+    case direct
+    case hls
+    case ytDlp = "yt-dlp"
+}
+
 public struct ResolvedQuality: Codable, Equatable, Sendable {
     public let label: String
     public let url: URL
     public let headers: [String: String]
     public let resolutionMethod: String
+    public let mediaKind: MediaKind
+    public let formatSelector: String?
 
-    public init(label: String, url: URL, headers: [String: String] = [:], resolutionMethod: String) {
+    public init(label: String, url: URL, headers: [String: String] = [:], resolutionMethod: String, mediaKind: MediaKind = .direct, formatSelector: String? = nil) {
         self.label = label
         self.url = url
         self.headers = headers
         self.resolutionMethod = resolutionMethod
+        self.mediaKind = mediaKind
+        self.formatSelector = formatSelector
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case label, url, headers, resolutionMethod, mediaKind, formatSelector
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        label = try container.decode(String.self, forKey: .label)
+        url = try container.decode(URL.self, forKey: .url)
+        headers = try container.decodeIfPresent([String: String].self, forKey: .headers) ?? [:]
+        resolutionMethod = try container.decode(String.self, forKey: .resolutionMethod)
+        mediaKind = try container.decodeIfPresent(MediaKind.self, forKey: .mediaKind) ?? .direct
+        formatSelector = try container.decodeIfPresent(String.self, forKey: .formatSelector)
     }
 }
 

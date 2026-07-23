@@ -65,6 +65,17 @@ public final class LoopbackServer: @unchecked Sendable {
             if request.method == "GET", request.path == "/v1/jobs" {
                 return json(status: 200, value: try await service.allJobs())
             }
+            if request.method == "GET", routePath == "/v1/auth/pornhub" {
+                return json(status: 200, value: await service.pornHubAuthStatus())
+            }
+            if request.method == "POST", routePath == "/v1/auth/pornhub/login" {
+                do { return json(status: 200, value: try await service.signInWithPornHub()) }
+                catch let error as PornHubAuthError { return json(status: authStatusCode(error), value: ErrorResponse(error: error.errorDescription ?? "PornHub sign-in failed.")) }
+            }
+            if request.method == "DELETE", routePath == "/v1/auth/pornhub" {
+                do { return json(status: 200, value: try await service.signOutOfPornHub()) }
+                catch let error as PornHubAuthError { return json(status: authStatusCode(error), value: ErrorResponse(error: error.errorDescription ?? "PornHub sign-out failed.")) }
+            }
             if request.method == "GET", routePath == "/v1/feed/sites" {
                 return json(status: 200, value: await service.feedSites())
             }
@@ -130,6 +141,14 @@ public final class LoopbackServer: @unchecked Sendable {
             return HTTPResponse(status: status, headers: ["Content-Type": "application/json"], body: try encoder.encode(value))
         } catch {
             return .text(status: 500, "Response encoding failed.")
+        }
+    }
+
+    private func authStatusCode(_ error: PornHubAuthError) -> Int {
+        switch error {
+        case .signingIn: 409
+        case .signedOut, .cancelled, .expired, .invalidCookieState: 400
+        case .helperUnavailable, .helperFailed, .timeout, .storageUnavailable: 503
         }
     }
 }
@@ -227,7 +246,7 @@ private final class HTTPConnection: @unchecked Sendable {
     }
 
     private func send(_ response: HTTPResponse) {
-        let reason = [200: "OK", 201: "Created", 400: "Bad Request", 401: "Unauthorized", 404: "Not Found", 500: "Internal Server Error", 503: "Service Unavailable"][response.status] ?? "OK"
+        let reason = [200: "OK", 201: "Created", 400: "Bad Request", 401: "Unauthorized", 404: "Not Found", 409: "Conflict", 500: "Internal Server Error", 503: "Service Unavailable"][response.status] ?? "OK"
         var header = "HTTP/1.1 \(response.status) \(reason)\r\nContent-Length: \(response.body.count)\r\nConnection: close\r\n"
         for (name, value) in response.headers { header += "\(name): \(value)\r\n" }
         header += "\r\n"

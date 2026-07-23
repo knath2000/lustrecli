@@ -17,6 +17,14 @@ struct LustreCLI {
             case "status":
                 let jobs = try await client.jobs()
                 try printJSON(jobs)
+            case "auth":
+                guard arguments.count == 2 else { throw CLIError.usage }
+                switch arguments[1] {
+                case "status": try printJSON(try await client.pornHubAuthStatus())
+                case "login": try printJSON(try await client.signInWithPornHub())
+                case "logout": try printJSON(try await client.signOutOfPornHub())
+                default: throw CLIError.usage
+                }
             case "extract":
                 guard arguments.count == 2, let url = URL(string: arguments[1]) else { throw CLIError.usage }
                 let result = try await client.extract(url: url)
@@ -42,6 +50,10 @@ struct LustreCLI {
             case "pause", "resume", "cancel", "retry":
                 guard arguments.count == 2, let id = UUID(uuidString: arguments[1]), let action = JobAction(rawValue: command) else { throw CLIError.usage }
                 let job = try await client.apply(action, to: id)
+                try printJSON(job)
+            case "force-start":
+                guard arguments.count == 2, let id = UUID(uuidString: arguments[1]) else { throw CLIError.usage }
+                let job = try await client.apply(.forceStart, to: id)
                 try printJSON(job)
             default:
                 throw CLIError.usage
@@ -72,10 +84,12 @@ private enum CLIError: Error, LocalizedError {
         Usage:
           lustre token
           lustre status
+          lustre auth status|login|logout
           lustre extract <url>
           lustre feed sites
-          lustre feed list --site allpornstream [--page <number>]
+          lustre feed list --site allpornstream|hqporner|onlyfan420|pornhub [--page <number>]
           lustre queue <url> [--quality <label>] [--destination <name>]
+          lustre force-start <job-id>
           lustre pause|resume|cancel|retry <job-id>
         """
     }

@@ -55,7 +55,7 @@ function FeedThumbnail({ item }: { item: FeedItem }) {
 
 export function FeedView({ destinations, jobs, loadSites, loadPage, queueItem, onQueued }: FeedViewProps) {
   const [sites, setSites] = useState<FeedSite[]>([]);
-  const [siteID, setSiteID] = useState<FeedSite["id"]>("allpornstream");
+  const [siteID, setSiteID] = useState<FeedSite["id"]>("");
   const [items, setItems] = useState<FeedItem[]>([]);
   const [page, setPage] = useState(0);
   const [hasMore, setHasMore] = useState(true);
@@ -65,6 +65,7 @@ export function FeedView({ destinations, jobs, loadSites, loadPage, queueItem, o
   const [queueing, setQueueing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const selectedSite = sites.find((site) => site.id === siteID);
 
   const fetchPage = useCallback(async (nextPage: number, replace = false) => {
     setLoading(true);
@@ -84,9 +85,14 @@ export function FeedView({ destinations, jobs, loadSites, loadPage, queueItem, o
 
   useEffect(() => {
     let active = true;
-    void Promise.all([loadSites(), loadPage("allpornstream", 1)]).then(([nextSites, result]) => {
+    void loadSites().then(async (nextSites) => {
+      if (!active) return;
+      const initialSite = nextSites[0];
+      if (!initialSite) throw new Error("The agent did not report any feed sources.");
+      const result = await loadPage(initialSite.id, 1);
       if (!active) return;
       setSites(nextSites);
+      setSiteID(initialSite.id);
       setItems(result.items);
       setPage(result.page);
       setHasMore(result.hasMore);
@@ -98,6 +104,23 @@ export function FeedView({ destinations, jobs, loadSites, loadPage, queueItem, o
     });
     return () => { active = false; };
   }, [loadPage, loadSites]);
+
+  const selectSite = async (nextSite: FeedSite["id"]) => {
+    setSiteID(nextSite);
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await loadPage(nextSite, 1);
+      setItems(result.items);
+      setPage(result.page);
+      setHasMore(result.hasMore);
+      setSelection(new Set());
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Unable to load the feed.");
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const selectedItems = useMemo(() => items.filter((item) => selection.has(item.id)), [items, selection]);
 
@@ -118,11 +141,11 @@ export function FeedView({ destinations, jobs, loadSites, loadPage, queueItem, o
   return <div className="feed-page">
     <header className="feed-header">
       <div><p className="eyebrow">Agent-backed discovery</p><h2>Feed</h2><p>Browse supported source pages and queue durable transfers without exposing provider media URLs.</p></div>
-      <a className="feed-source-link" href={sites.find((site) => site.id === siteID)?.homeURL ?? "https://allpornstream.com"} target="_blank" rel="noreferrer">Open source ↗</a>
+      <a className="feed-source-link" href={selectedSite?.homeURL ?? "#"} target="_blank" rel="noreferrer">Open source ↗</a>
     </header>
 
     <section className="feed-toolbar glass-panel" aria-label="Feed controls">
-      <label><span>Source</span><select value={siteID} onChange={(event) => setSiteID(event.target.value as FeedSite["id"])}>{sites.length ? sites.map((site) => <option key={site.id} value={site.id}>{site.displayName}</option>) : <option value="allpornstream">AllPornStream</option>}</select></label>
+      <label><span>Source</span><select value={siteID} disabled={!sites.length} onChange={(event) => void selectSite(event.target.value as FeedSite["id"])}>{sites.map((site) => <option key={site.id} value={site.id}>{site.displayName}</option>)}</select></label>
       <label><span>Destination</span><select value={destination} onChange={(event) => setDestination(event.target.value)}><option value="local">Local Downloads</option>{destinations.map((item) => <option key={item.id} value={`webdav:${item.id}`}>{item.name} · WebDAV</option>)}</select></label>
       <button className="secondary-button" disabled={loading} onClick={() => void fetchPage(1, true)}>{loading && page <= 1 ? "Refreshing…" : "Refresh feed"}</button>
       <p>{items.length} discovered</p>
@@ -135,7 +158,7 @@ export function FeedView({ destinations, jobs, loadSites, loadPage, queueItem, o
       <strong>{selection.size} selected</strong><span>Queue requests run three at a time.</span><button onClick={() => setSelection(new Set())}>Clear</button><button className="queue-button" disabled={queueing} onClick={() => void queueItems(selectedItems)}>{queueing ? "Queueing…" : "Queue selected"}</button>
     </section>}
 
-    <section className="feed-grid" aria-label="AllPornStream feed">
+    <section className="feed-grid" aria-label={`${selectedSite?.displayName ?? "Video"} feed`}>
       {items.map((item) => {
         const state = feedTransferState(item.sourcePageURL, jobs);
         const selected = selection.has(item.id);
@@ -145,7 +168,7 @@ export function FeedView({ destinations, jobs, loadSites, loadPage, queueItem, o
             <span className={`feed-transfer-state state-${state}`}>{state === "available" ? "Ready" : state.replace(/([A-Z])/g, " $1")}</span>
             <button className="feed-select" aria-label={`${selected ? "Deselect" : "Select"} ${item.title}`} aria-pressed={selected} onClick={() => setSelection((current) => toggleFeedSelection(current, item.id))}>{selected ? "✓" : "+"}</button>
           </div>
-          <div className="feed-card-copy"><p>{item.studio ?? "AllPornStream"}</p><h3>{item.title}</h3><dl><div><dt>Published</dt><dd>{new Date(agentDateMilliseconds(item.uploadedAt)).toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" })}</dd></div><div><dt>Views</dt><dd>{compactNumber(item.viewCount)}</dd></div></dl></div>
+          <div className="feed-card-copy"><p>{item.studio ?? selectedSite?.displayName ?? "Video"}</p><h3>{item.title}</h3><dl><div><dt>Published</dt><dd>{new Date(agentDateMilliseconds(item.uploadedAt)).toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" })}</dd></div><div><dt>Views</dt><dd>{compactNumber(item.viewCount)}</dd></div></dl></div>
           <footer><a href={item.sourcePageURL} target="_blank" rel="noreferrer">View source ↗</a><button disabled={queueing || state === "queued" || state === "running"} onClick={() => void queueItems([item])}>{state === "queued" || state === "running" ? "In queue" : "Queue"}</button></footer>
         </article>;
       })}

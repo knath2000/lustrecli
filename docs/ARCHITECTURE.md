@@ -11,8 +11,9 @@ Lustre Agent is a macOS 14+ local control plane for the LustreStudio download pi
 | Component | Responsibility |
 | --- | --- |
 | `LustreCore` | Public URL validation, AllPornStream metadata parsing, static provider resolution, resolved-media provenance and headers, SQLite job persistence, and the API client. |
-| `LustreAgent` | Agent service, local download execution, authenticated `127.0.0.1` HTTP server, and bundled web panel. |
+| `LustreAgent` | Agent service, local download and yt-dlp execution, authenticated `127.0.0.1` HTTP server, and bundled web panel. |
 | `lustre-agent` | Long-running per-user executable; creates the Keychain token, binds the fixed loopback endpoint `127.0.0.1:63406`, and can generate a LaunchAgent plist. |
+| `lustre-auth-helper` | Short-lived visible AppKit/WebKit PornHub sign-in process with a nonpersistent website store and strict HTTPS provider navigation. |
 | `lustre` | Thin CLI client for extraction, queue mutation, status, and job actions. |
 | `web` | Next.js/React/TypeScript development UI for the future hosted product; currently uses a server-side loopback bridge to exercise the real local agent API. |
 
@@ -29,6 +30,7 @@ The capabilities can be shipped in one executable without collapsing those runti
 Supported resolution paths:
 
 - Direct media URLs: MP4, HLS, WebM, and MOV.
+- PornHub public video pages: accept only canonical HTTPS `pornhub.com`/`www.pornhub.com/view_video.php?viewkey=...` URLs, run an allowlisted yt-dlp binary inside `LustreAgent`, return complete audio-and-video formats only, and expose durable source URLs plus exact safe format IDs rather than signed CDN URLs. Browser-cookie import and invisible authentication are deliberately unsupported.
 - AllPornStream posts: parse Next.js Flight or structured post metadata, pair provider links with embeds, retain stable provider diagnostics, resolve at most three providers concurrently, and preserve the original post URL as the durable source.
 - Dood/Playmogo: trusted AllPornStream Dood aliases canonicalize to Playmogo, follow the static `pass_md5` path, construct the signed CloudAta URL, and retain `Referer`, Chrome user-agent, `Accept`, and language headers.
 - MixDrop: extracts static `MDCore.wurl`, source-file, or `data-src` media configuration, falls back to the current `miiiixdrop.net` mirror only when the initial page has no usable media, and accepts only MP4 or signed `mxcontent.net/d/...` media paths.
@@ -48,10 +50,12 @@ Creating a job durably acknowledges it as `queued` immediately. The scheduler st
 - Downloads accept only video, audio, or `application/octet-stream` response types, reject non-2xx responses and undersized payloads, and never finalize typical error documents as media.
 - URLSession writes to a temporary location; Lustre moves it to a `.part` file and atomically renames that to the final sanitized filename after validation.
 - Pause/cancel cancels the active transfer. Resume/retry queues a fresh resolution, never an expired CDN URL.
+- Force Start applies only to an explicitly selected queued job. It may run beside occupied ordinary capacity without changing the scheduler's global one-transfer default or starting unrelated queued jobs.
 - A `webdav:<profile-id>` destination re-resolves the source exactly like a local job, retrieves the profile password from Keychain, and uploads to the configured remote folder. Jobs and SQLite store only the profile identifier, never the password.
 - Known-length compatible media streams through the local agent directly to a WebDAV `PUT` without retaining a complete local media file. Unknown-length and range-sensitive sources use safe temporary local staging, followed by upload and cleanup.
 - WebDAV directory creation uses `MKCOL`; connection testing verifies authentication, directory creation, a temporary write, and deletion before a job is queued.
 - Interactive browser verification remains separate from Foundation-only Core/Agent code.
+- PornHub yt-dlp qualities are materialized into a unique local directory with a fixed restricted output template. Local results move atomically from the private working directory; WebDAV results upload through the staged-file path and always clean staging. No shell command, arbitrary executable, raw `Cookie:` argument, or user-controlled yt-dlp argument is used.
 
 ## Local security and state
 
@@ -68,18 +72,25 @@ Creating a job durably acknowledges it as `queued` immediately. The scheduler st
 | Method | Route | Purpose |
 | --- | --- | --- |
 | `GET` | `/v1/jobs` | List durable jobs. |
+| `GET` | `/v1/auth/pornhub` | Return status-only PornHub session state. |
+| `POST` | `/v1/auth/pornhub/login` | Open and await the visible provider-owned sign-in flow. |
+| `DELETE` | `/v1/auth/pornhub` | Remove PornHub session state from Keychain. |
 | `GET` | `/v1/feed/sites` | List normalized feed sources supported by the agent. |
-| `GET` | `/v1/feed/items?site=allpornstream&page=N` | Fetch a normalized, paginated AllPornStream card feed. |
+| `GET` | `/v1/feed/items?site=<site>&page=N` | Fetch a normalized page from AllPornStream, HQPorner, OnlyFan420, public PornHub, or an available authenticated PornHub section. |
 | `POST` | `/v1/extract` | Resolve a URL without queueing it. |
 | `POST` | `/v1/jobs` | Create a durable job from its original page URL. |
 | `POST` | `/v1/folders/select` | Show a native macOS folder picker and return a validated absolute local destination. |
-| `POST` | `/v1/jobs/:id/action` | Pause, resume, cancel, or retry a job. |
+| `POST` | `/v1/jobs/:id/action` | Pause, resume, cancel, retry, or Force Start a job. |
 | `GET` | `/v1/destinations` | List saved non-secret WebDAV profiles. |
 | `POST` | `/v1/destinations/webdav` | Save a WebDAV profile and its Keychain password. |
 | `POST` | `/v1/destinations/:id/test` | Validate WebDAV reachability, authentication, remote write, and cleanup. |
 | `DELETE` | `/v1/destinations/:id` | Delete a WebDAV profile and its Keychain password. |
 
 ## Web panel
+
+PornHub feed cards retain canonical viewkeys, source ordering, bounded previews, parsed counts, and exact or clock-derived approximate dates. Feed redirects accept HTTPS PornHub hosts only and challenge/login pages return an explicit error. Authenticated Subscriptions, Liked, and Favorites are exposed only after visible sign-in and only where the page is truthfully represented as video cards.
+
+HQPorner feed cards retain canonical source-page URLs and truthful approximate listing dates. Static extraction validates the HTTPS HQPorner page and redirect host, selects only trusted mydaddy iframe candidates, and delegates source parsing to the shared mydaddy resolver. Resolved embed and CDN URLs remain transient and are never stored in durable jobs.
 
 The root loopback page is an authenticated Monitor/Operate surface at `http://127.0.0.1:63406`. It holds the token in the browser tab only, queues URLs with an optional exact quality label, opens the macOS folder chooser through the authenticated local API, manages named WebDAV destinations, can test their reachability/writeability, polls job state and live percentage every two seconds, exposes only valid state actions (pause/cancel, resume, or retry), and displays each durable job's bounded worker/event log. The UI escapes all server-provided text before rendering it.
 
@@ -105,10 +116,18 @@ This bridge is deliberately development-only. The hosted service must not attemp
 1. Add hosted account authentication, device enrollment, revocation, and an outbound agent realtime channel without exposing the loopback API.
 2. Add device enrollment/selection and server-backed pagination as job histories grow.
 3. Make the current single-transfer scheduler limit configurable and add per-destination limits.
-4. Port Vidara's API/HLS resolver.
-5. Add resumable `.part` transfers and bounded automatic re-resolution for expired media responses.
-6. Isolate WebKit in a visible verification bridge for actual interactive challenges; it must not enter `LustreCore`.
+4. Add resumable `.part` transfers and bounded automatic re-resolution for expired media responses.
+5. Isolate WebKit in a visible verification bridge for actual interactive challenges; it must not enter `LustreCore`.
 
 ## Validation
 
-`swift test` verifies SQLite persistence, AllPornStream feed parsing and provider pairing/concurrency/diagnostics, mydaddy escaped-source parsing and required request headers, partial aggregate success, Agent-to-Core resolution wiring, serialized seedbox queueing, Playmogo URL/header construction, MixDrop mirror/media validation, StreamTape redirect handling, Cloudflare challenge classification, and queued-job re-resolution/header handoff. `swift build -c release` validates the production executables. In `web/`, `npm test`, `npm run lint`, and `npm run build` validate feed behavior, query-preserving loopback proxy restrictions, hover-frame selection, agent-date compatibility, Downloads filtering, destination presentation, Activity derivation/filtering, session polling settings, frontend quality, and the production Next.js bundle.
+`swift test` verifies SQLite persistence, Force Start isolation, serialized scheduling, AllPornStream/OnlyFan420/HQPorner/PornHub feeds, provider pairing and diagnostics, Lulu/Vidara HLS handling, mydaddy parsing, yt-dlp format/process safety, authenticated cookie sanitization and routing, Keychain failure semantics, helper lifecycle, private cookie-file cleanup, WebDAV staging, cancellation, and transfer-time re-resolution. The accepted 2026-07-23 state passes 98 Swift tests and `swift build -c release`. In `web/`, 28 tests plus `npm run lint` and `npm run build` validate the proxy, generic feed IDs, previews, Force Start presentation, live operational views, TypeScript, and the production bundle.
+## PornHub authentication and authenticated feeds
+
+`LustreCore` contains only the public `PornHubAuthStatus` model and feed contract. `LustreAgent` owns the private cookie store, helper process launch, redirect-safe request handling, and yt-dlp cookie-file lifecycle. `lustre-auth-helper` is a dedicated AppKit/WebKit executable with its own visible NSApplication event loop; it only permits HTTPS PornHub hosts and valid subdomains, rejects popups/downloads/external navigation, and emits a fixed status token. It persists Codable cookie records directly to the fixed `com.pmvdl.lustre-agent` Keychain service/account after requiring the `il` session cookie and a bounded authenticated-page navigation.
+
+The agent derives the helper from its canonical sibling directory and never accepts a configured executable path or user-controlled helper arguments. It caps helper output/time, terminates timed-out/cancelled helpers, and does not relay stdout/stderr to any API. Auth routes remain protected by the existing loopback bearer token: `GET /v1/auth/pornhub`, `POST /v1/auth/pornhub/login`, and `DELETE /v1/auth/pornhub`.
+
+Cookies never leave the agent except in a private HTTPS request to an exact PornHub host or in a per-invocation 0600 Netscape file passed by pathname to yt-dlp. Redirects carrying a session are denied outside trusted HTTPS PornHub hosts. Durable jobs retain only canonical PornHub page URLs and quality labels, so transfer-time resolution never persists a signed media URL or cookie-file path.
+
+The helper's `WKWebsiteDataStore` is nonpersistent and process-local. Signing out removes the Keychain record; any helper-store cleanup only applies to the short-lived helper process and cannot claim to delete persistent WebKit data.

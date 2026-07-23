@@ -37,7 +37,15 @@ Open `http://localhost:3000`, run `swift run lustre token` in a separate termina
 
 `lustre` is intentionally a thin optional administrative client for scripting, diagnostics, token retrieval, queue operations, and job control. A future packaging simplification may ship one `lustre` binary with a persistent `lustre daemon` mode managed by `launchd`, but durable background execution must remain a persistent local process even if the separate `lustre-agent` executable name is removed.
 
-Direct media URLs plus static Dood/Playmogo, MixDrop, StreamTape, and mydaddy.cc resolution are available. mydaddy embeds are fetched with their required HQPorner request context, support normal or escaped `<source>` attributes, deduplicate qualities, and preserve media headers. AllPornStream resolves supported candidates concurrently, retains per-provider failures, and keeps successful qualities when another provider fails.
+Direct media URLs plus static Dood/Playmogo, MixDrop, StreamTape, mydaddy.cc, LuluStream, and Vidara resolution are available. mydaddy embeds are fetched with their required HQPorner request context, support normal or escaped `<source>` attributes, deduplicate qualities, and preserve media headers. AllPornStream resolves supported candidates concurrently, retains per-provider failures, and keeps successful qualities when another provider fails.
+
+PornHub and HQPorner are available through the generic feed API and web Feed selector. PornHub keeps canonical `view_video.php?viewkey=...` sources and does not expose an iframe or import browser cookies. Public PornHub extraction and transfer require `yt-dlp` at `/opt/homebrew/bin/yt-dlp`, `/usr/local/bin/yt-dlp`, or `/opt/local/bin/yt-dlp`; the Agent persists only the source page and exact format label/ID, then re-runs yt-dlp at transfer time.
+
+HQPorner listing pages expose durable `/hdporn/...` source URLs, scene previews capped at four, zero views unless the site supplies a count, and explicitly approximate listing dates. Resolution accepts only canonical HTTPS HQPorner video pages and trusted mydaddy embeds, then delegates media parsing to the existing mydaddy resolver while retaining the HQPorner page as the durable job source.
+
+OnlyFan420 is exposed as a one-page feed backed by `https://rentry.co/OnlyFan420`. Page 1 includes supported LuluStream, Vidara, Playmogo, and Dood provider links; later pages return an empty terminal page. Feed inclusion indicates that the provider has a resolver, not that every upstream CDN is operational, so individual items can still fail safely during resolution or transfer.
+
+LuluStream and Vidara resolve HLS playlists. The agent re-resolves the durable provider page immediately before transfer and materializes HLS as MP4 before local finalization or WebDAV upload. This requires `ffmpeg` at `/opt/homebrew/bin/ffmpeg`, `/usr/local/bin/ffmpeg`, `/opt/local/bin/ffmpeg`, or `/usr/bin/ffmpeg`.
 
 Queue acknowledgement is immediate. The durable scheduler runs one transfer at a time by default; additional local or WebDAV jobs remain queued in creation order until the active transfer exits. Each worker re-resolves the original source page immediately before downloading, preserves the resolved media headers, writes through a `.part` file, and saves completed local files under `~/Downloads/Lustre`. Select an exact quality label with `--quality`, for example `DOODSTREAM · Video`; omit it to use the first resolved quality. Jobs retain the original source page URL rather than persisting expired CDN URLs. Interactive browser verification remains a separate next step.
 
@@ -55,18 +63,21 @@ All `/v1` endpoints require `Authorization: Bearer <token>`.
 
 - `GET /health`
 - `GET /v1/jobs`
+- `GET /v1/auth/pornhub`
+- `POST /v1/auth/pornhub/login`
+- `DELETE /v1/auth/pornhub`
 - `GET /v1/feed/sites`
-- `GET /v1/feed/items?site=allpornstream&page=1`
+- `GET /v1/feed/items?site=allpornstream|hqporner|onlyfan420|pornhub|pornhub-subscriptions|pornhub-liked|pornhub-favorites&page=1`
 - `POST /v1/extract` with `{"url":"https://..."}`
 - `POST /v1/jobs` with `{"sourcePageURL":"https://...","preferredQualityLabel":"1080p","destination":"local"}`
 - `POST /v1/folders/select` opens the local macOS folder picker and returns `{"path":"/absolute/path"}`
-- `POST /v1/jobs/:id/action` with `{"action":"pause|resume|cancel|retry"}`
+- `POST /v1/jobs/:id/action` with `{"action":"pause|resume|cancel|retry|forceStart"}`
 - `GET /v1/destinations` lists saved non-secret WebDAV profiles
 - `POST /v1/destinations/webdav` saves a WebDAV profile and its Keychain password
 - `POST /v1/destinations/:id/test` checks WebDAV reachability, authentication, remote-directory creation, temporary write, and cleanup
 - `DELETE /v1/destinations/:id` removes a saved profile and its Keychain password
 
-The CLI mirrors feed discovery with `lustre feed sites` and `lustre feed list --site allpornstream --page 1`.
+The CLI mirrors feed discovery with `lustre feed sites` and `lustre feed list --site pornhub --page 1`.
 
 ## LaunchAgent
 
@@ -79,3 +90,10 @@ launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.pmvdl.lustre-
 ```
 
 Do not run it as a root daemon: Keychain and eventual WebKit session access are user-session resources.
+## PornHub sign-in boundary
+
+PornHub sign-in is optional and is always performed in a separate visible macOS window owned by `lustre-auth-helper`. Lustre never receives, renders, or submits a username or password. After the user completes the provider’s own flow, the helper validates the session and stores only bounded, sanitized PornHub cookies in the macOS Keychain. The loopback API, CLI, Next.js panel, job records, and logs never return cookie values.
+
+Use `lustre auth status`, `lustre auth login`, and `lustre auth logout`, or the Settings control. `login` requires the built `lustre-auth-helper` executable beside `lustre-agent`; existing running agents must be restarted manually after review to activate it. Logout removes the Keychain state. The helper uses a process-local nonpersistent WebKit store, so Lustre has no persistent WebKit browser state to remove.
+
+The public PornHub hot feed remains anonymous. Authenticated feed sources currently expose video-card pages for Subscriptions, Liked, and Favorites; playlists are deliberately not advertised because their directory shape is not a truthful video-card feed. Auth cookies are sent only to HTTPS `pornhub.com` hosts. yt-dlp receives a unique mode-0600 temporary Netscape cookie file immediately before a PornHub invocation; its path is removed on completion, failure, or cancellation. Lustre never uses `--cookies-from-browser` or a `Cookie:` process argument.

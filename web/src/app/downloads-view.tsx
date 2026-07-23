@@ -3,9 +3,8 @@
 import { useMemo, useState } from "react";
 import { agentDateMilliseconds, type AgentDate } from "@/lib/agent-date";
 import { filterAndSortJobs, jobProgressLabel, jobProgressPercent, jobStatusCounts, type DownloadFilterStatus } from "@/lib/download-filters";
+import { availableJobActions, jobActionLabel, type JobAction, type JobStatus } from "@/lib/job-actions";
 
-type JobStatus = "queued" | "running" | "paused" | "completed" | "failed" | "cancelled" | "verificationRequired";
-type JobAction = "pause" | "resume" | "cancel" | "retry";
 type JobLog = { timestamp: AgentDate; level: "info" | "error"; message: string };
 export type DownloadJob = { id: string; sourcePageURL: string; preferredQualityLabel?: string; destination: string; status: JobStatus; message: string; progress?: number; downloadedBytes?: number; totalBytes?: number; logs?: JobLog[]; updatedAt: AgentDate };
 export type Destination = { id: string; name: string; baseURL: string; remotePath: string };
@@ -60,13 +59,6 @@ function destinationName(job: DownloadJob, destinations: Destination[]) {
   return destinations.find((destination) => destination.id.toLowerCase() === id.toLowerCase())?.name ?? "Remote WebDAV";
 }
 
-function availableActions(status: JobStatus): JobAction[] {
-  if (status === "queued" || status === "running") return ["pause", "cancel"];
-  if (status === "paused") return ["resume", "cancel"];
-  if (["failed", "cancelled", "verificationRequired"].includes(status)) return ["retry", ...(status === "verificationRequired" ? ["cancel" as const] : [])];
-  return [];
-}
-
 function SearchGlyph() {
   return <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden><circle cx="11" cy="11" r="7" /><path d="m20 20-4-4" /></svg>;
 }
@@ -75,7 +67,7 @@ export function DownloadsView({ jobs, destinations, error, selectedJobId, onSele
   const [status, setStatus] = useState<DownloadFilterStatus>("all");
   const [query, setQuery] = useState("");
   const [destination, setDestination] = useState("all");
-  const [workingAction, setWorkingAction] = useState<JobAction | null>(null);
+  const [workingAction, setWorkingAction] = useState<{ jobId: string; action: JobAction } | null>(null);
 
   const filteredJobs = useMemo(() => filterAndSortJobs(jobs, { status, query, destination }), [jobs, status, query, destination]);
   const counts = useMemo(() => jobStatusCounts(jobs), [jobs]);
@@ -84,7 +76,7 @@ export function DownloadsView({ jobs, destinations, error, selectedJobId, onSele
 
 
   const act = async (job: DownloadJob, action: JobAction) => {
-    setWorkingAction(action);
+    setWorkingAction({ jobId: job.id, action });
     try { await onAction(job, action); }
     finally { setWorkingAction(null); }
   };
@@ -109,18 +101,22 @@ export function DownloadsView({ jobs, destinations, error, selectedJobId, onSele
 
     <div className="downloads-layout">
       <section className="download-ledger glass-panel" aria-label="Downloads list">
-        <div className="ledger-head"><span>Transfer</span><span>Status</span><span>Progress</span><span>Destination</span><span>Updated</span></div>
+        <div className="ledger-head"><span>Transfer</span><span>Status</span><span>Progress</span><span>Destination</span><span>Updated</span><span>Action</span></div>
         <div className="ledger-body">
           {filteredJobs.map((job) => {
             const progress = jobProgressPercent(job.progress);
             const visualProgress = progress ?? (job.status === "running" ? 34 : job.status === "completed" ? 100 : 0);
-            return <button key={job.id} className={`download-row status-${job.status} ${selectedJob?.id === job.id ? "selected" : ""}`} onClick={() => onSelectJob(job.id)} aria-pressed={selectedJob?.id === job.id}>
-              <span className="download-name"><i>↓</i><span><strong>{jobTitle(job)}</strong><small>{job.preferredQualityLabel || job.sourcePageURL}</small></span></span>
-              <span className="download-state"><i />{displayStatus(job.status)}</span>
-              <span className="download-progress"><span><i style={{ width: `${visualProgress}%` }} className={progress === undefined && job.status === "running" ? "indeterminate" : ""} /></span><small>{jobProgressLabel(job.status, job.progress)}</small></span>
-              <span className="download-destination">{destinationName(job, destinations)}</span>
-              <time dateTime={new Date(agentDateMilliseconds(job.updatedAt)).toISOString()}>{new Date(agentDateMilliseconds(job.updatedAt)).toLocaleDateString([], { month: "short", day: "numeric" })}<small>{new Date(agentDateMilliseconds(job.updatedAt)).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</small></time>
-            </button>;
+            const forcing = workingAction?.jobId === job.id && workingAction.action === "forceStart";
+            return <div key={job.id} className={`download-row status-${job.status} ${selectedJob?.id === job.id ? "selected" : ""}`}>
+              <button className="download-row-select" onClick={() => onSelectJob(job.id)} aria-pressed={selectedJob?.id === job.id}>
+                <span className="download-name"><i>↓</i><span><strong>{jobTitle(job)}</strong><small>{job.preferredQualityLabel || job.sourcePageURL}</small></span></span>
+                <span className="download-state"><i />{displayStatus(job.status)}</span>
+                <span className="download-progress"><span><i style={{ width: `${visualProgress}%` }} className={progress === undefined && job.status === "running" ? "indeterminate" : ""} /></span><small>{jobProgressLabel(job.status, job.progress)}</small></span>
+                <span className="download-destination">{destinationName(job, destinations)}</span>
+                <time dateTime={new Date(agentDateMilliseconds(job.updatedAt)).toISOString()}>{new Date(agentDateMilliseconds(job.updatedAt)).toLocaleDateString([], { month: "short", day: "numeric" })}<small>{new Date(agentDateMilliseconds(job.updatedAt)).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</small></time>
+              </button>
+              {job.status === "queued" && <button className="force-start-button" disabled={forcing} onClick={() => void act(job, "forceStart")}>{forcing ? "Starting…" : "Force start"}</button>}
+            </div>;
           })}
           {!filteredJobs.length && <div className="downloads-empty"><span>↓</span><h3>No matching downloads</h3><p>Adjust the filters or queue a new transfer.</p><button className="queue-button" onClick={onQueue}>Queue download</button></div>}
         </div>
@@ -132,7 +128,7 @@ export function DownloadsView({ jobs, destinations, error, selectedJobId, onSele
           <section className="inspector-progress"><div><span>{formatBytes(selectedJob.downloadedBytes)}</span><strong>{selectedProgress === undefined ? displayStatus(selectedJob.status) : `${selectedProgress}%`}</strong><span>{selectedJob.totalBytes ? formatBytes(selectedJob.totalBytes) : "Total unavailable"}</span></div><div className="progress-track"><span className={`progress-fill ${selectedProgress === undefined ? "indeterminate" : ""}`} style={selectedProgress === undefined ? undefined : { width: `${selectedProgress}%` }} /></div><p>{selectedJob.message}</p></section>
           <dl className="inspector-metadata"><div><dt>Source</dt><dd><a href={selectedJob.sourcePageURL} target="_blank" rel="noreferrer">{selectedJob.sourcePageURL}</a></dd></div><div><dt>Quality</dt><dd>{selectedJob.preferredQualityLabel || "Automatic"}</dd></div><div><dt>Destination</dt><dd>{destinationName(selectedJob, destinations)}</dd></div><div><dt>Updated</dt><dd>{new Date(agentDateMilliseconds(selectedJob.updatedAt)).toLocaleString()}</dd></div></dl>
           <section className="inspector-log"><header><span>Worker event log</span><b>{selectedJob.logs?.length ?? 0} events</b></header>{selectedJob.logs?.length ? <ol>{[...selectedJob.logs].sort((a, b) => agentDateMilliseconds(a.timestamp) - agentDateMilliseconds(b.timestamp)).map((log, index) => <li key={`${log.timestamp}-${index}`}><time>{new Date(agentDateMilliseconds(log.timestamp)).toLocaleTimeString()}</time><b className={log.level === "error" ? "error" : ""}>{log.level}</b><span>{log.message}</span></li>)}</ol> : <p>No worker events recorded for this job.</p>}</section>
-          {availableActions(selectedJob.status).length > 0 && <footer className="inspector-actions">{availableActions(selectedJob.status).map((action) => <button key={action} className={action === "cancel" ? "danger" : ""} disabled={workingAction !== null} onClick={() => void act(selectedJob, action)}>{workingAction === action ? `${action}…` : action}</button>)}</footer>}
+          {availableJobActions(selectedJob.status).length > 0 && <footer className="inspector-actions">{availableJobActions(selectedJob.status).map((action) => { const working = workingAction?.jobId === selectedJob.id && workingAction.action === action; return <button key={action} className={action === "cancel" ? "danger" : ""} disabled={working} onClick={() => void act(selectedJob, action)}>{working ? `${jobActionLabel(action)}…` : jobActionLabel(action)}</button>; })}</footer>}
         </> : <div className="inspector-empty"><span>◎</span><h3>Select a transfer</h3><p>Choose a download to inspect its live state and worker log.</p></div>}
       </aside>
     </div>

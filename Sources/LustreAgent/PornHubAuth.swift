@@ -1,0 +1,385 @@
+import Darwin
+import Foundation
+import Security
+import LustreCore
+
+public struct PornHubCookieRecord: Codable, Equatable, Sendable {
+    public let name: String
+    public let value: String
+    public let domain: String
+    public let path: String
+    public let expiresAt: Date?
+    public let secure: Bool
+    public let hostOnly: Bool
+
+    public init(name: String, value: String, domain: String, path: String, expiresAt: Date?, secure: Bool, hostOnly: Bool = false) {
+        self.name = name
+        self.value = value
+        self.domain = domain
+        self.path = path
+        self.expiresAt = expiresAt
+        self.secure = secure
+        self.hostOnly = hostOnly
+    }
+
+    private enum CodingKeys: String, CodingKey { case name, value, domain, path, expiresAt, secure, hostOnly }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        name = try values.decode(String.self, forKey: .name)
+        value = try values.decode(String.self, forKey: .value)
+        domain = try values.decode(String.self, forKey: .domain)
+        path = try values.decode(String.self, forKey: .path)
+        expiresAt = try values.decodeIfPresent(Date.self, forKey: .expiresAt)
+        secure = try values.decode(Bool.self, forKey: .secure)
+        hostOnly = try values.decodeIfPresent(Bool.self, forKey: .hostOnly) ?? false
+    }
+}
+
+public enum PornHubCookieSanitizer {
+    public static let maximumCookies = 48
+    public static let maximumAggregateBytes = 24 * 1024
+
+    public static func sanitize(_ cookies: [PornHubCookieRecord], now: Date = .now) throws -> [PornHubCookieRecord] {
+        guard cookies.count <= maximumCookies else { throw PornHubAuthError.invalidCookieState }
+        var inputBytes = 0
+        var result: [PornHubCookieRecord] = []
+        var names = Set<String>()
+
+        for cookie in cookies {
+            inputBytes = try boundedByteCount(inputBytes, cookie)
+            guard let domain = normalizedDomain(cookie.domain),
+                  isAllowedDomain(domain), cookie.secure,
+                  cookie.expiresAt.map({ $0 > now }) ?? true else {
+                continue
+            }
+            guard (1...128).contains(cookie.name.utf8.count),
+                  (1...4096).contains(cookie.value.utf8.count),
+                  (1...512).contains(cookie.path.utf8.count),
+                  cookie.path.hasPrefix("/"),
+                  isSafeCookieName(cookie.name), isSafeCookieField(cookie.value), isSafeCookieField(cookie.path) else {
+                throw PornHubAuthError.invalidCookieState
+            }
+            let identity = "\(cookie.name.lowercased())|\(domain)|\(cookie.path)|\(cookie.hostOnly)"
+            guard names.insert(identity).inserted else { throw PornHubAuthError.invalidCookieState }
+            result.append(PornHubCookieRecord(
+                name: cookie.name, value: cookie.value, domain: domain, path: cookie.path,
+                expiresAt: cookie.expiresAt, secure: true, hostOnly: cookie.hostOnly
+            ))
+        }
+        return result
+    }
+
+    public static func isAllowedDomain(_ raw: String) -> Bool {
+        guard let domain = normalizedDomain(raw) else { return false }
+        return domain == "pornhub.com" || domain.hasSuffix(".pornhub.com")
+    }
+
+    public static func cookieHeader(_ cookies: [PornHubCookieRecord], for url: URL, now: Date = .now) throws -> String? {
+        guard url.scheme?.lowercased() == "https", let host = url.host?.lowercased(), isAllowedDomain(host) else { return nil }
+        let requestPath = url.path.isEmpty ? "/" : url.path
+        let matching = try sanitize(cookies, now: now)
+            .filter { domainMatches($0, host: host) && pathMatches($0.path, requestPath: requestPath) }
+            .sorted { left, right in
+                if left.path.utf8.count != right.path.utf8.count { return left.path.utf8.count > right.path.utf8.count }
+                if left.name != right.name { return left.name < right.name }
+                if left.domain != right.domain { return left.domain < right.domain }
+                if left.path != right.path { return left.path < right.path }
+                return left.hostOnly && !right.hostOnly
+            }
+        guard !matching.isEmpty else { return nil }
+        return matching.map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
+    }
+
+    private static func boundedByteCount(_ total: Int, _ cookie: PornHubCookieRecord) throws -> Int {
+        let fields = [cookie.name, cookie.value, cookie.domain, cookie.path]
+        var result = total
+        for field in fields {
+            let (next, overflow) = result.addingReportingOverflow(field.utf8.count)
+            guard !overflow, next <= maximumAggregateBytes else { throw PornHubAuthError.invalidCookieState }
+            result = next
+        }
+        return result
+    }
+
+    private static func normalizedDomain(_ raw: String) -> String? {
+        let lower = raw.lowercased()
+        let domain = lower.hasPrefix(".") ? String(lower.dropFirst()) : lower
+        guard !domain.isEmpty, !domain.hasPrefix("."), !domain.hasSuffix("."),
+              domain.unicodeScalars.allSatisfy({ "abcdefghijklmnopqrstuvwxyz0123456789.-".unicodeScalars.contains($0) }),
+              !domain.contains("..") else { return nil }
+        return domain
+    }
+
+    private static func isSafeCookieName(_ value: String) -> Bool {
+        !value.isEmpty && !value.contains(where: { $0.isWhitespace || $0 == "=" || $0 == ";" || $0.isNewline || $0 == "\t" || $0 == "\0" })
+    }
+
+    private static func isSafeCookieField(_ value: String) -> Bool {
+        !value.contains(where: { $0 == ";" || $0 == "\r" || $0 == "\n" || $0 == "\t" || $0 == "\0" })
+    }
+
+    private static func domainMatches(_ cookie: PornHubCookieRecord, host: String) -> Bool {
+        cookie.hostOnly ? host == cookie.domain : host == cookie.domain || host.hasSuffix(".\(cookie.domain)")
+    }
+
+    private static func pathMatches(_ cookiePath: String, requestPath: String) -> Bool {
+        guard requestPath.hasPrefix(cookiePath) else { return false }
+        return requestPath == cookiePath || cookiePath.hasSuffix("/") || requestPath.dropFirst(cookiePath.count).first == "/"
+    }
+}
+
+public protocol PornHubCookieStore: Sendable {
+    func load() throws -> [PornHubCookieRecord]
+    func save(_ cookies: [PornHubCookieRecord]) throws
+    func remove() throws
+}
+
+protocol PornHubKeychainBackend: Sendable {
+    func copyMatching(service: String, account: String) -> (OSStatus, Data?)
+    func update(_ data: Data, service: String, account: String) -> OSStatus
+    func add(_ data: Data, service: String, account: String) -> OSStatus
+    func remove(service: String, account: String) -> OSStatus
+}
+
+private final class SecurityPornHubKeychainBackend: PornHubKeychainBackend, @unchecked Sendable {
+    func copyMatching(service: String, account: String) -> (OSStatus, Data?) {
+        let query: [CFString: Any] = [kSecClass: kSecClassGenericPassword, kSecAttrService: service, kSecAttrAccount: account, kSecReturnData: true, kSecMatchLimit: kSecMatchLimitOne]
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        return (status, item as? Data)
+    }
+
+    func update(_ data: Data, service: String, account: String) -> OSStatus {
+        let query: [CFString: Any] = [kSecClass: kSecClassGenericPassword, kSecAttrService: service, kSecAttrAccount: account]
+        let attributes: [CFString: Any] = [kSecValueData: data, kSecAttrAccessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly]
+        return SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+    }
+
+    func add(_ data: Data, service: String, account: String) -> OSStatus {
+        let query: [CFString: Any] = [kSecClass: kSecClassGenericPassword, kSecAttrService: service, kSecAttrAccount: account, kSecValueData: data, kSecAttrAccessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly]
+        return SecItemAdd(query as CFDictionary, nil)
+    }
+
+    func remove(service: String, account: String) -> OSStatus {
+        SecItemDelete([kSecClass: kSecClassGenericPassword, kSecAttrService: service, kSecAttrAccount: account] as CFDictionary)
+    }
+}
+
+public final class KeychainPornHubCookieStore: PornHubCookieStore, @unchecked Sendable {
+    public static let service = "com.pmvdl.lustre-agent"
+    public static let account = "pornhub.cookies.v1"
+    private let backend: any PornHubKeychainBackend
+
+    public init() { backend = SecurityPornHubKeychainBackend() }
+    init(backend: any PornHubKeychainBackend) { self.backend = backend }
+
+    public func load() throws -> [PornHubCookieRecord] {
+        let (status, data) = backend.copyMatching(service: Self.service, account: Self.account)
+        if status == errSecItemNotFound { return [] }
+        guard status == errSecSuccess else { throw PornHubAuthError.storageUnavailable }
+        guard let data else { throw PornHubAuthError.invalidCookieState }
+        return try PornHubCookieSanitizer.sanitize(JSONDecoder().decode([PornHubCookieRecord].self, from: data))
+    }
+
+    public func save(_ cookies: [PornHubCookieRecord]) throws {
+        let data = try JSONEncoder().encode(PornHubCookieSanitizer.sanitize(cookies))
+        let status = backend.update(data, service: Self.service, account: Self.account)
+        if status == errSecSuccess { return }
+        guard status == errSecItemNotFound,
+              backend.add(data, service: Self.service, account: Self.account) == errSecSuccess else {
+            throw PornHubAuthError.storageUnavailable
+        }
+    }
+
+    public func remove() throws {
+        let status = backend.remove(service: Self.service, account: Self.account)
+        guard status == errSecSuccess || status == errSecItemNotFound else { throw PornHubAuthError.storageUnavailable }
+    }
+}
+
+public enum PornHubHelperResult: String, Sendable { case signedIn, cancelled, signedOut }
+public protocol PornHubAuthHelping: Sendable {
+    func login() async throws -> PornHubHelperResult
+    func logout() async throws
+}
+
+public enum PornHubAuthError: Error, LocalizedError, Equatable, Sendable {
+    case signedOut, signingIn, cancelled, expired, helperUnavailable, helperFailed, timeout, invalidCookieState, storageUnavailable
+    public var errorDescription: String? {
+        switch self {
+        case .signedOut: "Sign in with PornHub before using this feed."
+        case .signingIn: "A PornHub sign-in window is already open."
+        case .cancelled: "PornHub sign-in was cancelled."
+        case .expired: "PornHub sign-in expired. Sign in again."
+        case .helperUnavailable: "The bundled PornHub sign-in helper is unavailable."
+        case .helperFailed: "The PornHub sign-in helper did not complete."
+        case .timeout: "The PornHub sign-in window timed out."
+        case .invalidCookieState: "PornHub session data was rejected."
+        case .storageUnavailable: "PornHub session storage is unavailable."
+        }
+    }
+}
+
+public enum PornHubHelperNavigationPolicy {
+    public static func allows(url: URL?, isMainFrame: Bool, opensNewWindow: Bool, requestsDownload: Bool) -> Bool {
+        guard isMainFrame, !opensNewWindow, !requestsDownload,
+              let url, url.scheme?.lowercased() == "https", let host = url.host else { return false }
+        return PornHubCookieSanitizer.isAllowedDomain(host)
+    }
+
+    public static func allowsResponse(url: URL?, canShowMIMEType: Bool) -> Bool {
+        guard canShowMIMEType, let url, url.scheme?.lowercased() == "https", let host = url.host else { return false }
+        return PornHubCookieSanitizer.isAllowedDomain(host)
+    }
+}
+
+public actor PornHubAuthService {
+    private let store: PornHubCookieStore
+    private let helper: PornHubAuthHelping
+    private let now: @Sendable () -> Date
+    private var state: PornHubAuthState = .signedOut
+    private var lastValidatedAt: Date?
+
+    public init(store: PornHubCookieStore = KeychainPornHubCookieStore(), helper: PornHubAuthHelping = PornHubAuthHelper(), now: @escaping @Sendable () -> Date = { .now }) {
+        self.store = store; self.helper = helper; self.now = now
+    }
+
+    public func status() -> PornHubAuthStatus {
+        refreshState()
+        return PornHubAuthStatus(state: state, lastValidatedAt: lastValidatedAt)
+    }
+
+    public func login() async throws -> PornHubAuthStatus {
+        refreshState()
+        guard state != .signingIn else { throw PornHubAuthError.signingIn }
+        state = .signingIn
+        do {
+            switch try await helper.login() {
+            case .signedIn:
+                refreshState(validatedByLogin: true)
+                guard state == .signedIn else { throw PornHubAuthError.helperFailed }
+                return PornHubAuthStatus(state: state, lastValidatedAt: lastValidatedAt)
+            case .cancelled: state = .signedOut; throw PornHubAuthError.cancelled
+            case .signedOut: state = .signedOut; return PornHubAuthStatus(state: .signedOut)
+            }
+        } catch let error as PornHubAuthError { if state == .signingIn { state = .signedOut }; throw error }
+        catch { state = .signedOut; throw PornHubAuthError.helperFailed }
+    }
+
+    public func logout() async throws -> PornHubAuthStatus {
+        try store.remove()
+        state = .signedOut
+        lastValidatedAt = nil
+        // The helper uses a nonpersistent data store. Its process-local data is gone when the
+        // sign-in window closes, so cleanup is best effort and cannot change signed-out truth.
+        try? await helper.logout()
+        return PornHubAuthStatus(state: .signedOut)
+    }
+
+    public func cookieHeader(for url: URL) throws -> String? {
+        let cookies = try PornHubCookieSanitizer.sanitize(store.load(), now: now())
+        guard cookies.contains(where: { $0.name == "il" }) else { state = cookies.isEmpty ? .signedOut : .expired; return nil }
+        return try PornHubCookieSanitizer.cookieHeader(cookies, for: url, now: now())
+    }
+
+    public func cookiesForYtDlp() throws -> [PornHubCookieRecord] {
+        let cookies = try PornHubCookieSanitizer.sanitize(store.load(), now: now())
+        guard cookies.contains(where: { $0.name == "il" }) else { throw PornHubAuthError.signedOut }
+        return cookies
+    }
+
+    public func recordYtDlpFailure(_ error: PornHubYtDlpError) {
+        if error == .sessionExpired { state = .expired }
+    }
+
+    private func refreshState(validatedByLogin: Bool = false) {
+        guard state != .signingIn || validatedByLogin else { return }
+        do {
+            let cookies = try PornHubCookieSanitizer.sanitize(store.load(), now: now())
+            if cookies.contains(where: { $0.name == "il" }) {
+                if state != .expired || validatedByLogin { state = .signedIn }
+                if validatedByLogin { lastValidatedAt = now() }
+            } else {
+                state = cookies.isEmpty ? .signedOut : .expired
+                lastValidatedAt = nil
+            }
+        } catch { state = .expired }
+    }
+}
+
+public enum PornHubCookieFile {
+    typealias FileWriter = @Sendable (Int32, Data) throws -> Void
+
+    public static func create(in directory: URL, cookies: [PornHubCookieRecord], now: Date = .now) throws -> URL {
+        try create(in: directory, cookies: cookies, now: now, filename: nil, fileWriter: nil)
+    }
+
+    static func create(in directory: URL, cookies: [PornHubCookieRecord], now: Date, filename: String?, fileWriter: FileWriter?) throws -> URL {
+        let sanitized = try PornHubCookieSanitizer.sanitize(cookies, now: now)
+        try ensurePrivateDirectory(directory)
+        let leaf = filename ?? ".lustre-pornhub-\(UUID().uuidString).cookies"
+        guard !leaf.isEmpty, leaf == URL(fileURLWithPath: leaf).lastPathComponent else { throw PornHubAuthError.storageUnavailable }
+        let file = directory.appendingPathComponent(leaf)
+        let lines = ["# Netscape HTTP Cookie File"] + sanitized.map { cookie in
+            let domain = cookie.hostOnly ? cookie.domain : ".\(cookie.domain)"
+            let expiry = Int(cookie.expiresAt?.timeIntervalSince1970 ?? 2_147_483_647)
+            let includeSubdomains = cookie.hostOnly ? "FALSE" : "TRUE"
+            return "\(domain)\t\(includeSubdomains)\t\(cookie.path)\tTRUE\t\(expiry)\t\(cookie.name)\t\(cookie.value)"
+        }
+        var descriptor = open(file.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, S_IRUSR | S_IWUSR)
+        guard descriptor >= 0 else { throw PornHubAuthError.storageUnavailable }
+        var removeOnFailure = true
+        defer {
+            if descriptor >= 0 { _ = close(descriptor) }
+            if removeOnFailure { _ = unlink(file.path) }
+        }
+        try validatePrivateRegularFile(descriptor)
+        let write = fileWriter ?? writeAll
+        try write(descriptor, Data(lines.joined(separator: "\n").utf8))
+        guard fsync(descriptor) == 0 else { throw PornHubAuthError.storageUnavailable }
+        try validatePrivateRegularFile(descriptor)
+        let closeStatus = close(descriptor)
+        descriptor = -1
+        guard closeStatus == 0 else { throw PornHubAuthError.storageUnavailable }
+        removeOnFailure = false
+        return file
+    }
+
+    public static func remove(_ file: URL) throws { try FileManager.default.removeItem(at: file) }
+
+    private static func ensurePrivateDirectory(_ directory: URL) throws {
+        if !FileManager.default.fileExists(atPath: directory.path) {
+            guard mkdir(directory.path, S_IRWXU) == 0 || errno == EEXIST else { throw PornHubAuthError.storageUnavailable }
+        }
+        var info = stat()
+        guard lstat(directory.path, &info) == 0,
+              (info.st_mode & S_IFMT) == S_IFDIR,
+              info.st_uid == getuid(),
+              (info.st_mode & 0o077) == 0 else { throw PornHubAuthError.storageUnavailable }
+    }
+
+    private static func validatePrivateRegularFile(_ descriptor: Int32) throws {
+        var info = stat()
+        guard fstat(descriptor, &info) == 0,
+              (info.st_mode & S_IFMT) == S_IFREG,
+              info.st_uid == getuid(),
+              (info.st_mode & 0o077) == 0,
+              info.st_nlink == 1 else { throw PornHubAuthError.storageUnavailable }
+    }
+
+    private static func writeAll(_ descriptor: Int32, _ data: Data) throws {
+        try data.withUnsafeBytes { raw in
+            var offset = 0
+            while offset < raw.count {
+                let written = Darwin.write(descriptor, raw.baseAddress!.advanced(by: offset), raw.count - offset)
+                if written < 0 {
+                    if errno == EINTR { continue }
+                    throw PornHubAuthError.storageUnavailable
+                }
+                guard written > 0 else { throw PornHubAuthError.storageUnavailable }
+                offset += written
+            }
+        }
+    }
+}

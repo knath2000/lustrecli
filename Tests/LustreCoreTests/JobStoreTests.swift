@@ -51,6 +51,25 @@ final class JobStoreTests: XCTestCase {
         XCTAssertEqual(retried.status, .queued)
         XCTAssertEqual(retried.attempts, 1)
     }
+
+    func testForceStartIsValidOnlyForQueuedJobsAndKeepsThemQueued() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try JobStore(databaseURL: directory.appending(path: "jobs.sqlite3"))
+        let queued = DownloadJob(sourcePageURL: URL(string: "https://example.com/queued")!)
+        try await store.create(queued)
+
+        let forceStarted = try await store.apply(.forceStart, to: queued.id)
+
+        XCTAssertEqual(forceStarted.status, .queued)
+        XCTAssertEqual(forceStarted.message, "Force start requested; bypassing normal concurrency limit.")
+
+        for status in [JobStatus.running, .paused, .completed, .failed, .cancelled, .verificationRequired] {
+            let job = DownloadJob(sourcePageURL: URL(string: "https://example.com/\(status.rawValue)")!, status: status)
+            try await store.create(job)
+            await XCTAssertThrowsErrorAsync(try await store.apply(.forceStart, to: job.id))
+        }
+    }
 }
 
 private func XCTAssertThrowsErrorAsync<T>(

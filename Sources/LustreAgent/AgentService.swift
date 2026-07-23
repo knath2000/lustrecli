@@ -6,6 +6,10 @@ public actor AgentService {
     public typealias Downloader = @Sendable (ProviderResolution, ResolvedQuality, URL) async throws -> URL
     public typealias ProgressDownloader = @Sendable (ProviderResolution, ResolvedQuality, URL, @escaping @Sendable (DownloadProgress) async -> Void) async throws -> URL
     public typealias RemoteProgressDownloader = @Sendable (ProviderResolution, ResolvedQuality, WebDAVDestinationProfile, String, @escaping @Sendable (DownloadProgress) async -> Void) async throws -> URL
+    public typealias HLSMaterializer = @Sendable (ProviderResolution, ResolvedQuality, URL, @escaping @Sendable (DownloadProgress) async -> Void) async throws -> URL
+    public typealias PornHubResolver = @Sendable (URL) async throws -> ProviderResolution
+    public typealias YtDlpMaterializer = @Sendable (ProviderResolution, ResolvedQuality, URL, @escaping @Sendable (DownloadProgress) async -> Void) async throws -> URL
+    public typealias StagedRemoteUploader = @Sendable (ProviderResolution, ResolvedQuality, URL, WebDAVDestinationProfile, String, @escaping @Sendable (DownloadProgress) async -> Void) async throws -> URL
     public typealias RemoteDestinationTester = @Sendable (WebDAVDestinationProfile, String) async throws -> RemoteDestinationTestResult
     public typealias FolderPicker = @Sendable () throws -> String
 
@@ -20,11 +24,16 @@ public actor AgentService {
     private let automaticallyStartsDownloads: Bool
     private let progressDownloader: ProgressDownloader
     private let remoteDownloader: RemoteProgressDownloader
+    private let hlsMaterializer: HLSMaterializer
+    private let pornHubResolver: PornHubResolver
+    private let ytDlpMaterializer: YtDlpMaterializer
+    private let stagedRemoteUploader: StagedRemoteUploader
     private let remoteDestinationTester: RemoteDestinationTester
     private let destinationProfiles: RemoteDestinationProfileStore
     private let destinationSecrets: RemoteDestinationSecretStore
     private let folderPicker: FolderPicker
     private let feed: FeedService
+    private let pornHubAuth: PornHubAuthService
     private let maximumConcurrentDownloads: Int
     private var activeDownloadTasks: [UUID: ActiveDownload] = [:]
     private var lastProgressUpdates: [UUID: (bytesWritten: Int64, timestamp: Date)] = [:]
@@ -40,8 +49,13 @@ public actor AgentService {
         destinationProfiles: RemoteDestinationProfileStore? = nil,
         destinationSecrets: RemoteDestinationSecretStore = KeychainRemoteDestinationSecretStore(),
         remoteDownloader: RemoteProgressDownloader? = nil,
+        hlsMaterializer: HLSMaterializer? = nil,
+        pornHubResolver: PornHubResolver? = nil,
+        ytDlpMaterializer: YtDlpMaterializer? = nil,
+        stagedRemoteUploader: StagedRemoteUploader? = nil,
         remoteDestinationTester: RemoteDestinationTester? = nil,
-        feed: FeedService = FeedService(),
+        feed: FeedService? = nil,
+        pornHubAuth: PornHubAuthService = PornHubAuthService(),
         maximumConcurrentDownloads: Int = 1
     ) throws {
         self.jobs = try JobStore(databaseURL: databaseURL)
@@ -60,9 +74,29 @@ public actor AgentService {
         self.destinationProfiles = try destinationProfiles ?? RemoteDestinationProfileStore(fileURL: AgentPaths.remoteDestinations)
         self.destinationSecrets = destinationSecrets
         self.remoteDownloader = remoteDownloader ?? AgentService.uploadToWebDAV
+        self.hlsMaterializer = hlsMaterializer ?? FFmpegHLSMaterializer.materialize
+        self.pornHubAuth = pornHubAuth
+        self.pornHubResolver = pornHubResolver ?? { source in
+            let cookies = (try? await pornHubAuth.cookiesForYtDlp()) ?? []
+            do { return try await PornHubYtDlp.resolve(source: source, cookies: cookies) }
+            catch let error as PornHubYtDlpError {
+                if !cookies.isEmpty { await pornHubAuth.recordYtDlpFailure(error) }
+                throw error
+            }
+        }
+        self.ytDlpMaterializer = ytDlpMaterializer ?? { resolution, quality, directory, _ in
+            guard let selector = quality.formatSelector else { throw PornHubYtDlpError.invalidFormat }
+            let cookies = (try? await pornHubAuth.cookiesForYtDlp()) ?? []
+            do { return try await PornHubYtDlp.materialize(source: resolution.sourcePageURL, formatSelector: selector, directory: directory, cookies: cookies) }
+            catch let error as PornHubYtDlpError {
+                if !cookies.isEmpty { await pornHubAuth.recordYtDlpFailure(error) }
+                throw error
+            }
+        }
+        self.stagedRemoteUploader = stagedRemoteUploader ?? AgentService.uploadMaterializedFileToWebDAV
         self.remoteDestinationTester = remoteDestinationTester ?? AgentService.testWebDAVDestination
         self.folderPicker = folderPicker ?? AgentService.chooseDownloadFolder
-        self.feed = feed
+        self.feed = feed ?? FeedService(fetch: PornHubFeedRequest.fetch, pornHubCookieHeader: { url in try await pornHubAuth.cookieHeader(for: url) })
         self.maximumConcurrentDownloads = max(1, maximumConcurrentDownloads)
         Task { [weak self] in
             await self?.recoverDurableJobs()
@@ -77,12 +111,19 @@ public actor AgentService {
         try await jobs.allJobs()
     }
 
-    public func feedSites() -> [FeedSite] {
-        feed.sites()
+    public func feedSites() async -> [FeedSite] {
+        let sites = feed.sites()
+        return await pornHubAuth.status().state == .signedIn ? sites + FeedSite.authenticatedPornHub : sites
     }
 
     public func feedPage(site: FeedSiteID, page: Int) async throws -> FeedPage {
         try await feed.page(site: site, page: page)
+    }
+
+    public func pornHubAuthStatus() async -> PornHubAuthStatus { await pornHubAuth.status() }
+    public func signInWithPornHub() async throws -> PornHubAuthStatus { try await pornHubAuth.login() }
+    public func signOutOfPornHub() async throws -> PornHubAuthStatus {
+        try await pornHubAuth.logout()
     }
 
     public func allRemoteDestinations() async -> [WebDAVDestinationProfile] {
@@ -119,6 +160,16 @@ public actor AgentService {
         }
         if AllPornStreamResolver.isAllPornStreamPostURL(url) {
             return await extractAllPornStream(url: url)
+        }
+        if let canonical = PornHubURL.canonical(url) {
+            let resolution = try await pornHubResolver(canonical)
+            return ExtractionResult(
+                sourcePageURL: canonical,
+                isDirectMedia: false,
+                resolutionState: "resolved",
+                trace: resolution.trace,
+                resolution: resolution
+            )
         }
         do {
             let resolution = try await resolver.resolve(url: url)
@@ -227,6 +278,8 @@ public actor AgentService {
             activeDownloadTasks[id]?.task.cancel()
         case .resume, .retry:
             await enqueueDownload(id)
+        case .forceStart:
+            startDownload(id)
         }
         return job
     }
@@ -277,7 +330,24 @@ public actor AgentService {
                 await self.updateProgress(progress, for: id, taskID: taskID)
             }
             let output: URL
-            if let profileID = RemoteDestination.webDAVProfileID(from: current.destination) {
+            if quality.mediaKind != .direct, let profileID = RemoteDestination.webDAVProfileID(from: current.destination) {
+                guard let profile = await destinationProfiles.profile(id: profileID) else { throw RemoteDestinationError.notFound }
+                guard let password = try destinationSecrets.password(for: profileID), !password.isEmpty else {
+                    throw RemoteDestinationError.missingCredentials
+                }
+                record(&active, level: .info, message: "Materializing \(quality.label) before upload to \(profile.name).")
+                try await jobs.update(active)
+                let staging = FileManager.default.temporaryDirectory.appending(path: "lustre-materialized-\(UUID().uuidString)", directoryHint: .isDirectory)
+                defer { try? FileManager.default.removeItem(at: staging) }
+                let media = quality.mediaKind == .hls
+                    ? try await hlsMaterializer(resolution, quality, staging, reportProgress)
+                    : try await ytDlpMaterializer(resolution, quality, staging, reportProgress)
+                output = try await stagedRemoteUploader(resolution, quality, media, profile, password, reportProgress)
+            } else if quality.mediaKind == .hls {
+                output = try await hlsMaterializer(resolution, quality, try downloadDirectory(for: current.destination), reportProgress)
+            } else if quality.mediaKind == .ytDlp {
+                output = try await ytDlpMaterializer(resolution, quality, try downloadDirectory(for: current.destination), reportProgress)
+            } else if let profileID = RemoteDestination.webDAVProfileID(from: current.destination) {
                 guard let profile = await destinationProfiles.profile(id: profileID) else { throw RemoteDestinationError.notFound }
                 guard let password = try destinationSecrets.password(for: profileID), !password.isEmpty else {
                     throw RemoteDestinationError.missingCredentials
@@ -599,6 +669,35 @@ public actor AgentService {
         guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
             throw RemoteTransferError.uploadFailed((response as? HTTPURLResponse)?.statusCode ?? 0)
         }
+        return destination
+    }
+
+    private static func uploadMaterializedFileToWebDAV(
+        resolution: ProviderResolution,
+        quality: ResolvedQuality,
+        file: URL,
+        profile: WebDAVDestinationProfile,
+        password: String,
+        onProgress: @escaping @Sendable (DownloadProgress) async -> Void
+    ) async throws -> URL {
+        guard file.isFileURL,
+              (try? file.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true else {
+            throw DownloadError.invalidResponse
+        }
+        let size = (try file.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init)
+        let destination = webDAVFileURL(profile: profile, filename: file.lastPathComponent)
+        try await ensureWebDAVDirectories(profile: profile, password: password)
+        var request = URLRequest(url: destination)
+        request.httpMethod = "PUT"
+        request.timeoutInterval = 7_200
+        request.setValue("video/mp4", forHTTPHeaderField: "Content-Type")
+        applyBasicAuthentication(username: profile.username, password: password, request: &request)
+        let transport = WebDAVTLSDelegate(host: profile.baseURL.host, allowInvalidCertificate: profile.allowInvalidCertificate)
+        let (_, response) = try await transport.upload(for: request, fromFile: file)
+        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+            throw RemoteTransferError.uploadFailed((response as? HTTPURLResponse)?.statusCode ?? 0)
+        }
+        if let size { await onProgress(DownloadProgress(bytesWritten: size, totalBytes: size)) }
         return destination
     }
 

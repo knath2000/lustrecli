@@ -84,6 +84,8 @@ public actor JobStore {
             job.status = .queued
             job.attempts += 1
             job.message = "Queued for retry."
+        case .forceStart:
+            job.message = "Force start requested; bypassing normal concurrency limit."
         }
         job.updatedAt = .now
         try replace(job)
@@ -137,6 +139,7 @@ private extension JobStatus {
     func allows(_ action: JobAction) -> Bool {
         switch (self, action) {
         case (.queued, .pause), (.queued, .cancel),
+             (.queued, .forceStart),
              (.running, .pause), (.running, .cancel),
              (.paused, .resume), (.paused, .cancel),
              (.failed, .retry),

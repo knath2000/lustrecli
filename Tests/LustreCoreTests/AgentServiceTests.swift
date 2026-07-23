@@ -323,6 +323,113 @@ final class AgentServiceTests: XCTestCase {
         XCTAssertEqual(completedInvocationCount, 2)
     }
 
+    func testForceStartBypassesConcurrencyForOnlyRequestedJobsWithoutDuplicateWorkers() async throws {
+        let database = FileManager.default.temporaryDirectory.appending(path: "lustre-agent-force-start-\(UUID().uuidString).sqlite3")
+        defer { try? FileManager.default.removeItem(at: database) }
+        let gate = ConcurrentDownloadGate()
+        let resolver = StaticProviderResolver(
+            fetch: { url, _ in
+                HTTPPage(body: #"<script>MDCore.wurl = "https://cdn.mxcontent.net/video.mp4"</script>"#, finalURL: url, statusCode: 200)
+            },
+            randomSuffix: { "unused" },
+            nowMilliseconds: { "0" }
+        )
+        let service = try AgentService(
+            databaseURL: database,
+            resolver: resolver,
+            downloadsDirectory: FileManager.default.temporaryDirectory,
+            progressDownloader: { resolution, _, directory, _ in
+                await gate.wait(for: resolution.sourcePageURL)
+                return directory.appending(path: "\(resolution.sourcePageURL.lastPathComponent).mp4")
+            }
+        )
+
+        let first = try await service.createJob(CreateJobRequest(sourcePageURL: URL(string: "https://mixdrop.co/e/first")!))
+        await gate.waitForInvocationCount(1)
+        let second = try await service.createJob(CreateJobRequest(sourcePageURL: URL(string: "https://mixdrop.co/e/second")!))
+        let third = try await service.createJob(CreateJobRequest(sourcePageURL: URL(string: "https://mixdrop.co/e/third")!))
+
+        let forceStartedSecond = try await service.apply(.forceStart, to: second.id)
+        async let firstDuplicate = try? service.apply(.forceStart, to: third.id)
+        async let secondDuplicate = try? service.apply(.forceStart, to: third.id)
+        _ = await (firstDuplicate, secondDuplicate)
+        await gate.waitForInvocationCount(3)
+
+        XCTAssertEqual(forceStartedSecond.status, .queued)
+        XCTAssertTrue(forceStartedSecond.logs?.contains(where: { $0.message == "Force start requested; bypassing normal concurrency limit." }) == true)
+        let fourth = try await service.createJob(CreateJobRequest(sourcePageURL: URL(string: "https://mixdrop.co/e/fourth")!))
+        try await Task.sleep(for: .milliseconds(100))
+
+        let running = try await service.allJobs()
+        XCTAssertEqual(running.first(where: { $0.id == first.id })?.status, .running)
+        XCTAssertEqual(running.first(where: { $0.id == second.id })?.status, .running)
+        XCTAssertEqual(running.first(where: { $0.id == third.id })?.status, .running)
+        XCTAssertEqual(running.first(where: { $0.id == fourth.id })?.status, .queued)
+        let firstInvocationCount = await gate.invocationCount(for: first.sourcePageURL)
+        let secondInvocationCount = await gate.invocationCount(for: second.sourcePageURL)
+        let thirdInvocationCount = await gate.invocationCount(for: third.sourcePageURL)
+        let fourthInvocationCount = await gate.invocationCount(for: fourth.sourcePageURL)
+        XCTAssertEqual(firstInvocationCount, 1)
+        XCTAssertEqual(secondInvocationCount, 1)
+        XCTAssertEqual(thirdInvocationCount, 1)
+        XCTAssertEqual(fourthInvocationCount, 0)
+
+        await gate.resume(url: second.sourcePageURL)
+        try await Task.sleep(for: .milliseconds(100))
+        let jobsAfterSecond = try await service.allJobs()
+        XCTAssertEqual(jobsAfterSecond.first(where: { $0.id == fourth.id })?.status, .queued)
+
+        await gate.resume(url: first.sourcePageURL)
+        try await Task.sleep(for: .milliseconds(100))
+        let jobsAfterFirst = try await service.allJobs()
+        XCTAssertEqual(jobsAfterFirst.first(where: { $0.id == fourth.id })?.status, .queued)
+
+        await gate.resume(url: third.sourcePageURL)
+        await gate.waitForInvocationCount(4)
+        let scheduledFourthInvocationCount = await gate.invocationCount(for: fourth.sourcePageURL)
+        XCTAssertEqual(scheduledFourthInvocationCount, 1)
+        await gate.resume(url: fourth.sourcePageURL)
+    }
+
+    func testForcedJobCanBePausedWithoutStartingASecondDownloader() async throws {
+        let database = FileManager.default.temporaryDirectory.appending(path: "lustre-agent-force-pause-\(UUID().uuidString).sqlite3")
+        defer { try? FileManager.default.removeItem(at: database) }
+        let gate = ConcurrentDownloadGate()
+        let resolver = StaticProviderResolver(
+            fetch: { url, _ in
+                HTTPPage(body: #"<script>MDCore.wurl = "https://cdn.mxcontent.net/video.mp4"</script>"#, finalURL: url, statusCode: 200)
+            },
+            randomSuffix: { "unused" },
+            nowMilliseconds: { "0" }
+        )
+        let service = try AgentService(
+            databaseURL: database,
+            resolver: resolver,
+            downloadsDirectory: FileManager.default.temporaryDirectory,
+            progressDownloader: { resolution, _, directory, _ in
+                await gate.wait(for: resolution.sourcePageURL)
+                try Task.checkCancellation()
+                return directory.appending(path: "forced.mp4")
+            }
+        )
+
+        let first = try await service.createJob(CreateJobRequest(sourcePageURL: URL(string: "https://mixdrop.co/e/blocker")!))
+        await gate.waitForInvocationCount(1)
+        let forced = try await service.createJob(CreateJobRequest(sourcePageURL: URL(string: "https://mixdrop.co/e/forced")!))
+        _ = try await service.apply(.forceStart, to: forced.id)
+        await gate.waitForInvocationCount(2)
+
+        _ = try await service.apply(.pause, to: forced.id)
+        await gate.resume(url: forced.sourcePageURL)
+        try await Task.sleep(for: .milliseconds(100))
+
+        let pausedJobs = try await service.allJobs()
+        let forcedInvocationCount = await gate.invocationCount(for: forced.sourcePageURL)
+        XCTAssertEqual(pausedJobs.first(where: { $0.id == forced.id })?.status, .paused)
+        XCTAssertEqual(forcedInvocationCount, 1)
+        await gate.resume(url: first.sourcePageURL)
+    }
+
     func testTestsSavedWebDAVDestinationWithItsKeychainCredential() async throws {
         let database = FileManager.default.temporaryDirectory.appending(path: "lustre-agent-remote-test-\(UUID().uuidString).sqlite3")
         let profilesURL = FileManager.default.temporaryDirectory.appending(path: "lustre-agent-remote-test-profiles-\(UUID().uuidString).json")
@@ -633,7 +740,7 @@ final class AgentServiceTests: XCTestCase {
         let sites = await service.feedSites()
         let page = try await service.feedPage(site: .allPornStream, page: 2)
 
-        XCTAssertEqual(sites, [.allPornStream])
+        XCTAssertEqual(sites, [.allPornStream, .hqPorner, .onlyFan420, .pornHub])
         XCTAssertEqual(page.page, 2)
         XCTAssertEqual(page.items, [])
         XCTAssertFalse(page.hasMore)
@@ -737,6 +844,32 @@ private actor RemoteDownloadGate {
     func resumeFirstDownload() {
         firstContinuation?.resume()
         firstContinuation = nil
+    }
+}
+
+private actor ConcurrentDownloadGate {
+    private var invocations: [URL: Int] = [:]
+    private var continuations: [URL: CheckedContinuation<Void, Never>] = [:]
+
+    func wait(for url: URL) async {
+        invocations[url, default: 0] += 1
+        await withCheckedContinuation { continuation in
+            continuations[url] = continuation
+        }
+    }
+
+    func invocationCount(for url: URL) -> Int {
+        invocations[url, default: 0]
+    }
+
+    func waitForInvocationCount(_ count: Int) async {
+        while invocations.values.reduce(0, +) < count {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+    }
+
+    func resume(url: URL) {
+        continuations.removeValue(forKey: url)?.resume()
     }
 }
 

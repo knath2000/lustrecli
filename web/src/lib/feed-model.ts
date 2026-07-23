@@ -1,5 +1,7 @@
+export type FeedSiteID = string;
+
 export type FeedSite = {
-  id: "allpornstream";
+  id: FeedSiteID;
   displayName: string;
   homeURL: string;
   supportsSearch: boolean;

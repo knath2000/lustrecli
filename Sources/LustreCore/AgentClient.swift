@@ -41,6 +41,18 @@ public struct AgentClient {
         try await request(path: "/v1/feed/items?site=\(site.rawValue)&page=\(page)", method: "GET", body: Optional<Data>.none)
     }
 
+    public func pornHubAuthStatus() async throws -> PornHubAuthStatus {
+        try await request(path: "/v1/auth/pornhub", method: "GET", body: Optional<Data>.none)
+    }
+
+    public func signInWithPornHub() async throws -> PornHubAuthStatus {
+        try await request(path: "/v1/auth/pornhub/login", method: "POST", body: Optional<Data>.none)
+    }
+
+    public func signOutOfPornHub() async throws -> PornHubAuthStatus {
+        try await request(path: "/v1/auth/pornhub", method: "DELETE", body: Optional<Data>.none)
+    }
+
     public func extract(url: URL) async throws -> ExtractionResult {
         try await request(path: "/v1/extract", method: "POST", body: try encoder.encode(["url": url.absoluteString]))
     }

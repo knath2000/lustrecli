@@ -13,6 +13,20 @@ public struct HTTPPage: Sendable {
     }
 }
 
+public struct ProviderHTTPRequest: Sendable {
+    public let url: URL
+    public let method: String
+    public let headers: [String: String]
+    public let body: Data?
+
+    public init(url: URL, method: String = "GET", headers: [String: String] = [:], body: Data? = nil) {
+        self.url = url
+        self.method = method
+        self.headers = headers
+        self.body = body
+    }
+}
+
 public enum ProviderResolverError: Error, LocalizedError, Sendable {
     case invalidURL
     case unsupportedProvider
@@ -33,13 +47,15 @@ public enum ProviderResolverError: Error, LocalizedError, Sendable {
 
 public struct StaticProviderResolver: Sendable {
     public typealias Fetch = @Sendable (URL, [String: String]) async throws -> HTTPPage
+    public typealias RequestFetch = @Sendable (ProviderHTTPRequest) async throws -> HTTPPage
 
     public let pageFetch: Fetch
+    let requestFetch: RequestFetch
     private let randomSuffix: @Sendable () -> String
     private let nowMilliseconds: @Sendable () -> String
 
     public init() {
-        self.init(fetch: Self.fetchPage, randomSuffix: Self.makeRandomSuffix, nowMilliseconds: Self.currentMilliseconds)
+        self.init(requestFetch: Self.fetchRequest, randomSuffix: Self.makeRandomSuffix, nowMilliseconds: Self.currentMilliseconds)
     }
 
     public init(
@@ -48,6 +64,31 @@ public struct StaticProviderResolver: Sendable {
         nowMilliseconds: @escaping @Sendable () -> String
     ) {
         self.pageFetch = fetch
+        self.requestFetch = { request in
+            guard request.method == "GET", request.body == nil else {
+                throw ProviderResolverError.network("The injected provider transport does not support request bodies.")
+            }
+            return try await fetch(request.url, request.headers)
+        }
+        self.randomSuffix = randomSuffix
+        self.nowMilliseconds = nowMilliseconds
+    }
+
+    public init(
+        requestFetch: @escaping RequestFetch
+    ) {
+        self.init(requestFetch: requestFetch, randomSuffix: Self.makeRandomSuffix, nowMilliseconds: Self.currentMilliseconds)
+    }
+
+    public init(
+        requestFetch: @escaping RequestFetch,
+        randomSuffix: @escaping @Sendable () -> String,
+        nowMilliseconds: @escaping @Sendable () -> String
+    ) {
+        self.requestFetch = requestFetch
+        self.pageFetch = { url, headers in
+            try await requestFetch(ProviderHTTPRequest(url: url, headers: headers))
+        }
         self.randomSuffix = randomSuffix
         self.nowMilliseconds = nowMilliseconds
     }
@@ -62,8 +103,18 @@ public struct StaticProviderResolver: Sendable {
                 trace: ["Accepted direct media URL."]
             )
         }
+        if trustedProvider == .hqPorner || Self.isHQPornerSourceURL(url) {
+            guard Self.isHQPornerSourceURL(url) else { throw ProviderResolverError.invalidURL }
+            return try await resolveHQPorner(url: url)
+        }
         if trustedProvider == .doodStream || isDoodHost(url.host) {
             return try await resolveDood(url: url, forcePlaymogo: trustedProvider == .doodStream)
+        }
+        if trustedProvider == .vidara || isExactHost(url.host, domains: ["vidara.so"]) {
+            return try await resolveVidara(url: url)
+        }
+        if trustedProvider == .luluStream || isExactHost(url.host, domains: ["luluvid.com", "luluvdo.com", "lulustream.com"]) {
+            return try await resolveLulu(url: url)
         }
         if isMyDaddyHost(url.host) {
             return try await resolveMyDaddy(url: url)
@@ -77,9 +128,12 @@ public struct StaticProviderResolver: Sendable {
         throw ProviderResolverError.unsupportedProvider
     }
 
-    private func resolveMyDaddy(url: URL) async throws -> ProviderResolution {
+    func resolveMyDaddy(url: URL) async throws -> ProviderResolution {
         let referer = URL(string: "https://hqporner.com/")!
         let page = try await fetchProviderPage(url, headers: htmlHeaders(referer: referer))
+        guard isMyDaddyHost(page.finalURL.host), page.finalURL.scheme?.lowercased() == "https" else {
+            throw ProviderResolverError.invalidURL
+        }
         let html = normalize(page.body)
             .replacingOccurrences(of: #"\""#, with: "\"")
         let headers = [
@@ -265,10 +319,17 @@ public struct StaticProviderResolver: Sendable {
     }
 
     private static func fetchPage(url: URL, headers: [String: String]) async throws -> HTTPPage {
+        try await fetchRequest(ProviderHTTPRequest(url: url, headers: headers))
+    }
+
+    private static func fetchRequest(_ providerRequest: ProviderHTTPRequest) async throws -> HTTPPage {
+        let url = providerRequest.url
         guard URLSafetyPolicy.isAllowed(url) else { throw ProviderResolverError.invalidURL }
         var request = URLRequest(url: url)
+        request.httpMethod = providerRequest.method
+        request.httpBody = providerRequest.body
         request.timeoutInterval = 20
-        headers.forEach { request.setValue($0.value, forHTTPHeaderField: $0.key) }
+        providerRequest.headers.forEach { request.setValue($0.value, forHTTPHeaderField: $0.key) }
         let redirectDelegate = SafeRedirectDelegate()
         let session = URLSession(configuration: .ephemeral, delegate: redirectDelegate, delegateQueue: nil)
         defer { session.invalidateAndCancel() }
@@ -287,6 +348,32 @@ public struct StaticProviderResolver: Sendable {
         }
     }
 
+    func checkedRequest(_ request: ProviderHTTPRequest) async throws -> HTTPPage {
+        guard URLSafetyPolicy.isAllowed(request.url) else { throw ProviderResolverError.invalidURL }
+        let page = try await requestFetch(request)
+        guard URLSafetyPolicy.isAllowed(page.finalURL) else { throw ProviderResolverError.invalidURL }
+        if isCloudflareChallenge(page) { throw ProviderResolverError.cloudflareChallenge }
+        guard (200...299).contains(page.statusCode) else {
+            throw ProviderResolverError.network("Provider returned HTTP \(page.statusCode).")
+        }
+        return page
+    }
+
+    func isExactHost(_ host: String?, domains: [String]) -> Bool {
+        guard let host = host?.lowercased() else { return false }
+        return domains.contains { host == $0 || host.hasSuffix("." + $0) }
+    }
+
+    public static func isHQPornerHost(_ host: String?) -> Bool {
+        guard let host = host?.lowercased() else { return false }
+        return host == "hqporner.com" || host.hasSuffix(".hqporner.com")
+    }
+
+    public static func isHQPornerSourceURL(_ url: URL) -> Bool {
+        guard url.scheme?.lowercased() == "https", isHQPornerHost(url.host) else { return false }
+        return url.path.range(of: #"^/hdporn/\d+(?:[-/][^/?#]*)?$"#, options: .regularExpression) != nil
+    }
+
     private static func makeRandomSuffix() -> String {
         let alphabet = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789")
         return String((0..<10).compactMap { _ in alphabet.randomElement() })
@@ -301,6 +388,7 @@ public enum URLSafetyPolicy {
     public static func isAllowed(_ url: URL) -> Bool {
         guard let scheme = url.scheme?.lowercased(), ["http", "https"].contains(scheme),
               let host = url.host?.lowercased(), !host.isEmpty,
+              url.user == nil, url.password == nil,
               host != "localhost", !host.hasSuffix(".local"), !host.contains("%") else {
             return false
         }
