@@ -500,6 +500,7 @@ private func pairedCandidates(from records: [RawRecord]) -> [AllPornStreamCandid
             fileCode: record.fileCode,
             sourceURL: record.iframeURL ?? record.linkURL,
             trustedProvider: trustedProvider(for: record.providerName)
+                ?? myDaddyProvider(for: record.iframeURL ?? record.linkURL)
         )
     }
 }
@@ -512,6 +513,14 @@ private func trustedProvider(for name: String) -> ProviderKind? {
     case "STREAMTAPE": .streamTape
     default: nil
     }
+}
+
+private func myDaddyProvider(for url: URL?) -> ProviderKind? {
+    guard let host = url?.host?.lowercased(),
+          host == "mydaddy.cc" || host.hasSuffix(".mydaddy.cc") else {
+        return nil
+    }
+    return .myDaddy
 }
 
 private func normalizedFileCode(_ value: String?) -> String? {

@@ -24,6 +24,8 @@ public actor AgentService {
     private let destinationProfiles: RemoteDestinationProfileStore
     private let destinationSecrets: RemoteDestinationSecretStore
     private let folderPicker: FolderPicker
+    private let feed: FeedService
+    private let maximumConcurrentDownloads: Int
     private var activeDownloadTasks: [UUID: ActiveDownload] = [:]
     private var lastProgressUpdates: [UUID: (bytesWritten: Int64, timestamp: Date)] = [:]
 
@@ -38,7 +40,9 @@ public actor AgentService {
         destinationProfiles: RemoteDestinationProfileStore? = nil,
         destinationSecrets: RemoteDestinationSecretStore = KeychainRemoteDestinationSecretStore(),
         remoteDownloader: RemoteProgressDownloader? = nil,
-        remoteDestinationTester: RemoteDestinationTester? = nil
+        remoteDestinationTester: RemoteDestinationTester? = nil,
+        feed: FeedService = FeedService(),
+        maximumConcurrentDownloads: Int = 1
     ) throws {
         self.jobs = try JobStore(databaseURL: databaseURL)
         self.resolver = resolver
@@ -58,6 +62,8 @@ public actor AgentService {
         self.remoteDownloader = remoteDownloader ?? AgentService.uploadToWebDAV
         self.remoteDestinationTester = remoteDestinationTester ?? AgentService.testWebDAVDestination
         self.folderPicker = folderPicker ?? AgentService.chooseDownloadFolder
+        self.feed = feed
+        self.maximumConcurrentDownloads = max(1, maximumConcurrentDownloads)
         Task { [weak self] in
             await self?.recoverDurableJobs()
         }
@@ -69,6 +75,14 @@ public actor AgentService {
 
     public func allJobs() async throws -> [DownloadJob] {
         try await jobs.allJobs()
+    }
+
+    public func feedSites() -> [FeedSite] {
+        feed.sites()
+    }
+
+    public func feedPage(site: FeedSiteID, page: Int) async throws -> FeedPage {
+        try await feed.page(site: site, page: page)
     }
 
     public func allRemoteDestinations() async -> [WebDAVDestinationProfile] {
@@ -177,7 +191,7 @@ public actor AgentService {
         )
         record(&job, level: .info, message: RemoteDestination.webDAVProfileID(from: destination) == nil ? "Queued for local download." : "Queued for remote WebDAV download.")
         try await jobs.create(job)
-        if automaticallyStartsDownloads { startDownload(job.id) }
+        if automaticallyStartsDownloads { await enqueueDownload(job.id) }
         return job
     }
 
@@ -212,7 +226,7 @@ public actor AgentService {
         case .pause, .cancel:
             activeDownloadTasks[id]?.task.cancel()
         case .resume, .retry:
-            startDownload(id)
+            await enqueueDownload(id)
         }
         return job
     }
@@ -300,6 +314,15 @@ public actor AgentService {
         }
     }
 
+    private func enqueueDownload(_ id: UUID) async {
+        if let activeTask = activeDownloadTasks[id] {
+            if activeTask.task.isCancelled { startDownload(id) }
+            return
+        }
+        guard activeDownloadTasks.count < maximumConcurrentDownloads else { return }
+        startDownload(id)
+    }
+
     private func startDownload(_ id: UUID) {
         if let activeTask = activeDownloadTasks[id], !activeTask.task.isCancelled { return }
         let token = UUID()
@@ -311,10 +334,23 @@ public actor AgentService {
         activeDownloadTasks[id] = ActiveDownload(token: token, task: task)
     }
 
-    private func finishDownload(id: UUID, taskID: UUID) {
+    private func finishDownload(id: UUID, taskID: UUID) async {
         guard activeDownloadTasks[id]?.token == taskID else { return }
         activeDownloadTasks[id] = nil
         lastProgressUpdates[id] = nil
+        await scheduleQueuedDownloads()
+    }
+
+    private func scheduleQueuedDownloads() async {
+        guard automaticallyStartsDownloads,
+              activeDownloadTasks.count < maximumConcurrentDownloads,
+              let allJobs = try? await jobs.allJobs() else { return }
+        let queued = allJobs
+            .filter { $0.status == .queued && activeDownloadTasks[$0.id] == nil }
+            .sorted { $0.createdAt < $1.createdAt }
+        for job in queued where activeDownloadTasks.count < maximumConcurrentDownloads {
+            startDownload(job.id)
+        }
     }
 
     private func ownsDownload(_ id: UUID, taskID: UUID?) -> Bool {
@@ -350,9 +386,7 @@ public actor AgentService {
                 try await jobs.update(job)
             }
             if automaticallyStartsDownloads {
-                for job in try await jobs.allJobs() where job.status == .queued {
-                    startDownload(job.id)
-                }
+                await scheduleQueuedDownloads()
             }
         } catch {
             // Jobs remain durable; a later agent start can retry recovery.

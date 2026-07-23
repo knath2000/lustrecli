@@ -259,6 +259,70 @@ final class AgentServiceTests: XCTestCase {
         XCTAssertEqual(destinations, [profile])
     }
 
+    func testSeedboxJobsWaitInQueueWhileAnotherTransferIsRunning() async throws {
+        let database = FileManager.default.temporaryDirectory.appending(path: "lustre-agent-remote-queue-\(UUID().uuidString).sqlite3")
+        let profilesURL = FileManager.default.temporaryDirectory.appending(path: "lustre-agent-remote-queue-profiles-\(UUID().uuidString).json")
+        defer {
+            try? FileManager.default.removeItem(at: database)
+            try? FileManager.default.removeItem(at: profilesURL)
+        }
+        let profileStore = try RemoteDestinationProfileStore(fileURL: profilesURL)
+        let secretStore = TestRemoteDestinationSecretStore()
+        let gate = RemoteDownloadGate()
+        let resolver = StaticProviderResolver(
+            fetch: { url, _ in
+                HTTPPage(body: #"<script>MDCore.wurl = "https://cdn.mxcontent.net/video.mp4"</script>"#, finalURL: url, statusCode: 200)
+            },
+            randomSuffix: { "unused" },
+            nowMilliseconds: { "0" }
+        )
+        let service = try AgentService(
+            databaseURL: database,
+            resolver: resolver,
+            destinationProfiles: profileStore,
+            destinationSecrets: secretStore,
+            remoteDownloader: { resolution, _, profile, _, _ in
+                await gate.downloadStarted()
+                return profile.baseURL.appending(path: "\(resolution.sourcePageURL.lastPathComponent).mp4")
+            }
+        )
+        let profile = try await service.saveWebDAVDestination(WebDAVDestinationRequest(
+            name: "Seedbox",
+            baseURL: URL(string: "https://seedbox.example.test/webdav")!,
+            username: "lustre",
+            password: "test-password",
+            remotePath: "/Lustre"
+        ))
+        let destination = RemoteDestination.webDAV(profile.id)
+
+        let first = try await service.createJob(CreateJobRequest(sourcePageURL: URL(string: "https://mixdrop.co/e/first")!, destination: destination))
+        for _ in 0..<100 where await gate.invocationCount() == 0 {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        let second = try await service.createJob(CreateJobRequest(sourcePageURL: URL(string: "https://mixdrop.co/e/second")!, destination: destination))
+        try? await Task.sleep(for: .milliseconds(100))
+
+        let activeJobs = try await service.allJobs()
+        XCTAssertEqual(activeJobs.first(where: { $0.id == first.id })?.status, .running)
+        XCTAssertEqual(activeJobs.first(where: { $0.id == second.id })?.status, .queued)
+        let activeInvocationCount = await gate.invocationCount()
+        XCTAssertEqual(activeInvocationCount, 1)
+
+        await gate.resumeFirstDownload()
+        var completed = false
+        for _ in 0..<200 {
+            let jobs = try await service.allJobs()
+            if jobs.filter({ $0.id == first.id || $0.id == second.id }).allSatisfy({ $0.status == .completed }) {
+                completed = true
+                break
+            }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertTrue(completed)
+        let completedInvocationCount = await gate.invocationCount()
+        XCTAssertEqual(completedInvocationCount, 2)
+    }
+
     func testTestsSavedWebDAVDestinationWithItsKeychainCredential() async throws {
         let database = FileManager.default.temporaryDirectory.appending(path: "lustre-agent-remote-test-\(UUID().uuidString).sqlite3")
         let profilesURL = FileManager.default.temporaryDirectory.appending(path: "lustre-agent-remote-test-profiles-\(UUID().uuidString).json")
@@ -549,6 +613,31 @@ final class AgentServiceTests: XCTestCase {
         XCTAssertEqual(selectedPath, FileManager.default.temporaryDirectory.path)
         _ = await health.value
     }
+
+    func testFeedEndpointsExposeSitesAndRequestedPage() async throws {
+        let database = FileManager.default.temporaryDirectory.appending(path: "lustre-agent-feed-\(UUID().uuidString).sqlite3")
+        defer { try? FileManager.default.removeItem(at: database) }
+        let feed = FeedService(fetch: { url, _ in
+            HTTPPage(
+                body: #"<script type="application/ld+json">{"@type":"ItemList","itemType":"VideoObject","itemListElement":[]}</script>"#,
+                finalURL: url,
+                statusCode: 200
+            )
+        })
+        let service = try AgentService(
+            databaseURL: database,
+            automaticallyStartsDownloads: false,
+            feed: feed
+        )
+
+        let sites = await service.feedSites()
+        let page = try await service.feedPage(site: .allPornStream, page: 2)
+
+        XCTAssertEqual(sites, [.allPornStream])
+        XCTAssertEqual(page.page, 2)
+        XCTAssertEqual(page.items, [])
+        XCTAssertFalse(page.hasMore)
+    }
 }
 
 private enum QueueCreationError: Error {
@@ -627,6 +716,27 @@ private actor ProgressGate {
     func resume() {
         continuation?.resume()
         continuation = nil
+    }
+}
+
+private actor RemoteDownloadGate {
+    private var invocations = 0
+    private var firstContinuation: CheckedContinuation<Void, Never>?
+
+    func downloadStarted() async {
+        invocations += 1
+        if invocations == 1 {
+            await withCheckedContinuation { continuation in
+                firstContinuation = continuation
+            }
+        }
+    }
+
+    func invocationCount() -> Int { invocations }
+
+    func resumeFirstDownload() {
+        firstContinuation?.resume()
+        firstContinuation = nil
     }
 }
 

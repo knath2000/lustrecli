@@ -38,6 +38,7 @@ public enum ProviderKind: String, Codable, Sendable {
     case direct
     case allPornStream
     case doodStream
+    case myDaddy
     case mixDrop
     case streamTape
 }

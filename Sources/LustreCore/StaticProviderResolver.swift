@@ -65,6 +65,9 @@ public struct StaticProviderResolver: Sendable {
         if trustedProvider == .doodStream || isDoodHost(url.host) {
             return try await resolveDood(url: url, forcePlaymogo: trustedProvider == .doodStream)
         }
+        if isMyDaddyHost(url.host) {
+            return try await resolveMyDaddy(url: url)
+        }
         if trustedProvider == .mixDrop || isMixDropHost(url.host) {
             return try await resolveMixDrop(url: url)
         }
@@ -72,6 +75,36 @@ public struct StaticProviderResolver: Sendable {
             return try await resolveStreamTape(url: url)
         }
         throw ProviderResolverError.unsupportedProvider
+    }
+
+    private func resolveMyDaddy(url: URL) async throws -> ProviderResolution {
+        let referer = URL(string: "https://hqporner.com/")!
+        let page = try await fetchProviderPage(url, headers: htmlHeaders(referer: referer))
+        let html = normalize(page.body)
+            .replacingOccurrences(of: #"\""#, with: "\"")
+        let headers = [
+            "Referer": referer.absoluteString,
+            "User-Agent": NetworkConstants.chromeUserAgent
+        ]
+        let qualities = myDaddySources(in: html, relativeTo: page.finalURL).map {
+            ResolvedQuality(
+                label: $0.label,
+                url: $0.url,
+                headers: headers,
+                resolutionMethod: "Static mydaddy source resolver"
+            )
+        }
+        guard !qualities.isEmpty else { throw ProviderResolverError.noMediaFound }
+        return ProviderResolution(
+            sourcePageURL: url,
+            provider: .myDaddy,
+            title: title(in: html) ?? "mydaddy Video",
+            qualities: qualities,
+            trace: [
+                "Fetched \(page.finalURL.host ?? "mydaddy") static embed with HQPorner referer.",
+                "Resolved \(qualities.count) unique media source\(qualities.count == 1 ? "" : "s") from HTML source tags."
+            ]
+        )
     }
 
     private func resolveDood(url: URL, forcePlaymogo: Bool) async throws -> ProviderResolution {
@@ -335,6 +368,11 @@ private func isDoodHost(_ host: String?) -> Bool {
     return roots.contains { host == $0 || host.hasSuffix(".\($0)") }
 }
 
+private func isMyDaddyHost(_ host: String?) -> Bool {
+    guard let host = host?.lowercased() else { return false }
+    return host == "mydaddy.cc" || host.hasSuffix(".mydaddy.cc")
+}
+
 private func isMixDropHost(_ host: String?) -> Bool {
     guard let host = host?.lowercased() else { return false }
     let roots = ["mixdrop.ag", "mixdrop.co", "mixdrop.sx", "mixdrop.pw", "mixdrop.top", "mxdrop.to", "m1xdrop.click", "miiixdrop.net", "miiiixdrop.net"]
@@ -400,6 +438,52 @@ private func title(in html: String) -> String? {
 private func imageURL(in html: String, relativeTo pageURL: URL) -> URL? {
     guard let value = firstMatch([#"<meta[^>]+property=[\"']og:image[\"'][^>]+content=[\"']([^\"']+)"#], in: html) else { return nil }
     return URL(string: value, relativeTo: pageURL)?.absoluteURL
+}
+
+private func myDaddySources(in html: String, relativeTo pageURL: URL) -> [(label: String, url: URL)] {
+    guard let tagRegex = try? NSRegularExpression(pattern: #"<source\b[^>]*>"#, options: [.caseInsensitive]),
+          let attributeRegex = try? NSRegularExpression(
+            pattern: #"\b(src|title|label)\s*=\s*(["'])(.*?)\2"#,
+            options: [.caseInsensitive, .dotMatchesLineSeparators]
+          ) else {
+        return []
+    }
+    var sources: [(label: String, url: URL, index: Int)] = []
+    var seen = Set<String>()
+    let tags = tagRegex.matches(in: html, range: NSRange(html.startIndex..., in: html))
+    for (index, tagMatch) in tags.enumerated() {
+        guard let tagRange = Range(tagMatch.range, in: html) else { continue }
+        let tag = String(html[tagRange])
+        var attributes: [String: String] = [:]
+        for match in attributeRegex.matches(in: tag, range: NSRange(tag.startIndex..., in: tag)) {
+            guard let nameRange = Range(match.range(at: 1), in: tag),
+                  let valueRange = Range(match.range(at: 3), in: tag) else { continue }
+            attributes[String(tag[nameRange]).lowercased()] = String(tag[valueRange])
+        }
+        guard let rawSource = attributes["src"],
+              let mediaURL = URL(string: rawSource, relativeTo: pageURL)?.absoluteURL,
+              URLSafetyPolicy.isAllowed(mediaURL),
+              isDirectMedia(mediaURL),
+              seen.insert(mediaURL.absoluteString).inserted else {
+            continue
+        }
+        let label = attributes["title"] ?? attributes["label"] ?? "Video"
+        sources.append((label.trimmingCharacters(in: .whitespacesAndNewlines), mediaURL, index))
+    }
+    return sources.sorted {
+        let left = resolutionHeight(in: $0.label)
+        let right = resolutionHeight(in: $1.label)
+        return left == right ? $0.index < $1.index : left > right
+    }.map { ($0.label.isEmpty ? "Video" : $0.label, $0.url) }
+}
+
+private func resolutionHeight(in label: String) -> Int {
+    guard let regex = try? NSRegularExpression(pattern: #"(\d{3,4})\s*[pP]?"#),
+          let match = regex.firstMatch(in: label, range: NSRange(label.startIndex..., in: label)),
+          let range = Range(match.range(at: 1), in: label) else {
+        return 0
+    }
+    return Int(label[range]) ?? 0
 }
 
 private func embeddedPlayerURL(in html: String, relativeTo pageURL: URL) -> URL? {

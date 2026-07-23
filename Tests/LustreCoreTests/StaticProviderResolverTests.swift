@@ -2,6 +2,129 @@ import LustreCore
 import XCTest
 
 final class StaticProviderResolverTests: XCTestCase {
+    func testResolvesExactLiveMyDaddyEscapedSourceShape() async throws {
+        let embedURL = URL(string: "https://mydaddy.cc/video/3f5db4343ed074bcca/")!
+        let resolver = StaticProviderResolver(
+            fetch: { url, headers in
+                XCTAssertEqual(url, embedURL)
+                XCTAssertEqual(headers["Referer"], "https://hqporner.com/")
+                XCTAssertEqual(headers["User-Agent"], NetworkConstants.chromeUserAgent)
+                return HTTPPage(
+                    body: #"""
+                    <video>
+                      <source src=\"//s24.bigcdn.cc/pubs/6a61af23e66242.19596701/360.mp4\" title=\"360p\" type=\"video/mp4\" />
+                      <source src=\"//s24.bigcdn.cc/pubs/6a61af23e66242.19596701/720.mp4\" title=\"720p HD\" type=\"video/mp4\" />
+                      <source src=\"//s24.bigcdn.cc/pubs/6a61af23e66242.19596701/360.mp4\" title=\"360p\" type=\"video/mp4\" />
+                      <source src=\"//s24.bigcdn.cc/pubs/6a61af23e66242.19596701/1080.mp4\" title=\"1080p Full HD\" type=\"video/mp4\" />
+                    </video>
+                    """#,
+                    finalURL: url,
+                    statusCode: 200
+                )
+            },
+            randomSuffix: { "unused" },
+            nowMilliseconds: { "0" }
+        )
+
+        let resolution = try await resolver.resolve(url: embedURL)
+
+        XCTAssertEqual(resolution.qualities.map(\.label), ["1080p Full HD", "720p HD", "360p"])
+        XCTAssertEqual(resolution.qualities.map(\.url.absoluteString), [
+            "https://s24.bigcdn.cc/pubs/6a61af23e66242.19596701/1080.mp4",
+            "https://s24.bigcdn.cc/pubs/6a61af23e66242.19596701/720.mp4",
+            "https://s24.bigcdn.cc/pubs/6a61af23e66242.19596701/360.mp4"
+        ])
+        XCTAssertTrue(resolution.qualities.allSatisfy {
+            $0.headers["Referer"] == "https://hqporner.com/"
+                && $0.headers["User-Agent"] == NetworkConstants.chromeUserAgent
+        })
+    }
+
+    func testResolvesMyDaddySourceTagsWithDeterministicQualitiesAndHeaders() async throws {
+        let embedURL = URL(string: "https://embed.mydaddy.cc/video/working")!
+        let resolver = StaticProviderResolver(
+            fetch: { url, headers in
+                XCTAssertEqual(url, embedURL)
+                XCTAssertEqual(headers["User-Agent"], NetworkConstants.chromeUserAgent)
+                XCTAssertEqual(headers["Referer"], "https://hqporner.com/")
+                return HTTPPage(
+                    body: #"""
+                    <html><head><title>Fixture video</title></head><body><video>
+                      <source src="//cdn.example.com/video-720.mp4" title="720p">
+                      <source label="1080p" src="/media/video-1080.mp4">
+                      <source src="https://cdn.example.com/video-720.mp4" label="720p duplicate">
+                      <source src="https://cdn.example.com/player.js" label="2160p">
+                      <source src="https://cdn.example.com/poster.jpg" label="480p">
+                      <source src="https://cdn.example.com/watch" label="360p">
+                    </video></body></html>
+                    """#,
+                    finalURL: url,
+                    statusCode: 200
+                )
+            },
+            randomSuffix: { "unused" },
+            nowMilliseconds: { "0" }
+        )
+
+        let resolution = try await resolver.resolve(url: embedURL)
+
+        XCTAssertEqual(resolution.sourcePageURL, embedURL)
+        XCTAssertEqual(resolution.provider, .myDaddy)
+        XCTAssertEqual(resolution.title, "Fixture video")
+        XCTAssertEqual(resolution.qualities.map(\.label), ["1080p", "720p"])
+        XCTAssertEqual(resolution.qualities.map(\.url.absoluteString), [
+            "https://embed.mydaddy.cc/media/video-1080.mp4",
+            "https://cdn.example.com/video-720.mp4"
+        ])
+        XCTAssertTrue(resolution.qualities.allSatisfy {
+            $0.headers["Referer"] == "https://hqporner.com/"
+                && $0.headers["User-Agent"] == NetworkConstants.chromeUserAgent
+                && $0.resolutionMethod == "Static mydaddy source resolver"
+        })
+        XCTAssertTrue(resolution.trace.contains { $0.contains("2 unique media") })
+    }
+
+    func testMyDaddyBlockedPageReturnsNoMediaFound() async throws {
+        let resolver = StaticProviderResolver(
+            fetch: { url, _ in
+                HTTPPage(
+                    body: "<html><body>This domain has been blocked.</body></html>",
+                    finalURL: url,
+                    statusCode: 200
+                )
+            },
+            randomSuffix: { "unused" },
+            nowMilliseconds: { "0" }
+        )
+
+        do {
+            _ = try await resolver.resolve(url: URL(string: "https://mydaddy.cc/video/3f5db4343ed074bcca/")!)
+            XCTFail("Expected a blocked page with no source tags to return noMediaFound.")
+        } catch ProviderResolverError.noMediaFound {
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+
+    func testDoesNotTrustMyDaddyLookalikeHost() async throws {
+        let resolver = StaticProviderResolver(
+            fetch: { url, _ in
+                XCTFail("Lookalike host must not be fetched.")
+                return HTTPPage(body: "", finalURL: url, statusCode: 200)
+            },
+            randomSuffix: { "unused" },
+            nowMilliseconds: { "0" }
+        )
+
+        do {
+            _ = try await resolver.resolve(url: URL(string: "https://mydaddy.cc.attacker.example/video/abc")!)
+            XCTFail("Expected the lookalike host to remain unsupported.")
+        } catch ProviderResolverError.unsupportedProvider {
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+
     func testResolvesPlaymogoPassURLWithRequiredHeaders() async throws {
         let resolver = StaticProviderResolver(
             fetch: { url, headers in

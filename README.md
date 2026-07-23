@@ -20,7 +20,7 @@ The first run stores a local API token in the login Keychain. `lustre token` pri
 
 ## Lustre Cloud web UI (development)
 
-The Next.js redesign lives in `web/`. It currently runs as a local development bridge to the existing authenticated agent API; it is not the future hosted remote-control service yet. Its live operational surfaces cover the device workspace, durable Downloads ledger and Transfer Inspector, WebDAV Destinations management, a searchable Activity timeline derived from worker logs, session-scoped Settings, and the Queue Transfer sheet.
+The Next.js redesign lives in `web/`. It currently runs as a local development bridge to the existing authenticated agent API; it is not the future hosted remote-control service yet. Its live operational surfaces cover the device workspace, durable Downloads ledger and Transfer Inspector, WebDAV Destinations management, a searchable Activity timeline derived from worker logs, session-scoped Settings, the Queue Transfer sheet, and an agent-backed AllPornStream Feed with pagination, selection, destination handoff, and hover scene previews.
 
 ```sh
 swift run lustre-agent
@@ -37,7 +37,9 @@ Open `http://localhost:3000`, run `swift run lustre token` in a separate termina
 
 `lustre` is intentionally a thin optional administrative client for scripting, diagnostics, token retrieval, queue operations, and job control. A future packaging simplification may ship one `lustre` binary with a persistent `lustre daemon` mode managed by `launchd`, but durable background execution must remain a persistent local process even if the separate `lustre-agent` executable name is removed.
 
-Direct media URLs plus static Dood/Playmogo, MixDrop, and StreamTape resolution are available. Queue acknowledgement is immediate; queued local jobs re-resolve their original source page in the background immediately before downloading, preserve the resolved media headers, write through a `.part` file, and save completed files under `~/Downloads/Lustre`. Select an exact quality label with `--quality`, for example `DOODSTREAM · Video`; omit it to use the first resolved quality. Jobs retain the original source page URL rather than persisting expired CDN URLs. Interactive browser verification remains a separate next step.
+Direct media URLs plus static Dood/Playmogo, MixDrop, StreamTape, and mydaddy.cc resolution are available. mydaddy embeds are fetched with their required HQPorner request context, support normal or escaped `<source>` attributes, deduplicate qualities, and preserve media headers. AllPornStream resolves supported candidates concurrently, retains per-provider failures, and keeps successful qualities when another provider fails.
+
+Queue acknowledgement is immediate. The durable scheduler runs one transfer at a time by default; additional local or WebDAV jobs remain queued in creation order until the active transfer exits. Each worker re-resolves the original source page immediately before downloading, preserves the resolved media headers, writes through a `.part` file, and saves completed local files under `~/Downloads/Lustre`. Select an exact quality label with `--quality`, for example `DOODSTREAM · Video`; omit it to use the first resolved quality. Jobs retain the original source page URL rather than persisting expired CDN URLs. Interactive browser verification remains a separate next step.
 
 ## Remote WebDAV destinations
 
@@ -53,6 +55,8 @@ All `/v1` endpoints require `Authorization: Bearer <token>`.
 
 - `GET /health`
 - `GET /v1/jobs`
+- `GET /v1/feed/sites`
+- `GET /v1/feed/items?site=allpornstream&page=1`
 - `POST /v1/extract` with `{"url":"https://..."}`
 - `POST /v1/jobs` with `{"sourcePageURL":"https://...","preferredQualityLabel":"1080p","destination":"local"}`
 - `POST /v1/folders/select` opens the local macOS folder picker and returns `{"path":"/absolute/path"}`
@@ -61,6 +65,8 @@ All `/v1` endpoints require `Authorization: Bearer <token>`.
 - `POST /v1/destinations/webdav` saves a WebDAV profile and its Keychain password
 - `POST /v1/destinations/:id/test` checks WebDAV reachability, authentication, remote-directory creation, temporary write, and cleanup
 - `DELETE /v1/destinations/:id` removes a saved profile and its Keychain password
+
+The CLI mirrors feed discovery with `lustre feed sites` and `lustre feed list --site allpornstream --page 1`.
 
 ## LaunchAgent
 

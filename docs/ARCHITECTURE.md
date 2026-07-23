@@ -33,12 +33,15 @@ Supported resolution paths:
 - Dood/Playmogo: trusted AllPornStream Dood aliases canonicalize to Playmogo, follow the static `pass_md5` path, construct the signed CloudAta URL, and retain `Referer`, Chrome user-agent, `Accept`, and language headers.
 - MixDrop: extracts static `MDCore.wurl`, source-file, or `data-src` media configuration, falls back to the current `miiiixdrop.net` mirror only when the initial page has no usable media, and accepts only MP4 or signed `mxcontent.net/d/...` media paths.
 - StreamTape: extracts static source/get-video configuration, including literal hidden `get_video` links, follows the provider redirect to `tapecontent.net`, and preserves referer and user-agent headers.
+- mydaddy.cc: routes otherwise-unknown AllPornStream candidates only when their exact public host is `mydaddy.cc` or a subdomain, fetches embeds with the required `https://hqporner.com/` referer, accepts normal and backslash-escaped `<source>` attributes, deduplicates and sorts MP4 qualities, and forwards the referer and Chrome user-agent to the CDN request. A missing or incorrect referer produces the provider's misleading `This domain has been blocked` response.
+
+Every eligible AllPornStream candidate is attempted with bounded concurrency. Failures are isolated per candidate, diagnostics remain in source order, successful qualities survive other-provider failures, and the aggregate fails only when no static candidate succeeds.
 
 The resolver rejects private/local source URLs. A Cloudflare response is returned as `verificationRequired`; it never silently retries or pretends static resolution succeeded.
 
 ## Download execution
 
-Creating a `destination: "local"` job durably acknowledges it as `queued` immediately, then starts an in-process download task. The worker changes it from `queued` to `running`, re-resolves the original source page immediately before transfer, selects the exact preferred label (or first available quality), and sends the resolver's headers with the media request. When the provider supplies a content length, URLSession byte callbacks persist a `0...1` progress fraction for the web panel's two-second polling loop.
+Creating a job durably acknowledges it as `queued` immediately. The scheduler starts at most one transfer by default and leaves later local or WebDAV jobs queued in creation order until capacity is available. A finishing, failing, paused, or cancelled worker releases its slot and starts the next durable job. The worker changes its job from `queued` to `running`, re-resolves the original source page immediately before transfer, selects the exact preferred label (or first available quality), and sends the resolver's headers with the media request. When the provider supplies a content length, URLSession byte callbacks persist a `0...1` progress fraction for the web panel's two-second polling loop.
 
 - Completed files are saved under `~/Downloads/Lustre`.
 - CloudAta and MixDrop requests add `Range: bytes=0-` unless the resolver already supplied a range.
@@ -65,6 +68,8 @@ Creating a `destination: "local"` job durably acknowledges it as `queued` immedi
 | Method | Route | Purpose |
 | --- | --- | --- |
 | `GET` | `/v1/jobs` | List durable jobs. |
+| `GET` | `/v1/feed/sites` | List normalized feed sources supported by the agent. |
+| `GET` | `/v1/feed/items?site=allpornstream&page=N` | Fetch a normalized, paginated AllPornStream card feed. |
 | `POST` | `/v1/extract` | Resolve a URL without queueing it. |
 | `POST` | `/v1/jobs` | Create a durable job from its original page URL. |
 | `POST` | `/v1/folders/select` | Show a native macOS folder picker and return a validated absolute local destination. |
@@ -90,6 +95,7 @@ The root loopback page is an authenticated Monitor/Operate surface at `http://12
 - The Activity surface derives a searchable, categorized, severity-aware timeline from the bounded durable logs already attached to agent jobs. It does not fabricate device-wide events that the current API cannot provide.
 - Settings controls the current browser tab's real polling cadence, manual refresh, and disconnect behavior. Unsupported agent settings are explicitly identified rather than represented by non-functional controls.
 - Queue Transfer submits real `CreateJobRequest` values and can target local storage or an existing `webdav:<profile-id>` destination. WebDAV passwords remain in the agent's Keychain.
+- Feed fetches normalized AllPornStream cards through the agent, preserves query parameters through the authenticated Next.js proxy, supports pagination, individual or bounded batch queueing, destination selection, and job-derived transfer status. Hovering a thumbnail cycles up to four distinct scene images, preloads frames, and resets on exit.
 - Swift's default `JSONEncoder` emits `Date` as Foundation reference-date seconds. The web boundary normalizes those numeric values while also accepting ISO-8601 strings, so sorting and time display remain compatible with a future API encoding change.
 
 This bridge is deliberately development-only. The hosted service must not attempt to call a visitor's loopback address. Production remote control will keep the Swift agent authoritative for downloads, paths, SQLite state, and Keychain secrets while the agent establishes an outbound authenticated realtime connection to the cloud control plane. Browser account identity and paired-device identity remain separate trust domains.
@@ -98,11 +104,11 @@ This bridge is deliberately development-only. The hosted service must not attemp
 
 1. Add hosted account authentication, device enrollment, revocation, and an outbound agent realtime channel without exposing the loopback API.
 2. Add device enrollment/selection and server-backed pagination as job histories grow.
-3. Add a configurable bounded transfer scheduler with global and per-destination concurrency limits.
+3. Make the current single-transfer scheduler limit configurable and add per-destination limits.
 4. Port Vidara's API/HLS resolver.
 5. Add resumable `.part` transfers and bounded automatic re-resolution for expired media responses.
 6. Isolate WebKit in a visible verification bridge for actual interactive challenges; it must not enter `LustreCore`.
 
 ## Validation
 
-`swift test` verifies SQLite persistence, AllPornStream metadata pairing/concurrency/diagnostics, Agent-to-Core resolution wiring, Playmogo URL/header construction, MixDrop mirror/media validation, StreamTape redirect handling, Cloudflare challenge classification, and queued-job re-resolution/header handoff. `swift build -c release` validates the production executables. In `web/`, `npm test`, `npm run lint`, and `npm run build` validate agent-date compatibility, loopback proxy restrictions, Downloads filtering, destination presentation, Activity derivation/filtering, session polling settings, frontend quality, and the production Next.js bundle.
+`swift test` verifies SQLite persistence, AllPornStream feed parsing and provider pairing/concurrency/diagnostics, mydaddy escaped-source parsing and required request headers, partial aggregate success, Agent-to-Core resolution wiring, serialized seedbox queueing, Playmogo URL/header construction, MixDrop mirror/media validation, StreamTape redirect handling, Cloudflare challenge classification, and queued-job re-resolution/header handoff. `swift build -c release` validates the production executables. In `web/`, `npm test`, `npm run lint`, and `npm run build` validate feed behavior, query-preserving loopback proxy restrictions, hover-frame selection, agent-date compatibility, Downloads filtering, destination presentation, Activity derivation/filtering, session polling settings, frontend quality, and the production Next.js bundle.

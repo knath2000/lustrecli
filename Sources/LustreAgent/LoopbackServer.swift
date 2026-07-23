@@ -48,13 +48,15 @@ public final class LoopbackServer: @unchecked Sendable {
     }
 
     private func route(_ request: HTTPRequest) async -> HTTPResponse {
-        if request.method == "GET", request.path == "/" {
+        let components = URLComponents(string: request.path)
+        let routePath = components?.path ?? request.path
+        if request.method == "GET", routePath == "/" {
             return .html(WebPanel.index)
         }
-        if request.method == "GET", request.path == "/health" {
+        if request.method == "GET", routePath == "/health" {
             return json(status: 200, value: await service.health())
         }
-        guard request.path.hasPrefix("/v1/") else { return .text(status: 404, "Not found.") }
+        guard routePath.hasPrefix("/v1/") else { return .text(status: 404, "Not found.") }
         guard request.headers["authorization"] == "Bearer \(token)" else {
             return json(status: 401, value: ErrorResponse(error: "Authorization required."))
         }
@@ -62,6 +64,19 @@ public final class LoopbackServer: @unchecked Sendable {
         do {
             if request.method == "GET", request.path == "/v1/jobs" {
                 return json(status: 200, value: try await service.allJobs())
+            }
+            if request.method == "GET", routePath == "/v1/feed/sites" {
+                return json(status: 200, value: await service.feedSites())
+            }
+            if request.method == "GET", routePath == "/v1/feed/items" {
+                let query = (components?.queryItems ?? []).reduce(into: [String: String]()) { values, item in
+                    if let value = item.value { values[item.name] = value }
+                }
+                guard let rawSite = query["site"], let site = FeedSiteID(rawValue: rawSite) else {
+                    return json(status: 400, value: ErrorResponse(error: "A supported feed site is required."))
+                }
+                let page = query["page"].flatMap(Int.init) ?? 1
+                return json(status: 200, value: try await service.feedPage(site: site, page: page))
             }
             if request.method == "GET", request.path == "/v1/destinations" {
                 return json(status: 200, value: await service.allRemoteDestinations())

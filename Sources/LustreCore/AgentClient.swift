@@ -33,6 +33,14 @@ public struct AgentClient {
         try await request(path: "/v1/jobs", method: "GET", body: Optional<Data>.none)
     }
 
+    public func feedSites() async throws -> [FeedSite] {
+        try await request(path: "/v1/feed/sites", method: "GET", body: Optional<Data>.none)
+    }
+
+    public func feedPage(site: FeedSiteID, page: Int = 1) async throws -> FeedPage {
+        try await request(path: "/v1/feed/items?site=\(site.rawValue)&page=\(page)", method: "GET", body: Optional<Data>.none)
+    }
+
     public func extract(url: URL) async throws -> ExtractionResult {
         try await request(path: "/v1/extract", method: "POST", body: try encoder.encode(["url": url.absoluteString]))
     }

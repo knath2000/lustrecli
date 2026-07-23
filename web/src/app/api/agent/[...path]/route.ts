@@ -16,7 +16,7 @@ async function proxy(request: Request, context: RouteContext): Promise<Response>
 
   let target: URL;
   try {
-    target = buildAgentURL(apiPath);
+    target = buildAgentURL(apiPath, new URL(request.url).search);
   } catch {
     return Response.json({ error: "Invalid local agent path." }, { status: 400 });
   }

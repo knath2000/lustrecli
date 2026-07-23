@@ -21,6 +21,18 @@ struct LustreCLI {
                 guard arguments.count == 2, let url = URL(string: arguments[1]) else { throw CLIError.usage }
                 let result = try await client.extract(url: url)
                 try printJSON(result)
+            case "feed":
+                guard arguments.count >= 2 else { throw CLIError.usage }
+                if arguments[1] == "sites" {
+                    try printJSON(try await client.feedSites())
+                } else if arguments[1] == "list",
+                          let rawSite = option("--site", in: arguments),
+                          let site = FeedSiteID(rawValue: rawSite) {
+                    let page = option("--page", in: arguments).flatMap(Int.init) ?? 1
+                    try printJSON(try await client.feedPage(site: site, page: page))
+                } else {
+                    throw CLIError.usage
+                }
             case "queue":
                 guard arguments.count >= 2, let url = URL(string: arguments[1]) else { throw CLIError.usage }
                 let quality = option("--quality", in: arguments)
@@ -61,6 +73,8 @@ private enum CLIError: Error, LocalizedError {
           lustre token
           lustre status
           lustre extract <url>
+          lustre feed sites
+          lustre feed list --site allpornstream [--page <number>]
           lustre queue <url> [--quality <label>] [--destination <name>]
           lustre pause|resume|cancel|retry <job-id>
         """

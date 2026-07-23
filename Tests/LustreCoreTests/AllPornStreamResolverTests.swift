@@ -2,6 +2,108 @@ import LustreCore
 import XCTest
 
 final class AllPornStreamResolverTests: XCTestCase {
+    func testKeepsMyDaddySuccessWhenAnotherConcurrentCandidateFails() async throws {
+        let postURL = URL(string: "https://allpornstream.com/post/partial-mydaddy")!
+        let mixDropURL = URL(string: "https://mixdrop.co/e/broken")!
+        let myDaddyURL = URL(string: "https://mydaddy.cc/video/working/")!
+        let fetchLog = CandidateFetchLog()
+        let resolver = StaticProviderResolver(
+            fetch: { url, _ in
+                if url == postURL {
+                    return HTTPPage(
+                        body: #"""
+                        {"video_urls":[
+                          {"hosting_provider":"MIXDROP","file_code":"broken","iframe":"https://mixdrop.co/e/broken"},
+                          {"hosting_provider":"UNKNOWN","file_code":"working","iframe":"https://mydaddy.cc/video/working/"}
+                        ]}
+                        """#,
+                        finalURL: url,
+                        statusCode: 200
+                    )
+                }
+                await fetchLog.record(url)
+                if url != myDaddyURL {
+                    try await Task.sleep(for: .milliseconds(20))
+                    return HTTPPage(body: "<html>No media here</html>", finalURL: url, statusCode: 200)
+                }
+                XCTAssertEqual(url, myDaddyURL)
+                return HTTPPage(
+                    body: #"<source src=\"//media.example.com/1080.mp4\" title=\"1080p Full HD\" type=\"video/mp4\" />"#,
+                    finalURL: url,
+                    statusCode: 200
+                )
+            },
+            randomSuffix: { "unused" },
+            nowMilliseconds: { "0" }
+        )
+
+        let result = try await AllPornStreamResolver(fetch: resolver.pageFetch, providerResolver: resolver).resolve(postURL: postURL)
+
+        XCTAssertEqual(result.attempts.map(\.providerName), ["MIXDROP", "UNKNOWN"])
+        XCTAssertEqual(result.attempts.map(\.outcome), [.failed, .resolved])
+        XCTAssertEqual(result.resolution.qualities.map(\.label), ["UNKNOWN · 1080p Full HD"])
+        XCTAssertEqual(result.resolution.qualities.first?.url.absoluteString, "https://media.example.com/1080.mp4")
+        let fetchedURLs = await fetchLog.urls()
+        XCTAssertTrue(fetchedURLs.contains(mixDropURL))
+        XCTAssertTrue(fetchedURLs.contains(myDaddyURL))
+    }
+
+    func testRoutesUnknownMyDaddyCandidateByActualSourceHost() async throws {
+        let postURL = URL(string: "https://allpornstream.com/post/mydaddy")!
+        let embedURL = URL(string: "https://mydaddy.cc/video/working/")!
+        let resolver = StaticProviderResolver(
+            fetch: { url, headers in
+                if url == postURL {
+                    return HTTPPage(
+                        body: #"{"video_urls":[{"hosting_provider":"UNKNOWN","file_code":"working","iframe":"https://mydaddy.cc/video/working/"}]}"#,
+                        finalURL: url,
+                        statusCode: 200
+                    )
+                }
+                XCTAssertEqual(url, embedURL)
+                XCTAssertEqual(headers["Referer"], "https://hqporner.com/")
+                return HTTPPage(
+                    body: #"<video><source src="https://media.example.com/working.mp4" title="720p"></video>"#,
+                    finalURL: url,
+                    statusCode: 200
+                )
+            },
+            randomSuffix: { "unused" },
+            nowMilliseconds: { "0" }
+        )
+
+        let result = try await AllPornStreamResolver(fetch: resolver.pageFetch, providerResolver: resolver).resolve(postURL: postURL)
+
+        XCTAssertEqual(result.attempts.first?.providerName, "UNKNOWN")
+        XCTAssertEqual(result.attempts.first?.outcome, .resolved)
+        XCTAssertEqual(result.attempts.first?.resolutionMethod, "Static mydaddy source resolver")
+        XCTAssertNotEqual(result.attempts.first?.reason, "No static resolver is installed for this hosting_provider.")
+        XCTAssertEqual(result.resolution.qualities.first?.label, "UNKNOWN · 720p")
+        XCTAssertEqual(result.resolution.qualities.first?.url.absoluteString, "https://media.example.com/working.mp4")
+    }
+
+    func testDoesNotRouteUnknownCandidateFromUnrelatedHostToMyDaddy() async throws {
+        let postURL = URL(string: "https://allpornstream.com/post/unknown")!
+        let resolver = StaticProviderResolver(
+            fetch: { url, _ in
+                XCTAssertEqual(url, postURL)
+                return HTTPPage(
+                    body: #"{"video_urls":[{"hosting_provider":"UNKNOWN","iframe":"https://notmydaddy.cc/video/working/"}]}"#,
+                    finalURL: url,
+                    statusCode: 200
+                )
+            },
+            randomSuffix: { "unused" },
+            nowMilliseconds: { "0" }
+        )
+
+        let result = try await AllPornStreamResolver(fetch: resolver.pageFetch, providerResolver: resolver).resolve(postURL: postURL)
+
+        XCTAssertEqual(result.attempts.first?.outcome, .failed)
+        XCTAssertEqual(result.attempts.first?.reason, "No static resolver is installed for this hosting_provider.")
+        XCTAssertTrue(result.resolution.qualities.isEmpty)
+    }
+
     func testParsesNextFlightMetadataPairsEmbedsAndPreservesProviderOrder() {
         let postURL = URL(string: "https://allpornstream.com/post/example")!
         let html = #"""
@@ -191,5 +293,17 @@ private actor ConcurrentFetchTracker {
 
     func maximumInFlight() -> Int {
         maximum
+    }
+}
+
+private actor CandidateFetchLog {
+    private var fetchedURLs: [URL] = []
+
+    func record(_ url: URL) {
+        fetchedURLs.append(url)
+    }
+
+    func urls() -> [URL] {
+        fetchedURLs
     }
 }

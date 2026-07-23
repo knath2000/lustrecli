@@ -10,6 +10,13 @@ test("buildAgentURL keeps an allowed versioned agent path on the loopback endpoi
   );
 });
 
+test("buildAgentURL forwards the browser request query to the loopback agent", () => {
+  assert.equal(
+    buildAgentURL("/v1/feed/items", "?site=allpornstream&page=2").toString(),
+    "http://127.0.0.1:63406/v1/feed/items?site=allpornstream&page=2",
+  );
+});
+
 test("buildAgentURL rejects a path outside the versioned agent API", () => {
   assert.throws(() => buildAgentURL("/health"), /versioned agent API/);
 });
