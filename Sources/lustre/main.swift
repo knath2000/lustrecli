@@ -37,7 +37,7 @@ struct LustreCLI {
                           let rawSite = option("--site", in: arguments),
                           let site = FeedSiteID(rawValue: rawSite) {
                     let page = option("--page", in: arguments).flatMap(Int.init) ?? 1
-                    try printJSON(try await client.feedPage(site: site, page: page))
+                    try printJSON(try await client.feedPage(site: site, query: option("--query", in: arguments), page: page))
                 } else {
                     throw CLIError.usage
                 }
@@ -87,7 +87,7 @@ private enum CLIError: Error, LocalizedError {
           lustre auth status|login|logout
           lustre extract <url>
           lustre feed sites
-          lustre feed list --site allpornstream|hqporner|onlyfan420|pornhub [--page <number>]
+          lustre feed list --site allpornstream|hqporner|onlyfan420|pornhub [--query <text>] [--page <number>]
           lustre queue <url> [--quality <label>] [--destination <name>]
           lustre force-start <job-id>
           lustre pause|resume|cancel|retry <job-id>

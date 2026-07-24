@@ -98,7 +98,7 @@ public actor AgentService {
         self.ytDlpMaterializer = ytDlpMaterializer ?? { resolution, quality, directory, reportProgress in
             guard let selector = quality.formatSelector else { throw PornHubYtDlpError.invalidFormat }
             let cookies = (try? await pornHubAuth.cookiesForYtDlp()) ?? []
-            do { return try await PornHubYtDlp.materialize(source: resolution.sourcePageURL, formatSelector: selector, directory: directory, cookies: cookies, onProgress: reportProgress) }
+            do { return try await PornHubYtDlp.materialize(source: resolution.sourcePageURL, title: resolution.title, formatSelector: selector, directory: directory, cookies: cookies, onProgress: reportProgress) }
             catch let error as PornHubYtDlpError {
                 if !cookies.isEmpty { await pornHubAuth.recordYtDlpFailure(error) }
                 throw error
@@ -139,8 +139,8 @@ public actor AgentService {
         return await pornHubAuth.status().state == .signedIn ? sites + FeedSite.authenticatedPornHub : sites
     }
 
-    public func feedPage(site: FeedSiteID, page: Int) async throws -> FeedPage {
-        try await feed.page(site: site, page: page)
+    public func feedPage(site: FeedSiteID, query: String? = nil, page: Int) async throws -> FeedPage {
+        try await feed.page(FeedQuery(site: site, text: query, page: page))
     }
 
     public func feedAsset(url: URL, kind: FeedAssetKind) async throws -> FeedAssetResponse {
@@ -1277,33 +1277,9 @@ private func requiresInitialRange(_ url: URL) -> Bool {
 }
 
 private func uniqueDestination(in directory: URL, title: String?, mediaURL: URL) -> URL {
-    let rawTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false ? title! : "Lustre-video"
-    let allowed = CharacterSet.alphanumerics.union(.whitespaces).union(CharacterSet(charactersIn: "-_"))
-    let base = rawTitle.unicodeScalars.map { allowed.contains($0) ? Character(String($0)) : "-" }
-        .reduce(into: "") { $0.append($1) }
-        .trimmingCharacters(in: .whitespacesAndNewlines)
-        .replacingOccurrences(of: " ", with: "-")
-    let filenameBase = base.isEmpty ? "Lustre-video" : base
-    let fileExtension = mediaURL.pathExtension.isEmpty ? "mp4" : mediaURL.pathExtension.lowercased()
-    var index = 0
-    while true {
-        let suffix = index == 0 ? "" : "-\(index)"
-        let candidate = directory.appendingPathComponent("\(filenameBase)\(suffix).\(fileExtension)")
-        if !FileManager.default.fileExists(atPath: candidate.path) && !FileManager.default.fileExists(atPath: candidate.appendingPathExtension("part").path) {
-            return candidate
-        }
-        index += 1
-    }
+    FilenamePolicy.uniqueLocalURL(directory: directory, title: title, mediaURL: mediaURL)
 }
 
 private func remoteFilename(title: String?, mediaURL: URL) -> String {
-    let rawTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false ? title! : "Lustre-video"
-    let allowed = CharacterSet.alphanumerics.union(.whitespaces).union(CharacterSet(charactersIn: "-_"))
-    let base = rawTitle.unicodeScalars.map { allowed.contains($0) ? Character(String($0)) : "-" }
-        .reduce(into: "") { $0.append($1) }
-        .trimmingCharacters(in: .whitespacesAndNewlines)
-        .replacingOccurrences(of: " ", with: "-")
-    let filenameBase = base.isEmpty ? "Lustre-video" : base
-    let fileExtension = mediaURL.pathExtension.isEmpty ? "mp4" : mediaURL.pathExtension.lowercased()
-    return "\(filenameBase)-\(UUID().uuidString.prefix(8).lowercased()).\(fileExtension)"
+    FilenamePolicy.remoteFilename(title: title, mediaURL: mediaURL)
 }

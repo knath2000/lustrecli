@@ -37,8 +37,12 @@ public struct AgentClient {
         try await request(path: "/v1/feed/sites", method: "GET", body: Optional<Data>.none)
     }
 
-    public func feedPage(site: FeedSiteID, page: Int = 1) async throws -> FeedPage {
-        try await request(path: "/v1/feed/items?site=\(site.rawValue)&page=\(page)", method: "GET", body: Optional<Data>.none)
+    public func feedPage(site: FeedSiteID, query: String? = nil, page: Int = 1) async throws -> FeedPage {
+        let feedQuery = try FeedQuery(site: site, text: query, page: page)
+        var components = URLComponents(string: "http://127.0.0.1:\(endpoint.port)/v1/feed/items")!
+        components.queryItems = [URLQueryItem(name: "site", value: feedQuery.site.rawValue), URLQueryItem(name: "page", value: String(feedQuery.page))] + (feedQuery.text.map { [URLQueryItem(name: "q", value: $0)] } ?? [])
+        guard let url = components.url else { throw AgentClientError.invalidResponse }
+        return try await request(url: url, method: "GET", body: Optional<Data>.none)
     }
 
     public func pornHubAuthStatus() async throws -> PornHubAuthStatus {
@@ -70,7 +74,11 @@ public struct AgentClient {
     }
 
     private func request<T: Decodable>(path: String, method: String, body: Data?) async throws -> T {
-        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(endpoint.port)\(path)")!)
+        try await request(url: URL(string: "http://127.0.0.1:\(endpoint.port)\(path)")!, method: method, body: body)
+    }
+
+    private func request<T: Decodable>(url: URL, method: String, body: Data?) async throws -> T {
+        var request = URLRequest(url: url)
         request.httpMethod = method
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")

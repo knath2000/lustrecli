@@ -14,6 +14,14 @@ public enum PornHubFeedParser {
         return url
     }
 
+    public static func searchURL(query: String, page: Int) throws -> URL {
+        guard page > 0 else { throw FeedError.invalidPage }
+        var components = URLComponents(string: "https://www.pornhub.com/video/search")!
+        components.queryItems = [URLQueryItem(name: "search", value: query), URLQueryItem(name: "page", value: String(page))]
+        guard let url = components.url else { throw FeedError.invalidQuery }
+        return url
+    }
+
     public static func isAllowedHost(_ host: String?) -> Bool {
         guard let host = host?.lowercased() else { return false }
         return host == "pornhub.com" || host == "www.pornhub.com" || host.hasSuffix(".pornhub.com")

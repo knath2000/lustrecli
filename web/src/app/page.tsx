@@ -6,7 +6,7 @@ import { downloadProgressDisplay, formatBytes, formatETA, formatSpeed } from "@/
 import type { DownloadJob } from "@/lib/download-job";
 import { AuthStatusSequence } from "@/lib/auth-status-sequence";
 import { availableJobActions, jobActionLabel, type JobAction } from "@/lib/job-actions";
-import type { FeedItem, FeedPage, FeedSite } from "@/lib/feed-model";
+import type { FeedItem, FeedPage, FeedQuery, FeedSite } from "@/lib/feed-model";
 import { pornHubAuthMutationMessage } from "@/lib/pornhub-auth-model";
 import type { PollingInterval } from "@/lib/settings-model";
 import { ActivityView } from "./activity-view";
@@ -119,7 +119,11 @@ export default function Home() {
   const signInWithPornHub = async () => { const sequence = authStatusSequence.current.beginAction(); try { const status = await agentRequest<PornHubAuthStatus>(token, "/v1/auth/pornhub/login", { method: "POST" }); if (authStatusSequence.current.acceptsAction(sequence)) { setPornHubAuth(status); notify("PornHub sign-in window opened."); } } catch (reason) { if (authStatusSequence.current.acceptsAction(sequence)) setError(reason instanceof Error ? reason.message : "PornHub sign-in failed."); } };
   const signOutOfPornHub = async () => { const sequence = authStatusSequence.current.beginAction(); try { const signingIn = pornHubAuth?.state === "signingIn"; const status = await agentRequest<PornHubAuthStatus>(token, signingIn ? "/v1/auth/pornhub/login" : "/v1/auth/pornhub", { method: "DELETE" }); if (authStatusSequence.current.acceptsAction(sequence)) { setPornHubAuth(status); notify(pornHubAuthMutationMessage(signingIn, status.state)); } } catch (reason) { if (authStatusSequence.current.acceptsAction(sequence)) setError(reason instanceof Error ? reason.message : "PornHub sign-out failed."); } };
   const loadFeedSites = useCallback(() => agentRequest<FeedSite[]>(token, "/v1/feed/sites"), [token]);
-  const loadFeedPage = useCallback((site: FeedSite["id"], page: number) => agentRequest<FeedPage>(token, `/v1/feed/items?site=${encodeURIComponent(site)}&page=${page}`), [token]);
+  const loadFeedPage = useCallback((site: FeedSite["id"], query: FeedQuery) => {
+    const search = new URLSearchParams({ site, page: String(query.page) });
+    if (query.text) search.set("q", query.text);
+    return agentRequest<FeedPage>(token, `/v1/feed/items?${search}`);
+  }, [token]);
   const queueFeedItem = useCallback(async (item: FeedItem, destination: string) => {
     await agentRequest<DownloadJob>(token, "/v1/jobs", { method: "POST", body: JSON.stringify({ sourcePageURL: item.sourcePageURL, preferredQualityLabel: null, destination }) });
   }, [token]);

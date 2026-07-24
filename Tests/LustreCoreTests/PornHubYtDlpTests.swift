@@ -84,15 +84,55 @@ final class PornHubYtDlpTests: XCTestCase {
         let directory = fixture.directory.appendingPathComponent("output", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let recorder = MaterializationRecorder()
-        let output = try await PornHubYtDlp.materializeForTesting(executable: fixture.executable, source: source, formatSelector: "safe720", directory: directory) { progress in
+        let output = try await PornHubYtDlp.materializeForTesting(executable: fixture.executable, source: source, title: "  ../ Example: Video / Test --  ", formatSelector: "safe720", directory: directory) { progress in
             await recorder.record(progress)
         }
 
         XCTAssertTrue(FileManager.default.fileExists(atPath: output.path))
+        XCTAssertEqual(output.lastPathComponent, "Example-Video-Test-ph-safe_1.mp4")
         let progress = await recorder.values()
         XCTAssertEqual(progress.first?.bytesWritten, 0)
         XCTAssertTrue(progress.contains { $0.bytesWritten == 7 && $0.totalBytes == 10 && $0.bytesPerSecond == 2.5 && $0.etaSeconds == 3 })
         XCTAssertEqual(progress.last?.phase, .postProcessing)
+    }
+
+    func testMaterializationPreservesOutputExtensionUsesFallbackAndAvoidsLocalCollisions() async throws {
+        let fixture = try FakeYtDlpFixture()
+        try fixture.replace(body: """
+        output=""
+        previous=""
+        for argument in "$@"; do
+          if [ "$previous" = "--output" ]; then output="$argument"; fi
+          previous="$argument"
+        done
+        target=$(printf '%s' "$output" | sed 's/%(ext)s/webm/')
+        dd if=/dev/zero of="$target" bs=1024 count=1 2>/dev/null
+        """)
+        let directory = fixture.directory.appendingPathComponent("output", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try Data(repeating: 1, count: 1_024).write(to: directory.appendingPathComponent("Lustre-PornHub-ph-safe_1.webm"))
+
+        let output = try await PornHubYtDlp.materializeForTesting(executable: fixture.executable, source: source, title: " ... ", formatSelector: "safe720", directory: directory)
+
+        XCTAssertEqual(output.lastPathComponent, "Lustre-PornHub-ph-safe_1-1.webm")
+    }
+
+    func testFilenamePolicyCapsUTF8AndDoesNotCreateHiddenOrGenericLocalNames() {
+        let local = FilenamePolicy.uniqueLocalURL(
+            directory: URL(fileURLWithPath: "/tmp"),
+            title: "...  Hello -- World / Test  ",
+            mediaURL: URL(string: "https://cdn.example/video.mp4")!
+        )
+        let pornHub = FilenamePolicy.uniquePornHubURL(
+            directory: URL(fileURLWithPath: "/tmp"),
+            title: String(repeating: "é", count: 200),
+            source: source,
+            fileExtension: "mp4"
+        )
+
+        XCTAssertEqual(local.lastPathComponent, "Hello-World-Test.mp4")
+        XCTAssertFalse(pornHub.lastPathComponent.hasPrefix("."))
+        XCTAssertLessThanOrEqual(pornHub.path(percentEncoded: false).split(separator: "/").last!.lengthOfBytes(using: .utf8), FilenamePolicy.maximumFilenameUTF8Length)
     }
 
     func testFakeExecutableNonzeroAndMissingOutputUseStaticErrors() async throws {

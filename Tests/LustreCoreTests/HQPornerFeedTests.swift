@@ -9,7 +9,7 @@ final class HQPornerFeedTests: XCTestCase {
         XCTAssertEqual(FeedSite.hqPorner.id.rawValue, "hqporner")
         XCTAssertEqual(FeedSite.hqPorner.displayName, "HQPorner")
         XCTAssertEqual(FeedSite.hqPorner.homeURL.absoluteString, "https://hqporner.com")
-        XCTAssertFalse(FeedSite.hqPorner.supportsSearch)
+        XCTAssertTrue(FeedSite.hqPorner.supportsSearch)
         XCTAssertTrue(FeedSite.all.contains(.hqPorner))
         XCTAssertEqual(try HQPornerFeedParser.pageURL(page: 1).absoluteString, "https://hqporner.com")
         XCTAssertEqual(try HQPornerFeedParser.pageURL(page: 3).absoluteString, "https://hqporner.com/hdporn/3")
@@ -96,6 +96,15 @@ final class HQPornerFeedTests: XCTestCase {
             let rejecting = FeedService(fetch: { _, _ in HTTPPage(body: "", finalURL: finalURL, statusCode: 200) }, now: { clock })
             await XCTAssertThrowsErrorAsync(try await rejecting.page(site: .hqPorner, page: 4))
         }
+    }
+
+    func testSearchUsesLiveQueryAndPaginationParameters() async throws {
+        let clock = now
+        let service = FeedService(fetch: { url, _ in
+            XCTAssertEqual(url.absoluteString, "https://hqporner.com?q=test&p=2")
+            return HTTPPage(body: "<main></main>", finalURL: url, statusCode: 200)
+        }, now: { clock })
+        _ = try await service.page(FeedQuery(site: .hqPorner, text: "test", page: 2))
     }
 }
 

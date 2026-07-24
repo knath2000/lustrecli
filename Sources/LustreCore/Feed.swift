@@ -14,6 +14,23 @@ public enum FeedQueueCapability: String, Codable, Sendable {
     case supported
 }
 
+public struct FeedQuery: Equatable, Sendable {
+    public let site: FeedSiteID
+    public let text: String?
+    public let page: Int
+
+    public init(site: FeedSiteID, text: String? = nil, page: Int = 1) throws {
+        guard page > 0 else { throw FeedError.invalidPage }
+        guard text?.rangeOfCharacter(from: .controlCharacters) == nil else { throw FeedError.invalidQuery }
+        let normalized = text?.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        guard
+              normalized?.count ?? 0 <= 120 else { throw FeedError.invalidQuery }
+        self.site = site
+        self.text = normalized?.isEmpty == true ? nil : normalized
+        self.page = page
+    }
+}
+
 public struct FeedSite: Codable, Equatable, Identifiable, Sendable {
     public let id: FeedSiteID
     public let displayName: String
@@ -31,7 +48,7 @@ public struct FeedSite: Codable, Equatable, Identifiable, Sendable {
         id: .allPornStream,
         displayName: "AllPornStream",
         homeURL: URL(string: "https://allpornstream.com")!,
-        supportsSearch: false
+        supportsSearch: true
     )
 
     public static let onlyFan420 = FeedSite(
@@ -45,14 +62,14 @@ public struct FeedSite: Codable, Equatable, Identifiable, Sendable {
         id: .hqPorner,
         displayName: "HQPorner",
         homeURL: URL(string: "https://hqporner.com")!,
-        supportsSearch: false
+        supportsSearch: true
     )
 
     public static let pornHub = FeedSite(
         id: .pornHub,
         displayName: "PornHub",
         homeURL: URL(string: "https://www.pornhub.com")!,
-        supportsSearch: false
+        supportsSearch: true
     )
 
     public static let pornHubSubscriptions = FeedSite(id: .pornHubSubscriptions, displayName: "PornHub · Subscriptions", homeURL: URL(string: "https://www.pornhub.com/subscriptions")!, supportsSearch: false)
@@ -122,6 +139,7 @@ public enum PornHubHomepageSession: Equatable, Sendable {
 
 public enum FeedError: Error, LocalizedError, Equatable, Sendable {
     case invalidPage
+    case invalidQuery
     case unsupportedSite
     case missingStructuredData
     case invalidStructuredData
@@ -133,6 +151,7 @@ public enum FeedError: Error, LocalizedError, Equatable, Sendable {
     public var errorDescription: String? {
         switch self {
         case .invalidPage: "Feed pages must be positive integers."
+        case .invalidQuery: "Feed searches must be plain text no longer than 120 characters."
         case .unsupportedSite: "This feed source is not supported."
         case .missingStructuredData: "The feed page did not include video metadata."
         case .invalidStructuredData: "The feed metadata could not be decoded."
@@ -166,8 +185,13 @@ public struct FeedService: Sendable {
     }
 
     public func page(site: FeedSiteID, page: Int) async throws -> FeedPage {
-        guard page > 0 else { throw FeedError.invalidPage }
-        if let url = try pornHubURL(site: site, page: page) {
+        try await self.page(FeedQuery(site: site, page: page))
+    }
+
+    public func page(_ query: FeedQuery) async throws -> FeedPage {
+        let site = query.site
+        let page = query.page
+        if let url = try pornHubURL(site: site, text: query.text, page: page) {
             var headers = [
                 "User-Agent": NetworkConstants.chromeUserAgent,
                 "Referer": "https://www.pornhub.com/",
@@ -198,7 +222,7 @@ public struct FeedService: Sendable {
             }, page: parsed.page, hasMore: parsed.hasMore)
         }
         if site == .hqPorner {
-            let url = try HQPornerFeedParser.pageURL(page: page)
+            let url = try hqPornerURL(query)
             let response = try await fetch(url, [
                 "User-Agent": NetworkConstants.chromeUserAgent,
                 "Referer": "https://hqporner.com/",
@@ -228,9 +252,10 @@ public struct FeedService: Sendable {
         guard site == .allPornStream else { throw FeedError.unsupportedSite }
         let baseURL = FeedSite.allPornStream.homeURL
         var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)
-        if page > 1 {
-            components?.queryItems = [URLQueryItem(name: "page", value: String(page))]
-        }
+        var items: [URLQueryItem] = []
+        if let text = query.text { items.append(URLQueryItem(name: "search", value: text)) }
+        if page > 1 { items.append(URLQueryItem(name: "page", value: String(page))) }
+        components?.queryItems = items.isEmpty ? nil : items
         guard let url = components?.url else { throw FeedError.invalidPage }
         let response = try await fetch(url, [
             "User-Agent": NetworkConstants.chromeUserAgent,
@@ -242,14 +267,24 @@ public struct FeedService: Sendable {
         return try AllPornStreamFeedParser.parse(html: response.body, page: page, baseURL: baseURL)
     }
 
-    private func pornHubURL(site: FeedSiteID, page: Int) throws -> URL? {
+    private func pornHubURL(site: FeedSiteID, text: String?, page: Int) throws -> URL? {
         switch site {
-        case .pornHub: return try PornHubFeedParser.pageURL(page: page)
+        case .pornHub: return try text.map { try PornHubFeedParser.searchURL(query: $0, page: page) } ?? PornHubFeedParser.pageURL(page: page)
         case .pornHubSubscriptions: return pagedPornHubURL("https://www.pornhub.com/subscriptions", page: page)
         case .pornHubLiked: return pagedPornHubURL("https://www.pornhub.com/likedvideos", page: page)
         case .pornHubFavorites: return pagedPornHubURL("https://www.pornhub.com/users/favorites", page: page)
         default: return nil
         }
+    }
+
+    private func hqPornerURL(_ query: FeedQuery) throws -> URL {
+        guard var components = URLComponents(url: FeedSite.hqPorner.homeURL, resolvingAgainstBaseURL: false) else { throw FeedError.invalidPage }
+        guard let text = query.text else { return try HQPornerFeedParser.pageURL(page: query.page) }
+        var items = [URLQueryItem(name: "q", value: text)]
+        if query.page > 1 { items.append(URLQueryItem(name: "p", value: String(query.page))) }
+        components.queryItems = items
+        guard let url = components.url else { throw FeedError.invalidPage }
+        return url
     }
 
     private func pagedPornHubURL(_ raw: String, page: Int) -> URL? {

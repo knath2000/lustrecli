@@ -56,16 +56,17 @@ final class AgentPornHubTransferTests: XCTestCase {
             destinationProfiles: try RemoteDestinationProfileStore(fileURL: root.appendingPathComponent("destinations.json")),
             destinationSecrets: secrets,
             pornHubResolver: { _ in Self.resolution(source) },
-            ytDlpMaterializer: { _, _, directory, _ in
+            ytDlpMaterializer: { resolution, _, directory, _ in
                 await tracker.recordStaging(directory)
                 try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-                let output = directory.appendingPathComponent("public.mp4")
+                let output = directory.appendingPathComponent("\(FilenamePolicy.sanitizedBase(resolution.title, fallback: "Lustre-PornHub"))-ph-webdav.mp4")
                 try Data(repeating: 1, count: 2_048).write(to: output)
                 return output
             },
             stagedRemoteUploader: { _, _, file, profile, password, _ in
                 XCTAssertEqual(password, "fixture-password")
                 XCTAssertTrue(FileManager.default.fileExists(atPath: file.path))
+                XCTAssertEqual(file.lastPathComponent, "Public-ph-webdav.mp4")
                 return profile.baseURL.appendingPathComponent(file.lastPathComponent)
             }
         )

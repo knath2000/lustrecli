@@ -7,6 +7,8 @@ export type FeedSite = {
   supportsSearch: boolean;
 };
 
+export type FeedQuery = { text?: string; page: number };
+
 export type FeedItem = {
   id: string;
   siteID: FeedSite["id"];

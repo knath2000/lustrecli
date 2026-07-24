@@ -91,4 +91,13 @@ final class AllPornStreamFeedTests: XCTestCase {
         XCTAssertNotNil(requestedHeaders["User-Agent"])
         XCTAssertEqual(requestedHeaders["Referer"], "https://allpornstream.com")
     }
+
+    func testSearchPreservesStructuredParserAndPagination() async throws {
+        let service = FeedService(fetch: { url, _ in
+            XCTAssertEqual(url.absoluteString, "https://allpornstream.com?search=test&page=2")
+            return HTTPPage(body: "<script type=\"application/ld+json\">{\"@type\":\"ItemList\",\"itemListElement\":[{\"@type\":\"VideoObject\",\"name\":\"Test\",\"url\":\"/post/test\",\"uploadDate\":\"2026-07-24T00:00:00Z\",\"thumbnailUrl\":[]}]}</script>", finalURL: url, statusCode: 200)
+        })
+        let page = try await service.page(FeedQuery(site: .allPornStream, text: "test", page: 2))
+        XCTAssertEqual(page.page, 2)
+    }
 }

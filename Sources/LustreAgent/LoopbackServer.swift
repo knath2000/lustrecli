@@ -90,7 +90,7 @@ public final class LoopbackServer: @unchecked Sendable {
                     return json(status: 400, value: ErrorResponse(error: "A supported feed site is required."))
                 }
                 let page = query["page"].flatMap(Int.init) ?? 1
-                return json(status: 200, value: try await service.feedPage(site: site, page: page))
+                return json(status: 200, value: try await service.feedPage(site: site, query: query["q"], page: page))
             }
             if request.method == "GET", routePath == "/v1/feed/assets" {
                 let query = (components?.queryItems ?? []).reduce(into: [String: String]()) { values, item in

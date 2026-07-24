@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { agentDateMilliseconds } from "@/lib/agent-date";
-import { feedPreviewDelay, feedPreviewFrames, feedPreviewMediaKind, feedTransferState, feedUsesAuthenticatedAssetProxy, queueFeedItems, toggleFeedSelection, type FeedItem, type FeedPage, type FeedSite } from "@/lib/feed-model";
+import { feedPreviewDelay, feedPreviewFrames, feedPreviewMediaKind, feedTransferState, feedUsesAuthenticatedAssetProxy, queueFeedItems, toggleFeedSelection, type FeedItem, type FeedPage, type FeedQuery, type FeedSite } from "@/lib/feed-model";
 import type { DestinationProfile } from "./destinations-view";
 
 export type FeedJob = { sourcePageURL: string; status: "queued" | "running" | "paused" | "completed" | "failed" | "cancelled" | "verificationRequired" };
@@ -11,7 +11,7 @@ type FeedViewProps = {
   destinations: DestinationProfile[];
   jobs: FeedJob[];
   loadSites: () => Promise<FeedSite[]>;
-  loadPage: (site: FeedSite["id"], page: number) => Promise<FeedPage>;
+  loadPage: (site: FeedSite["id"], query: FeedQuery) => Promise<FeedPage>;
   queueItem: (item: FeedItem, destination: string) => Promise<void>;
   loadAsset: (url: string, kind: "image" | "video") => Promise<Blob>;
   onQueued: () => Promise<void>;
@@ -118,32 +118,38 @@ export function FeedView({ destinations, jobs, loadSites, loadPage, queueItem, l
   const [queueing, setQueueing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [searchInput, setSearchInput] = useState("");
+  const [activeQuery, setActiveQuery] = useState("");
+  const requestSequence = useRef(0);
   const selectedSite = sites.find((site) => site.id === siteID);
 
-  const fetchPage = useCallback(async (nextPage: number, replace = false) => {
+  const fetchPage = useCallback(async (nextPage: number, replace = false, query = activeQuery) => {
+    const sequence = ++requestSequence.current;
     setLoading(true);
     setError(null);
     try {
-      const result = await loadPage(siteID, nextPage);
+      const result = await loadPage(siteID, { text: query || undefined, page: nextPage });
+      if (sequence !== requestSequence.current) return;
       setItems((current) => replace ? result.items : [...current, ...result.items.filter((item) => !current.some((existing) => existing.id === item.id))]);
       setPage(result.page);
       setHasMore(result.hasMore);
       if (replace) setSelection(new Set());
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Unable to load this feed page.");
+      if (sequence === requestSequence.current) setError(reason instanceof Error ? reason.message : "Unable to load this feed page.");
     } finally {
-      setLoading(false);
+      if (sequence === requestSequence.current) setLoading(false);
     }
-  }, [loadPage, siteID]);
+  }, [activeQuery, loadPage, siteID]);
 
   useEffect(() => {
     let active = true;
+    const sequence = ++requestSequence.current;
     void loadSites().then(async (nextSites) => {
-      if (!active) return;
+      if (!active || sequence !== requestSequence.current) return;
       const initialSite = nextSites[0];
       if (!initialSite) throw new Error("The agent did not report any feed sources.");
-      const result = await loadPage(initialSite.id, 1);
-      if (!active) return;
+      const result = await loadPage(initialSite.id, { page: 1 });
+      if (!active || sequence !== requestSequence.current) return;
       setSites(nextSites);
       setSiteID(initialSite.id);
       setItems(result.items);
@@ -151,7 +157,7 @@ export function FeedView({ destinations, jobs, loadSites, loadPage, queueItem, l
       setHasMore(result.hasMore);
       setLoading(false);
     }).catch((reason) => {
-      if (!active) return;
+      if (!active || sequence !== requestSequence.current) return;
       setError(reason instanceof Error ? reason.message : "Unable to load the feed.");
       setLoading(false);
     });
@@ -159,20 +165,47 @@ export function FeedView({ destinations, jobs, loadSites, loadPage, queueItem, l
   }, [loadPage, loadSites]);
 
   const selectSite = async (nextSite: FeedSite["id"]) => {
+    const sequence = ++requestSequence.current;
     setSiteID(nextSite);
+    setSearchInput("");
+    setActiveQuery("");
     setLoading(true);
     setError(null);
     try {
-      const result = await loadPage(nextSite, 1);
+      const result = await loadPage(nextSite, { page: 1 });
+      if (sequence !== requestSequence.current) return;
       setItems(result.items);
       setPage(result.page);
       setHasMore(result.hasMore);
       setSelection(new Set());
+      setSearchInput("");
+      setActiveQuery("");
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Unable to load the feed.");
+      if (sequence === requestSequence.current) setError(reason instanceof Error ? reason.message : "Unable to load the feed.");
     } finally {
-      setLoading(false);
+      if (sequence === requestSequence.current) setLoading(false);
     }
+  };
+
+  const submitSearch = async (event: React.FormEvent) => {
+    event.preventDefault();
+    const query = searchInput.trim().replace(/\s+/g, " ");
+    setActiveQuery(query);
+    setItems([]);
+    setPage(0);
+    setHasMore(false);
+    setSelection(new Set());
+    await fetchPage(1, true, query);
+  };
+
+  const clearSearch = async () => {
+    setSearchInput("");
+    setActiveQuery("");
+    setItems([]);
+    setPage(0);
+    setHasMore(false);
+    setSelection(new Set());
+    await fetchPage(1, true, "");
   };
 
   const selectedItems = useMemo(() => items.filter((item) => selection.has(item.id)), [items, selection]);
@@ -198,10 +231,13 @@ export function FeedView({ destinations, jobs, loadSites, loadPage, queueItem, l
     </header>
 
     <section className="feed-toolbar glass-panel" aria-label="Feed controls">
-      <label><span>Source</span><select value={siteID} disabled={!sites.length} onChange={(event) => void selectSite(event.target.value as FeedSite["id"])}>{sites.map((site) => <option key={site.id} value={site.id}>{site.displayName}</option>)}</select></label>
-      <label><span>Destination</span><select value={destination} onChange={(event) => setDestination(event.target.value)}><option value="local">Local Downloads</option>{destinations.map((item) => <option key={item.id} value={`webdav:${item.id}`}>{item.name} · WebDAV</option>)}</select></label>
-      <button className="secondary-button" disabled={loading} onClick={() => void fetchPage(1, true)}>{loading && page <= 1 ? "Refreshing…" : "Refresh feed"}</button>
-      <p>{items.length} discovered</p>
+      <div className="feed-toolbar-main">
+        <label className="feed-source-control"><span>Source</span><select value={siteID} disabled={!sites.length} onChange={(event) => void selectSite(event.target.value as FeedSite["id"])}>{sites.map((site) => <option key={site.id} value={site.id}>{site.displayName}</option>)}</select></label>
+        {selectedSite?.supportsSearch ? <form className="feed-search" onSubmit={(event) => void submitSearch(event)}><label className="feed-search-field"><span>Search</span><input value={searchInput} onChange={(event) => setSearchInput(event.target.value)} maxLength={120} placeholder={`Search ${selectedSite.displayName}`} /></label><button className="feed-search-submit" disabled={loading}>{loading ? "Searching…" : "Search"}</button></form> : <div />}
+        <label className="feed-destination-control"><span>Destination</span><select value={destination} onChange={(event) => setDestination(event.target.value)}><option value="local">Local Downloads</option>{destinations.map((item) => <option key={item.id} value={`webdav:${item.id}`}>{item.name} · WebDAV</option>)}</select></label>
+        <button className="secondary-button feed-refresh" aria-label={activeQuery ? "Refresh results" : "Refresh feed"} disabled={loading} onClick={() => void fetchPage(1, true)}>↻</button>
+      </div>
+      <div className="feed-toolbar-meta"><p>{items.length} result{items.length === 1 ? "" : "s"}{activeQuery ? ` for “${activeQuery}”` : ""}</p>{activeQuery && <button onClick={() => void clearSearch()} aria-label="Clear search">Clear search ×</button>}</div>
     </section>
 
     {error && <p className="inline-error feed-message" role="alert">{error}</p>}
@@ -227,7 +263,7 @@ export function FeedView({ destinations, jobs, loadSites, loadPage, queueItem, l
       })}
     </section>
 
-    {!items.length && !loading && !error && <section className="feed-empty glass-panel"><span>◫</span><h3>No feed items found</h3><p>The source returned no structured video entries for this page.</p></section>}
+    {!items.length && !loading && !error && <section className="feed-empty glass-panel"><span>◫</span><h3>{activeQuery ? "No search results" : "No feed items found"}</h3><p>{activeQuery ? `No structured results matched “${activeQuery}”.` : "The source returned no structured video entries for this page."}</p></section>}
     {hasMore && items.length > 0 && <div className="feed-load-more"><button className="secondary-button" disabled={loading} onClick={() => void fetchPage(page + 1)}>{loading ? "Loading…" : "Load more"}</button></div>}
   </div>;
 }

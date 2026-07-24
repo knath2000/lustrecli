@@ -67,6 +67,8 @@ Creating a job durably acknowledges it as `queued` immediately. The scheduler st
 
 ## API
 
+Feed discovery accepts a typed `FeedQuery` with site, optional text, and page. The agent constructs provider-native search URLs only from fixed trusted origins and parameters: PornHub `/video/search?search=`, HQPorner `?q=` with `p=` pagination, and AllPornStream `?s=` with `page=` pagination. The API never accepts an arbitrary provider URL.
+
 `GET /health` is unauthenticated. All other API endpoints require `Authorization: Bearer <token>`.
 
 | Method | Route | Purpose |
@@ -128,6 +130,10 @@ The strict internal yt-dlp progress protocol is `LUSTRE_PROGRESS:v1` with exactl
 `YtDlpProgressEventChannel` is the canonical bounded asynchronous layer: one waiter at a time, UUID waiter identity, direct handoff, buffer-backed delivery, cancellation-safe waiter removal, graceful finish, and abortive channel cancellation. `StreamingProcessRunner` owns fixed-size independent pipe readers, incremental stderr decoding, one bounded channel per process, and one serial callback consumer. It finishes the channel only after stderr EOF/final decode and joins work before normal completion.
 
 `PornHubYtDlp` uses `StreamingProcessRunner` and emits the strict progress template to stderr. The agent persists phase-aware materialization samples through its existing callback path. WebDAV file and direct streamed uploads report URLSession `didSendBodyData` telemetry through a bounded coalescing reporter; final upload completion is published only after successful HTTP validation. The web client consumes only durable job telemetry and never fabricates cross-phase percentages, totals, speed, or ETA.
+
+PornHub materialization keeps yt-dlp's subprocess output template fixed inside a private working directory. After validating that exactly one media file was produced, the agent applies the shared `FilenamePolicy`: provider title metadata is sanitized and bounded, the canonical PornHub viewkey supplies a stable collision-resistant suffix, and the real output extension is preserved. Staged WebDAV upload uses that resulting basename unchanged.
+
+Feed search is an agent-owned extension of the structured feed contract rather than a browser-side provider request. `FeedQuery` normalizes and bounds plain-text input; each provider adapter constructs only its fixed HTTPS search URL and preserves pagination. The loopback API and Next.js proxy forward `site`, `q`, and `page`, while the React Feed view sequences requests and renders only agent-normalized items. Provider-specific query names are implementation details of `FeedService`, not arbitrary frontend-controlled URL components.
 
 ## Deliberate next seams
 

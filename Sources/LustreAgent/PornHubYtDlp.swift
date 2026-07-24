@@ -2,17 +2,21 @@ import Foundation
 import LustreCore
 
 public enum PornHubURL {
+    public static func viewKey(_ url: URL) -> String? {
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let items = components.queryItems,
+              items.count == 1,
+              items[0].name == "viewkey" else { return nil }
+        return items[0].value.flatMap(PornHubFeedParser.safeViewKey)
+    }
+
     public static func canonical(_ url: URL) -> URL? {
         guard url.scheme?.lowercased() == "https",
               let host = url.host?.lowercased(),
               host == "pornhub.com" || host == "www.pornhub.com",
               url.path == "/view_video.php",
               url.fragment == nil,
-              let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
-              let items = components.queryItems,
-              items.count == 1,
-              items[0].name == "viewkey",
-              let key = items[0].value.flatMap(PornHubFeedParser.safeViewKey) else { return nil }
+              let key = viewKey(url) else { return nil }
         return URL(string: "https://www.pornhub.com/view_video.php?viewkey=\(key)")
     }
 }
@@ -103,16 +107,16 @@ public enum PornHubYtDlp {
         return try parseMetadata(result.stdout, source: source)
     }
 
-    public static func materialize(source: URL, formatSelector: String, directory: URL, cookies: [PornHubCookieRecord] = [], onProgress: @escaping @Sendable (DownloadProgress) async -> Void = { _ in }) async throws -> URL {
+    public static func materialize(source: URL, title: String?, formatSelector: String, directory: URL, cookies: [PornHubCookieRecord] = [], onProgress: @escaping @Sendable (DownloadProgress) async -> Void = { _ in }) async throws -> URL {
         guard let executable = installedExecutable() else { throw PornHubYtDlpError.executableUnavailable }
-        return try await materialize(executable: executable, source: source, formatSelector: formatSelector, directory: directory, cookies: cookies, onProgress: onProgress, allowUnapprovedExecutable: false)
+        return try await materialize(executable: executable, source: source, title: title, formatSelector: formatSelector, directory: directory, cookies: cookies, onProgress: onProgress, allowUnapprovedExecutable: false)
     }
 
-    static func materializeForTesting(executable: URL, source: URL, formatSelector: String, directory: URL, cookies: [PornHubCookieRecord] = [], timeout: TimeInterval = 7_200, onProgress: @escaping @Sendable (DownloadProgress) async -> Void = { _ in }) async throws -> URL {
-        try await materialize(executable: executable, source: source, formatSelector: formatSelector, directory: directory, cookies: cookies, timeout: timeout, onProgress: onProgress, allowUnapprovedExecutable: true)
+    static func materializeForTesting(executable: URL, source: URL, title: String? = nil, formatSelector: String, directory: URL, cookies: [PornHubCookieRecord] = [], timeout: TimeInterval = 7_200, onProgress: @escaping @Sendable (DownloadProgress) async -> Void = { _ in }) async throws -> URL {
+        try await materialize(executable: executable, source: source, title: title, formatSelector: formatSelector, directory: directory, cookies: cookies, timeout: timeout, onProgress: onProgress, allowUnapprovedExecutable: true)
     }
 
-    private static func materialize(executable: URL, source: URL, formatSelector: String, directory: URL, cookies: [PornHubCookieRecord], timeout: TimeInterval = 7_200, onProgress: @escaping @Sendable (DownloadProgress) async -> Void, allowUnapprovedExecutable: Bool) async throws -> URL {
+    private static func materialize(executable: URL, source: URL, title: String?, formatSelector: String, directory: URL, cookies: [PornHubCookieRecord], timeout: TimeInterval = 7_200, onProgress: @escaping @Sendable (DownloadProgress) async -> Void, allowUnapprovedExecutable: Bool) async throws -> URL {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let working = directory.appendingPathComponent(".lustre-pornhub-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: working, withIntermediateDirectories: true)
@@ -140,7 +144,7 @@ public enum PornHubYtDlp {
             return values?.isRegularFile == true && (values?.fileSize ?? 0) >= 1_024
         }
         guard outputs.count == 1 else { throw PornHubYtDlpError.invalidOutput }
-        let destination = uniqueDestination(directory: directory, extension: outputs[0].pathExtension)
+        let destination = FilenamePolicy.uniquePornHubURL(directory: directory, title: title, source: source, fileExtension: outputs[0].pathExtension)
         try FileManager.default.moveItem(at: outputs[0], to: destination)
         let size = (try? destination.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init)
         await onProgress(DownloadProgress(bytesWritten: size ?? 0, totalBytes: size, phase: .postProcessing))
@@ -271,17 +275,6 @@ public enum PornHubYtDlp {
             return .temporarilyUnavailable
         }
         return .processFailed
-    }
-
-    private static func uniqueDestination(directory: URL, extension ext: String) -> URL {
-        let suffix = ext.isEmpty ? "mp4" : ext
-        var index = 0
-        while true {
-            let name = index == 0 ? "Lustre-PornHub.\(suffix)" : "Lustre-PornHub-\(index).\(suffix)"
-            let candidate = directory.appendingPathComponent(name)
-            if !FileManager.default.fileExists(atPath: candidate.path) { return candidate }
-            index += 1
-        }
     }
 
     private static func privateCookieDirectory() -> URL {

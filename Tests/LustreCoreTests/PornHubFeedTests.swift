@@ -80,6 +80,16 @@ final class PornHubFeedTests: XCTestCase {
         }
     }
 
+    func testProviderSearchURLsAndQueryValidationAreBounded() async throws {
+        let service = FeedService(fetch: { url, _ in
+            XCTAssertEqual(url.absoluteString, "https://www.pornhub.com/video/search?search=sample%20query&page=2")
+            return HTTPPage(body: "<html>No videos found</html>", finalURL: url, statusCode: 200)
+        })
+        _ = try await service.page(FeedQuery(site: .pornHub, text: "  sample   query ", page: 2))
+        XCTAssertThrowsError(try FeedQuery(site: .pornHub, text: "bad\nquery"))
+        XCTAssertThrowsError(try FeedQuery(site: .pornHub, text: String(repeating: "a", count: 121)))
+    }
+
     func testRegularPornHubHomepageUsesTypedAuthenticatedSessionOnlyWhenProvided() async throws {
         let authenticated = FeedService(fetch: { url, headers in
             XCTAssertEqual(headers["Cookie"], "il=synthetic")
