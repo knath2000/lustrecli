@@ -49,6 +49,10 @@ public struct AgentClient {
         try await request(path: "/v1/auth/pornhub/login", method: "POST", body: Optional<Data>.none)
     }
 
+    public func cancelPornHubSignIn() async throws -> PornHubAuthStatus {
+        try await request(path: "/v1/auth/pornhub/login", method: "DELETE", body: Optional<Data>.none)
+    }
+
     public func signOutOfPornHub() async throws -> PornHubAuthStatus {
         try await request(path: "/v1/auth/pornhub", method: "DELETE", body: Optional<Data>.none)
     }

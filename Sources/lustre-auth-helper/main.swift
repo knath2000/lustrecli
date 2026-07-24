@@ -29,7 +29,7 @@ struct LustreAuthHelperMain {
     }
 }
 
-@MainActor private final class HelperWindow: NSWindowController, WKNavigationDelegate, WKUIDelegate, NSWindowDelegate {
+@MainActor private final class HelperWindow: NSWindowController, WKNavigationDelegate, WKUIDelegate, WKHTTPCookieStoreObserver, NSWindowDelegate {
     private let dataStore = WKWebsiteDataStore.nonPersistent()
     private lazy var webView: WKWebView = {
         let configuration = WKWebViewConfiguration()
@@ -38,7 +38,8 @@ struct LustreAuthHelperMain {
         view.navigationDelegate = self; view.uiDelegate = self
         return view
     }()
-    private var validating = false
+    private var validation = PornHubHelperValidationCoordinator()
+    private var validationNavigation: WKNavigation?
     private var finished = false
 
     init() {
@@ -47,57 +48,164 @@ struct LustreAuthHelperMain {
         super.init(window: window)
         window.delegate = self
         window.contentView = webView
-        webView.load(URLRequest(url: URL(string: "https://www.pornhub.com/")!))
+        dataStore.httpCookieStore.add(self)
+        webView.load(URLRequest(url: URL(string: "https://www.pornhub.com/login")!))
     }
     required init?(coder: NSCoder) { nil }
 
-    func windowWillClose(_ notification: Notification) { finish("cancelled") }
+    func windowWillClose(_ notification: Notification) { finish(.cancelled) }
 
     func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction, decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy) -> Void) {
         let isMainFrame = action.targetFrame?.isMainFrame == true
         let opensNewWindow = action.targetFrame == nil
         decisionHandler(PornHubHelperNavigationPolicy.allows(
             url: action.request.url, isMainFrame: isMainFrame,
+            topLevelURL: webView.url,
             opensNewWindow: opensNewWindow, requestsDownload: action.shouldPerformDownload
         ) ? .allow : .cancel)
     }
 
     func webView(_ webView: WKWebView, decidePolicyFor response: WKNavigationResponse, decisionHandler: @escaping @MainActor @Sendable (WKNavigationResponsePolicy) -> Void) {
         decisionHandler(PornHubHelperNavigationPolicy.allowsResponse(
-            url: response.response.url, canShowMIMEType: response.canShowMIMEType
+            url: response.response.url,
+            isMainFrame: response.isForMainFrame,
+            topLevelURL: webView.url,
+            canShowMIMEType: response.canShowMIMEType
         ) ? .allow : .cancel)
     }
 
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for action: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? { nil }
 
+    func webView(_ webView: WKWebView, didReceive challenge: URLAuthenticationChallenge, completionHandler: @escaping @MainActor @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        if PornHubHelperChallengePolicy.resetsValidation(authenticationMethod: challenge.protectionSpace.authenticationMethod) {
+            _ = validation.authenticationChallenge()
+        }
+        completionHandler(.performDefaultHandling, nil)
+    }
+
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        terminal(navigation)
+    }
+
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        terminal(navigation)
+    }
+
+    func cookiesDidChange(in cookieStore: WKHTTPCookieStore) {
+        scheduleCookieValidation()
+    }
+
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        guard !finished else { return }
+        guard !finished, let navigation else { return }
+        guard let activeValidationNavigation = validationNavigation, navigation === activeValidationNavigation else {
+            scheduleCookieValidation(afterLoginNavigation: webView.url)
+            return
+        }
+        self.validationNavigation = nil
+        let action = validation.navigationFinished(url: webView.url)
+        guard action == .evaluatePage else {
+            handle(action)
+            return
+        }
         Task { @MainActor in
-            let records = await dataStore.httpCookieStore.allCookies()
-            let cookies = records.compactMap(Self.record)
-            guard (try? PornHubCookieSanitizer.sanitize(cookies))?.contains(where: { $0.name == "il" }) == true else { return }
-            if !validating {
-                validating = true
-                webView.load(URLRequest(url: URL(string: "https://www.pornhub.com/subscriptions")!))
-                return
-            }
-            let path = webView.url?.path ?? ""
-            guard Self.isTrusted(webView.url), path == "/subscriptions" || path.hasPrefix("/subscriptions/") else { return }
             do {
+                let cookies = try await trustedCookies()
+                let hasSessionProofCandidate = PornHubHelperCookieCandidatePolicy.hasSessionProofCandidate(cookies)
+                guard hasSessionProofCandidate else { handle(validation.authenticationResult(isAuthenticated: false)); return }
+                let pageReportsAuthenticatedUser = try await pageAuthenticationState()
+                let authenticated = PornHubAuthenticationValidation.isAuthenticated(PornHubAuthenticationMarkers(
+                    hasSessionCookie: hasSessionProofCandidate,
+                    pageReportsAuthenticatedUser: pageReportsAuthenticatedUser
+                ))
+                guard authenticated else { handle(validation.authenticationResult(isAuthenticated: false)); return }
+                guard !finished else { return }
                 try KeychainPornHubCookieStore().save(cookies)
-                finish("signed-in")
-            } catch { finish("cancelled") }
+                finish(.signedIn)
+            } catch let error as PornHubAuthError where error == .storageUnavailable {
+                finish(.storageUnavailable)
+            } catch {
+                finish(.helperFailed)
+            }
         }
     }
 
-    private func finish(_ token: String) {
+    private enum ResultToken: String { case signedIn = "signed-in", cancelled, signedOut = "signed-out", helperFailed = "helper-failed", storageUnavailable = "storage-unavailable" }
+
+    private func finish(_ token: ResultToken) {
         guard !finished else { return }; finished = true
-        print(token)
+        dataStore.httpCookieStore.remove(self)
+        print(token.rawValue)
         NSApplication.shared.terminate(nil)
     }
 
-    private static func record(_ cookie: HTTPCookie) -> PornHubCookieRecord? {
-        PornHubCookieRecord(name: cookie.name, value: cookie.value, domain: cookie.domain, path: cookie.path, expiresAt: cookie.expiresDate, secure: cookie.isSecure)
+    private func scheduleCookieValidation() {
+        guard !finished else { return }
+        Task { @MainActor in
+            do {
+                let cookies = try await trustedCookies()
+                guard !finished else { return }
+                handle(validation.cookieChanged(hasLoginCompletionTrigger: PornHubHelperCookieCandidatePolicy.hasLoginCompletionTrigger(cookies)))
+            } catch {
+                finish(.helperFailed)
+            }
+        }
+    }
+
+    private func scheduleCookieValidation(afterLoginNavigation url: URL?) {
+        guard !finished else { return }
+        Task { @MainActor in
+            do {
+                let cookies = try await trustedCookies()
+                guard !finished else { return }
+                handle(validation.loginNavigationFinished(
+                    url: url,
+                    hasLoginCompletionTrigger: PornHubHelperCookieCandidatePolicy.hasLoginCompletionTrigger(cookies)
+                ))
+            } catch {
+                finish(.helperFailed)
+            }
+        }
+    }
+
+    private func trustedCookies() async throws -> [PornHubCookieRecord] {
+        let records = await dataStore.httpCookieStore.allCookies()
+        return try PornHubHelperCookieCandidatePolicy.sanitizeTrustedCookies(records.map(PornHubWebKitCookieCapture.record))
+    }
+
+    private func handle(_ action: PornHubHelperValidationAction) {
+        guard !finished else { return }
+        switch action {
+        case .loadSubscriptions:
+            validationNavigation = webView.load(URLRequest(url: URL(string: "https://www.pornhub.com/subscriptions")!))
+        case .fail:
+            finish(.helperFailed)
+        case .none, .evaluatePage:
+            break
+        }
+    }
+
+    private func terminal(_ navigation: WKNavigation?) {
+        guard let navigation, let activeValidationNavigation = validationNavigation, navigation === activeValidationNavigation else { return }
+        self.validationNavigation = nil
+        handle(validation.terminalNavigation())
+    }
+
+    private func pageAuthenticationState() async throws -> Bool? {
+        let script = """
+        (() => {
+          if (globalThis.isLoggedInUser === 1) return 1;
+          if (globalThis.isLoggedInUser === 0) return 0;
+          return -1;
+        })()
+        """
+        guard let value = try await webView.evaluateJavaScript(script) as? NSNumber else {
+            throw PornHubAuthError.helperFailed
+        }
+        switch value.intValue {
+        case 1: return true
+        case 0: return false
+        default: return nil
+        }
     }
 
     static func clearPornHubData() async {
@@ -113,4 +221,5 @@ struct LustreAuthHelperMain {
         guard let url, url.scheme?.lowercased() == "https", let host = url.host?.lowercased() else { return false }
         return PornHubCookieSanitizer.isAllowedDomain(host)
     }
+
 }

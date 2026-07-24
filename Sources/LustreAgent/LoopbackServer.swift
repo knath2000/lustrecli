@@ -72,6 +72,9 @@ public final class LoopbackServer: @unchecked Sendable {
                 do { return json(status: 200, value: try await service.signInWithPornHub()) }
                 catch let error as PornHubAuthError { return json(status: authStatusCode(error), value: ErrorResponse(error: error.errorDescription ?? "PornHub sign-in failed.")) }
             }
+            if request.method == "DELETE", routePath == "/v1/auth/pornhub/login" {
+                return json(status: 200, value: await service.cancelPornHubSignIn())
+            }
             if request.method == "DELETE", routePath == "/v1/auth/pornhub" {
                 do { return json(status: 200, value: try await service.signOutOfPornHub()) }
                 catch let error as PornHubAuthError { return json(status: authStatusCode(error), value: ErrorResponse(error: error.errorDescription ?? "PornHub sign-out failed.")) }
@@ -88,6 +91,17 @@ public final class LoopbackServer: @unchecked Sendable {
                 }
                 let page = query["page"].flatMap(Int.init) ?? 1
                 return json(status: 200, value: try await service.feedPage(site: site, page: page))
+            }
+            if request.method == "GET", routePath == "/v1/feed/assets" {
+                let query = (components?.queryItems ?? []).reduce(into: [String: String]()) { values, item in
+                    if let value = item.value { values[item.name] = value }
+                }
+                guard let rawURL = query["url"], let url = URL(string: rawURL),
+                      let rawKind = query["kind"], let kind = FeedAssetKind(rawValue: rawKind) else {
+                    return json(status: 400, value: ErrorResponse(error: "An allowed feed asset URL and kind are required."))
+                }
+                let asset = try await service.feedAsset(url: url, kind: kind)
+                return HTTPResponse(status: 200, headers: ["Content-Type": asset.contentType, "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"], body: asset.data)
             }
             if request.method == "GET", request.path == "/v1/destinations" {
                 return json(status: 200, value: await service.allRemoteDestinations())

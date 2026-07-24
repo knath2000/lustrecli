@@ -80,6 +80,37 @@ final class PornHubFeedTests: XCTestCase {
         }
     }
 
+    func testRegularPornHubHomepageUsesTypedAuthenticatedSessionOnlyWhenProvided() async throws {
+        let authenticated = FeedService(fetch: { url, headers in
+            XCTAssertEqual(headers["Cookie"], "il=synthetic")
+            return HTTPPage(body: "<li class=\"pcVideoListItem\" data-video-vkey=\"ph-home\"><a href=\"/view_video.php?viewkey=ph-home\" title=\"Home\"><img data-src=\"//thumbs.phncdn.com/home.jpg\"></a></li>", finalURL: url, statusCode: 200)
+        }, pornHubHomepageSession: { _ in .authenticated(cookieHeader: "il=synthetic") })
+
+        let page = try await authenticated.page(site: .pornHub, page: 1)
+
+        XCTAssertEqual(page.items.map(\.id), ["pornhub:pornhub:ph-home"])
+        XCTAssertEqual(page.items.map(\.siteID), [.pornHub])
+
+        for session in [PornHubHomepageSession.anonymous, .anonymous] {
+            let anonymous = FeedService(fetch: { url, headers in
+                XCTAssertNil(headers["Cookie"])
+                return HTTPPage(body: "<html>No videos found</html>", finalURL: url, statusCode: 200)
+            }, pornHubHomepageSession: { _ in session })
+            _ = try await anonymous.page(site: .pornHub, page: 1)
+        }
+    }
+
+    func testRegularPornHubSignedInSessionFailureDoesNotDowngradeToAnonymous() async throws {
+        let service = FeedService(fetch: { _, _ in
+            XCTFail("must not fetch anonymously after an authenticated-session failure")
+            return HTTPPage(body: "", finalURL: FeedSite.pornHub.homeURL, statusCode: 200)
+        }, pornHubHomepageSession: { _ in throw FeedError.authenticationUnavailable })
+
+        await XCTAssertThrowsErrorAsync(try await service.page(site: .pornHub, page: 1)) {
+            XCTAssertEqual($0 as? FeedError, .authenticationUnavailable)
+        }
+    }
+
     func testAuthenticatedSectionsRequireSessionAndOnlyInjectItForTrustedPornHubURL() async throws {
         let source = URL(string: "https://www.pornhub.com/subscriptions")!
         let signedOut = FeedService(fetch: { _, _ in XCTFail("must not fetch"); return HTTPPage(body: "", finalURL: source, statusCode: 200) }, pornHubCookieHeader: { _ in nil })

@@ -115,6 +115,11 @@ public struct FeedPage: Codable, Equatable, Sendable {
     }
 }
 
+public enum PornHubHomepageSession: Equatable, Sendable {
+    case anonymous
+    case authenticated(cookieHeader: String)
+}
+
 public enum FeedError: Error, LocalizedError, Equatable, Sendable {
     case invalidPage
     case unsupportedSite
@@ -122,6 +127,7 @@ public enum FeedError: Error, LocalizedError, Equatable, Sendable {
     case invalidStructuredData
     case challengeRequired
     case authenticationRequired
+    case authenticationUnavailable
     case network(Int)
 
     public var errorDescription: String? {
@@ -132,6 +138,7 @@ public enum FeedError: Error, LocalizedError, Equatable, Sendable {
         case .invalidStructuredData: "The feed metadata could not be decoded."
         case .challengeRequired: "PornHub returned a login, age, region, or anti-bot challenge; anonymous feed access is temporarily unavailable."
         case .authenticationRequired: "Sign in with PornHub before using this authenticated feed."
+        case .authenticationUnavailable: "PornHub session storage is unavailable."
         case .network(let status): "Feed request failed with HTTP \(status)."
         }
     }
@@ -140,15 +147,18 @@ public enum FeedError: Error, LocalizedError, Equatable, Sendable {
 public struct FeedService: Sendable {
     public typealias Fetch = StaticProviderResolver.Fetch
     public typealias CookieHeader = @Sendable (URL) async throws -> String?
+    public typealias HomepageSession = @Sendable (URL) async throws -> PornHubHomepageSession
 
     private let fetch: Fetch
     private let now: @Sendable () -> Date
     private let pornHubCookieHeader: CookieHeader?
+    private let pornHubHomepageSession: HomepageSession?
 
-    public init(fetch: @escaping Fetch = StaticProviderResolver().pageFetch, now: @escaping @Sendable () -> Date = { .now }, pornHubCookieHeader: CookieHeader? = nil) {
+    public init(fetch: @escaping Fetch = StaticProviderResolver().pageFetch, now: @escaping @Sendable () -> Date = { .now }, pornHubCookieHeader: CookieHeader? = nil, pornHubHomepageSession: HomepageSession? = nil) {
         self.fetch = fetch
         self.now = now
         self.pornHubCookieHeader = pornHubCookieHeader
+        self.pornHubHomepageSession = pornHubHomepageSession
     }
 
     public func sites() -> [FeedSite] {
@@ -164,7 +174,15 @@ public struct FeedService: Sendable {
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                 "Accept-Language": "en-US,en;q=0.9"
             ]
-            if site != .pornHub {
+            if site == .pornHub, let pornHubHomepageSession {
+                switch try await pornHubHomepageSession(url) {
+                case .anonymous:
+                    break
+                case .authenticated(let cookieHeader):
+                    guard !cookieHeader.isEmpty else { throw FeedError.authenticationUnavailable }
+                    headers["Cookie"] = cookieHeader
+                }
+            } else if site != .pornHub {
                 guard let pornHubCookieHeader, let cookie = try await pornHubCookieHeader(url), !cookie.isEmpty else { throw FeedError.authenticationRequired }
                 headers["Cookie"] = cookie
             }

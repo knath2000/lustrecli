@@ -1,8 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { agentDateMilliseconds } from "@/lib/agent-date";
-import { feedPreviewDelay, feedPreviewFrames, feedTransferState, queueFeedItems, toggleFeedSelection, type FeedItem, type FeedPage, type FeedSite } from "@/lib/feed-model";
+import { feedPreviewDelay, feedPreviewFrames, feedPreviewMediaKind, feedTransferState, feedUsesAuthenticatedAssetProxy, queueFeedItems, toggleFeedSelection, type FeedItem, type FeedPage, type FeedSite } from "@/lib/feed-model";
 import type { DestinationProfile } from "./destinations-view";
 
 export type FeedJob = { sourcePageURL: string; status: "queued" | "running" | "paused" | "completed" | "failed" | "cancelled" | "verificationRequired" };
@@ -13,6 +13,7 @@ type FeedViewProps = {
   loadSites: () => Promise<FeedSite[]>;
   loadPage: (site: FeedSite["id"], page: number) => Promise<FeedPage>;
   queueItem: (item: FeedItem, destination: string) => Promise<void>;
+  loadAsset: (url: string, kind: "image" | "video") => Promise<Blob>;
   onQueued: () => Promise<void>;
 };
 
@@ -20,22 +21,74 @@ function compactNumber(value: number) {
   return new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 }).format(value);
 }
 
-function FeedThumbnail({ item }: { item: FeedItem }) {
-  const frames = useMemo(() => feedPreviewFrames(item), [item]);
+function FeedThumbnail({ item, loadAsset }: { item: FeedItem; loadAsset: FeedViewProps["loadAsset"] }) {
+  const frames = useMemo(() => item.previewURLs.length ? feedPreviewFrames(item) : [], [item]);
+  const usesAssetProxy = feedUsesAuthenticatedAssetProxy(item.siteID);
+  const assetCache = useRef(new Map<string, Blob | Promise<Blob>>());
   const [hovered, setHovered] = useState(false);
   const [frameIndex, setFrameIndex] = useState(0);
+  const [thumbnail, setThumbnail] = useState<{ url: string; source: string } | null>(null);
+  const [preview, setPreview] = useState<{ url: string; source: string } | null>(null);
+  const [failedThumbnailURL, setFailedThumbnailURL] = useState<string | null>(null);
+  const [failedFrames, setFailedFrames] = useState<{ itemID: string; urls: Set<string> }>({ itemID: item.id, urls: new Set() });
+  const usableFrames = frames.filter((frame) => failedFrames.itemID !== item.id || !failedFrames.urls.has(frame));
+  const frame = hovered ? usableFrames[frameIndex % Math.max(usableFrames.length, 1)] : undefined;
+  const frameKind = frame ? feedPreviewMediaKind(frame) : "image";
+  const previewSource = frame && hovered ? (usesAssetProxy ? preview?.url === frame ? preview.source : null : frame) : null;
+  const visibleVideo = previewSource && frameKind === "video" ? previewSource : null;
+  const visiblePreviewImage = previewSource && frameKind === "image" ? previewSource : null;
+  const proxiedThumbnail = thumbnail?.url === item.thumbnailURL ? thumbnail : null;
+  const visibleThumbnail = failedThumbnailURL === item.thumbnailURL ? null : usesAssetProxy ? proxiedThumbnail?.source ?? null : item.thumbnailURL ?? null;
+  const visibleImage = visiblePreviewImage ?? visibleThumbnail;
 
   useEffect(() => {
-    const delay = feedPreviewDelay(hovered, frames.length);
-    if (delay === null) return;
-    const previews = frames.slice(1).map((source) => {
-      const image = new Image();
-      image.src = source;
-      return image;
+    let active = true;
+    if (!usesAssetProxy || !item.thumbnailURL) return undefined;
+    const cached = assetCache.current.get(item.thumbnailURL);
+    const request = cached instanceof Blob ? Promise.resolve(cached) : cached ?? loadAsset(item.thumbnailURL, "image").then((blob) => {
+      assetCache.current.set(item.thumbnailURL!, blob);
+      return blob;
     });
-    const timer = window.setInterval(() => setFrameIndex((current) => (current + 1) % frames.length), delay);
-    return () => { window.clearInterval(timer); void previews; };
-  }, [frames, hovered]);
+    if (!cached) assetCache.current.set(item.thumbnailURL, request);
+    void request.then((blob) => {
+      if (active) setThumbnail({ url: item.thumbnailURL!, source: URL.createObjectURL(blob) });
+    }).catch(() => {
+      if (active) setFailedThumbnailURL(item.thumbnailURL!);
+    });
+    return () => { active = false; };
+  }, [item.thumbnailURL, loadAsset, usesAssetProxy]);
+
+  useEffect(() => {
+    let active = true;
+    if (!usesAssetProxy || !frame) return undefined;
+    const cached = assetCache.current.get(frame);
+    const request = cached instanceof Blob ? Promise.resolve(cached) : cached ?? loadAsset(frame, frameKind).then((blob) => {
+      assetCache.current.set(frame, blob);
+      return blob;
+    });
+    if (!cached) assetCache.current.set(frame, request);
+    void request.then((blob) => {
+      if (active) setPreview({ url: frame, source: URL.createObjectURL(blob) });
+    }).catch(() => {
+      if (active) setFailedFrames((current) => ({ itemID: item.id, urls: new Set(current.itemID === item.id ? current.urls : []).add(frame) }));
+    });
+    return () => { active = false; };
+  }, [frame, frameKind, item.id, loadAsset, usesAssetProxy]);
+
+  useEffect(() => () => {
+    if (thumbnail) URL.revokeObjectURL(thumbnail.source);
+  }, [thumbnail]);
+
+  useEffect(() => () => {
+    if (preview) URL.revokeObjectURL(preview.source);
+  }, [preview]);
+
+  useEffect(() => {
+    const delay = feedPreviewDelay(hovered, usableFrames.length);
+    if (delay === null) return;
+    const timer = window.setInterval(() => setFrameIndex((current) => (current + 1) % usableFrames.length), delay);
+    return () => { window.clearInterval(timer); };
+  }, [hovered, usableFrames.length]);
 
   const stopPreview = () => {
     setHovered(false);
@@ -43,17 +96,17 @@ function FeedThumbnail({ item }: { item: FeedItem }) {
   };
 
   return <div className="feed-preview" onMouseEnter={() => setHovered(true)} onMouseLeave={stopPreview}>
-    {/* Provider thumbnails are dynamic remote URLs and cannot use a fixed Next image allowlist. */}
-    {/* eslint-disable-next-line @next/next/no-img-element */}
-    {frames[frameIndex] ? <img src={frames[frameIndex]} alt="" loading="lazy" /> : null}
-    {frames.length > 1 && <div className={`feed-preview-progress ${hovered ? "active" : ""}`} aria-hidden="true">
-      {frames.map((_, index) => <i className={index === frameIndex ? "current" : ""} key={index} />)}
+    {visibleVideo ? <video src={visibleVideo} autoPlay muted loop playsInline onError={() => frame && setFailedFrames((current) => ({ itemID: item.id, urls: new Set(current.itemID === item.id ? current.urls : []).add(frame) }))} /> : null}
+    {/* eslint-disable-next-line @next/next/no-img-element -- authenticated blob URLs cannot use Next's remote image optimizer. */}
+    {visibleImage ? <img src={visibleImage} alt="" loading="lazy" onError={() => visiblePreviewImage && frame ? setFailedFrames((current) => ({ itemID: item.id, urls: new Set(current.itemID === item.id ? current.urls : []).add(frame) })) : setFailedThumbnailURL(item.thumbnailURL ?? null)} /> : null}
+    {usableFrames.length > 1 && <div className={`feed-preview-progress ${hovered ? "active" : ""}`} aria-hidden="true">
+      {usableFrames.map((_, index) => <i className={index === frameIndex ? "current" : ""} key={index} />)}
     </div>}
-    {hovered && frames.length > 1 && <span className="feed-preview-count">Scene {frameIndex + 1}/{frames.length}</span>}
+    {hovered && usableFrames.length > 1 && <span className="feed-preview-count">Scene {frameIndex + 1}/{usableFrames.length}</span>}
   </div>;
 }
 
-export function FeedView({ destinations, jobs, loadSites, loadPage, queueItem, onQueued }: FeedViewProps) {
+export function FeedView({ destinations, jobs, loadSites, loadPage, queueItem, loadAsset, onQueued }: FeedViewProps) {
   const [sites, setSites] = useState<FeedSite[]>([]);
   const [siteID, setSiteID] = useState<FeedSite["id"]>("");
   const [items, setItems] = useState<FeedItem[]>([]);
@@ -164,7 +217,7 @@ export function FeedView({ destinations, jobs, loadSites, loadPage, queueItem, o
         const selected = selection.has(item.id);
         return <article className={`feed-card glass-panel ${selected ? "selected" : ""}`} key={item.id}>
           <div className="feed-thumb">
-            <FeedThumbnail item={item} />
+            <FeedThumbnail item={item} loadAsset={loadAsset} />
             <span className={`feed-transfer-state state-${state}`}>{state === "available" ? "Ready" : state.replace(/([A-Z])/g, " $1")}</span>
             <button className="feed-select" aria-label={`${selected ? "Deselect" : "Select"} ${item.title}`} aria-pressed={selected} onClick={() => setSelection((current) => toggleFeedSelection(current, item.id))}>{selected ? "✓" : "+"}</button>
           </div>

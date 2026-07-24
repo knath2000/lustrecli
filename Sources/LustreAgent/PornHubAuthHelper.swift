@@ -50,6 +50,8 @@ public struct PornHubAuthHelper: PornHubAuthHelping {
         case "signed-in": return .signedIn
         case "cancelled": return .cancelled
         case "signed-out": return .signedOut
+        case "storage-unavailable": throw PornHubAuthError.storageUnavailable
+        case "helper-failed": throw PornHubAuthError.helperFailed
         default: throw PornHubAuthError.helperFailed
         }
     }

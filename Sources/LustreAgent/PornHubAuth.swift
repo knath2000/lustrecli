@@ -129,6 +129,27 @@ public enum PornHubCookieSanitizer {
     }
 }
 
+public enum PornHubHelperCookieCandidatePolicy {
+    public static let maximumRawCookies = 512
+
+    public static func sanitizeTrustedCookies(_ cookies: [PornHubCookieRecord], now: Date = .now) throws -> [PornHubCookieRecord] {
+        guard cookies.count <= maximumRawCookies else { throw PornHubAuthError.invalidCookieState }
+        return try PornHubCookieSanitizer.sanitize(cookies.filter { PornHubCookieSanitizer.isAllowedDomain($0.domain) }, now: now)
+    }
+
+    public static func hasSessionProofCandidate(_ cookies: [PornHubCookieRecord]) -> Bool {
+        cookies.contains { $0.name == "il" }
+    }
+
+    public static func hasLoginCompletionTrigger(_ cookies: [PornHubCookieRecord]) -> Bool {
+        hasSessionProofCandidate(cookies) || cookies.contains { $0.name == "premium_redirect" }
+    }
+
+    public static func hasSessionCandidate(_ cookies: [PornHubCookieRecord]) -> Bool {
+        hasSessionProofCandidate(cookies)
+    }
+}
+
 public protocol PornHubCookieStore: Sendable {
     func load() throws -> [PornHubCookieRecord]
     func save(_ cookies: [PornHubCookieRecord]) throws
@@ -223,14 +244,159 @@ public enum PornHubAuthError: Error, LocalizedError, Equatable, Sendable {
 
 public enum PornHubHelperNavigationPolicy {
     public static func allows(url: URL?, isMainFrame: Bool, opensNewWindow: Bool, requestsDownload: Bool) -> Bool {
-        guard isMainFrame, !opensNewWindow, !requestsDownload,
-              let url, url.scheme?.lowercased() == "https", let host = url.host else { return false }
-        return PornHubCookieSanitizer.isAllowedDomain(host)
+        allows(url: url, isMainFrame: isMainFrame, topLevelURL: nil, opensNewWindow: opensNewWindow, requestsDownload: requestsDownload)
     }
 
     public static func allowsResponse(url: URL?, canShowMIMEType: Bool) -> Bool {
-        guard canShowMIMEType, let url, url.scheme?.lowercased() == "https", let host = url.host else { return false }
+        allowsResponse(url: url, isMainFrame: true, topLevelURL: nil, canShowMIMEType: canShowMIMEType)
+    }
+
+    public static func allows(url: URL?, isMainFrame: Bool, topLevelURL: URL?, opensNewWindow: Bool, requestsDownload: Bool) -> Bool {
+        guard !opensNewWindow, !requestsDownload else { return false }
+        if isMainFrame { return isTrustedPornHubURL(url) }
+        return isTrustedSubframeURL(url, topLevelURL: topLevelURL)
+    }
+
+    public static func allowsResponse(url: URL?, isMainFrame: Bool, topLevelURL: URL?, canShowMIMEType: Bool) -> Bool {
+        guard canShowMIMEType else { return false }
+        if isMainFrame { return isTrustedPornHubURL(url) }
+        return isTrustedSubframeURL(url, topLevelURL: topLevelURL)
+    }
+
+    private static func isTrustedPornHubURL(_ url: URL?) -> Bool {
+        guard let url, url.scheme?.lowercased() == "https", let host = url.host else { return false }
         return PornHubCookieSanitizer.isAllowedDomain(host)
+    }
+
+    private static func isTrustedSubframeURL(_ url: URL?, topLevelURL: URL?) -> Bool {
+        guard isTrustedPornHubURL(topLevelURL), let url, url.scheme?.lowercased() == "https" else { return false }
+        return true
+    }
+}
+
+public struct PornHubAuthenticationMarkers: Equatable, Sendable {
+    public let hasSessionCookie: Bool
+    public let pageReportsAuthenticatedUser: Bool?
+
+    public init(hasSessionCookie: Bool, pageReportsAuthenticatedUser: Bool?) {
+        self.hasSessionCookie = hasSessionCookie
+        self.pageReportsAuthenticatedUser = pageReportsAuthenticatedUser
+    }
+}
+
+public enum PornHubAuthenticationValidation {
+    public static func isAuthenticated(_ markers: PornHubAuthenticationMarkers) -> Bool {
+        markers.hasSessionCookie && markers.pageReportsAuthenticatedUser == true
+    }
+}
+
+public enum PornHubHelperValidationAction: Equatable, Sendable { case none, loadSubscriptions, evaluatePage, fail }
+
+public enum PornHubHelperChallengePolicy {
+    public static func resetsValidation(authenticationMethod: String) -> Bool {
+        authenticationMethod != NSURLAuthenticationMethodServerTrust
+    }
+}
+
+public struct PornHubHelperValidationCoordinator: Sendable {
+    public private(set) var isValidating = false
+    private let maximumAttempts: Int
+    private var attempts = 0
+    private var pendingCookieChange = false
+
+    public init(maximumAttempts: Int = 2) {
+        self.maximumAttempts = max(1, maximumAttempts)
+    }
+
+    public mutating func cookieChanged(hasSessionCookie: Bool) -> PornHubHelperValidationAction {
+        cookieChanged(hasLoginCompletionTrigger: hasSessionCookie)
+    }
+
+    public mutating func cookieChanged(hasLoginCompletionTrigger: Bool) -> PornHubHelperValidationAction {
+        guard hasLoginCompletionTrigger else {
+            reset()
+            return .none
+        }
+        guard !isValidating else {
+            pendingCookieChange = true
+            return .none
+        }
+        return beginValidation()
+    }
+
+    public mutating func navigationFinished(url: URL?) -> PornHubHelperValidationAction {
+        guard isValidating else { return .none }
+        return Self.isExactSubscriptionsURL(url) ? .evaluatePage : terminalNavigation()
+    }
+
+    public mutating func loginNavigationFinished(url: URL?, hasSessionCookie: Bool) -> PornHubHelperValidationAction {
+        loginNavigationFinished(url: url, hasLoginCompletionTrigger: hasSessionCookie)
+    }
+
+    public mutating func loginNavigationFinished(url: URL?, hasLoginCompletionTrigger: Bool) -> PornHubHelperValidationAction {
+        guard Self.isCompletedLoginNavigation(url) else { return .none }
+        return cookieChanged(hasLoginCompletionTrigger: hasLoginCompletionTrigger)
+    }
+
+    public mutating func terminalNavigation() -> PornHubHelperValidationAction {
+        guard isValidating else { return .none }
+        isValidating = false
+        pendingCookieChange = false
+        return beginValidation()
+    }
+
+    public mutating func authenticationChallenge() -> PornHubHelperValidationAction {
+        reset()
+        return .none
+    }
+
+    public mutating func authenticationResult(isAuthenticated: Bool) -> PornHubHelperValidationAction {
+        guard isValidating else { return .none }
+        isValidating = false
+        pendingCookieChange = false
+        guard !isAuthenticated else { return .none }
+        return beginValidation()
+    }
+
+    private mutating func beginValidation() -> PornHubHelperValidationAction {
+        guard attempts < maximumAttempts else {
+            isValidating = false
+            pendingCookieChange = false
+            return .fail
+        }
+        attempts += 1
+        isValidating = true
+        return .loadSubscriptions
+    }
+
+    private mutating func reset() {
+        isValidating = false
+        attempts = 0
+        pendingCookieChange = false
+    }
+
+    private static func isExactSubscriptionsURL(_ url: URL?) -> Bool {
+        guard let url, url.scheme?.lowercased() == "https", let host = url.host,
+              host.lowercased() == "www.pornhub.com" else { return false }
+        return url.path == "/subscriptions"
+    }
+
+    private static func isCompletedLoginNavigation(_ url: URL?) -> Bool {
+        guard let url, url.scheme?.lowercased() == "https", let host = url.host,
+              PornHubCookieSanitizer.isAllowedDomain(host) else { return false }
+        return url.path != "/login" && !url.path.hasPrefix("/login/")
+    }
+}
+
+public enum PornHubWebKitCookieCapture {
+    public static func record(_ cookie: HTTPCookie) -> PornHubCookieRecord {
+        record(name: cookie.name, value: cookie.value, domain: cookie.domain, path: cookie.path, expiresAt: cookie.expiresDate, secure: cookie.isSecure)
+    }
+
+    public static func record(name: String, value: String, domain: String, path: String, expiresAt: Date?, secure: Bool) -> PornHubCookieRecord {
+        // Foundation does not expose whether Domain was omitted. Treat a dotless domain as
+        // host-only so an ambiguous capture can only narrow, never widen, cookie routing.
+        PornHubCookieRecord(name: name, value: value, domain: domain, path: path, expiresAt: expiresAt, secure: secure, hostOnly: !domain.hasPrefix("."))
     }
 }
 
@@ -240,6 +406,9 @@ public actor PornHubAuthService {
     private let now: @Sendable () -> Date
     private var state: PornHubAuthState = .signedOut
     private var lastValidatedAt: Date?
+    private var message: String?
+    private var loginTask: Task<Void, Never>?
+    private var loginID: UUID?
 
     public init(store: PornHubCookieStore = KeychainPornHubCookieStore(), helper: PornHubAuthHelping = PornHubAuthHelper(), now: @escaping @Sendable () -> Date = { .now }) {
         self.store = store; self.helper = helper; self.now = now
@@ -247,30 +416,48 @@ public actor PornHubAuthService {
 
     public func status() -> PornHubAuthStatus {
         refreshState()
-        return PornHubAuthStatus(state: state, lastValidatedAt: lastValidatedAt)
+        return authStatus()
     }
 
-    public func login() async throws -> PornHubAuthStatus {
+    public func login() throws -> PornHubAuthStatus {
         refreshState()
         guard state != .signingIn else { throw PornHubAuthError.signingIn }
+        try store.remove()
         state = .signingIn
-        do {
-            switch try await helper.login() {
-            case .signedIn:
-                refreshState(validatedByLogin: true)
-                guard state == .signedIn else { throw PornHubAuthError.helperFailed }
-                return PornHubAuthStatus(state: state, lastValidatedAt: lastValidatedAt)
-            case .cancelled: state = .signedOut; throw PornHubAuthError.cancelled
-            case .signedOut: state = .signedOut; return PornHubAuthStatus(state: .signedOut)
-            }
-        } catch let error as PornHubAuthError { if state == .signingIn { state = .signedOut }; throw error }
-        catch { state = .signedOut; throw PornHubAuthError.helperFailed }
+        message = nil
+        let id = UUID()
+        loginID = id
+        let helper = helper
+        loginTask = Task { [weak self] in
+            let result: Result<PornHubHelperResult, PornHubAuthError>
+            do { result = .success(try await helper.login()) }
+            catch let error as PornHubAuthError { result = .failure(error) }
+            catch { result = .failure(.helperFailed) }
+            await self?.completeLogin(id: id, result: result)
+        }
+        return authStatus()
+    }
+
+    public func cancelLogin() -> PornHubAuthStatus {
+        guard state == .signingIn else { return authStatus() }
+        loginID = nil
+        loginTask?.cancel()
+        loginTask = nil
+        state = .signedOut
+        lastValidatedAt = nil
+        message = PornHubAuthError.cancelled.errorDescription
+        try? store.remove()
+        return authStatus()
     }
 
     public func logout() async throws -> PornHubAuthStatus {
         try store.remove()
         state = .signedOut
         lastValidatedAt = nil
+        message = nil
+        loginID = nil
+        loginTask?.cancel()
+        loginTask = nil
         // The helper uses a nonpersistent data store. Its process-local data is gone when the
         // sign-in window closes, so cleanup is best effort and cannot change signed-out truth.
         try? await helper.logout()
@@ -281,6 +468,23 @@ public actor PornHubAuthService {
         let cookies = try PornHubCookieSanitizer.sanitize(store.load(), now: now())
         guard cookies.contains(where: { $0.name == "il" }) else { state = cookies.isEmpty ? .signedOut : .expired; return nil }
         return try PornHubCookieSanitizer.cookieHeader(cookies, for: url, now: now())
+    }
+
+    public func regularHomepageCookieHeader(for url: URL) throws -> String? {
+        guard state != .signingIn, state != .expired else { return nil }
+        do {
+            let cookies = try PornHubCookieSanitizer.sanitize(store.load(), now: now())
+            guard cookies.contains(where: { $0.name == "il" }) else {
+                state = cookies.isEmpty ? .signedOut : .expired
+                return nil
+            }
+            state = .signedIn
+            return try PornHubCookieSanitizer.cookieHeader(cookies, for: url, now: now())
+        } catch {
+            state = .expired
+            message = PornHubAuthError.storageUnavailable.errorDescription
+            throw PornHubAuthError.storageUnavailable
+        }
     }
 
     public func cookiesForYtDlp() throws -> [PornHubCookieRecord] {
@@ -299,12 +503,36 @@ public actor PornHubAuthService {
             let cookies = try PornHubCookieSanitizer.sanitize(store.load(), now: now())
             if cookies.contains(where: { $0.name == "il" }) {
                 if state != .expired || validatedByLogin { state = .signedIn }
-                if validatedByLogin { lastValidatedAt = now() }
+                if validatedByLogin { lastValidatedAt = now(); message = nil }
             } else {
                 state = cookies.isEmpty ? .signedOut : .expired
                 lastValidatedAt = nil
             }
         } catch { state = .expired }
+    }
+
+    private func completeLogin(id: UUID, result: Result<PornHubHelperResult, PornHubAuthError>) {
+        guard loginID == id else { return }
+        loginID = nil
+        loginTask = nil
+        switch result {
+        case .success(.signedIn):
+            refreshState(validatedByLogin: true)
+            if state != .signedIn { state = .signedOut; message = PornHubAuthError.helperFailed.errorDescription }
+        case .success(.cancelled):
+            try? store.remove()
+            state = .signedOut; lastValidatedAt = nil; message = PornHubAuthError.cancelled.errorDescription
+        case .success(.signedOut):
+            try? store.remove()
+            state = .signedOut; lastValidatedAt = nil; message = nil
+        case .failure(let error):
+            try? store.remove()
+            state = .signedOut; lastValidatedAt = nil; message = error.errorDescription
+        }
+    }
+
+    private func authStatus() -> PornHubAuthStatus {
+        PornHubAuthStatus(state: state, lastValidatedAt: lastValidatedAt, message: message)
     }
 }
 

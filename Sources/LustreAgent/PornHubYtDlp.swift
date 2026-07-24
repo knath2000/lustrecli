@@ -102,7 +102,7 @@ public enum PornHubYtDlp {
         return try parseMetadata(result.stdout, source: source)
     }
 
-    public static func materialize(source: URL, formatSelector: String, directory: URL, cookies: [PornHubCookieRecord] = []) async throws -> URL {
+    public static func materialize(source: URL, formatSelector: String, directory: URL, cookies: [PornHubCookieRecord] = [], onProgress: @escaping @Sendable (DownloadProgress) async -> Void = { _ in }) async throws -> URL {
         guard let executable = installedExecutable() else { throw PornHubYtDlpError.executableUnavailable }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let working = directory.appendingPathComponent(".lustre-pornhub-\(UUID().uuidString)", isDirectory: true)
@@ -111,6 +111,7 @@ public enum PornHubYtDlp {
         defer { try? FileManager.default.removeItem(at: working) }
         let cookieFile = try cookies.isEmpty ? nil : PornHubCookieFile.create(in: working, cookies: cookies)
         defer { if let cookieFile { try? PornHubCookieFile.remove(cookieFile) } }
+        await onProgress(DownloadProgress(bytesWritten: 0, phase: .materializing))
         let result = try await run(
             executable: executable,
             arguments: materializationArguments(source: source, formatSelector: formatSelector, directory: working, cookieFile: cookieFile),
@@ -130,6 +131,8 @@ public enum PornHubYtDlp {
         guard outputs.count == 1 else { throw PornHubYtDlpError.invalidOutput }
         let destination = uniqueDestination(directory: directory, extension: outputs[0].pathExtension)
         try FileManager.default.moveItem(at: outputs[0], to: destination)
+        let size = (try? destination.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init)
+        await onProgress(DownloadProgress(bytesWritten: size ?? 0, totalBytes: size, phase: .postProcessing))
         return destination
     }
 

@@ -740,7 +740,9 @@ final class AgentServiceTests: XCTestCase {
         let sites = await service.feedSites()
         let page = try await service.feedPage(site: .allPornStream, page: 2)
 
-        XCTAssertEqual(sites, [.allPornStream, .hqPorner, .onlyFan420, .pornHub])
+        XCTAssertEqual(Array(sites.prefix(4)), [.allPornStream, .hqPorner, .onlyFan420, .pornHub])
+        XCTAssertEqual(sites.filter { $0.id == .pornHub }.count, 1)
+        XCTAssertTrue(sites.count == FeedSite.all.count || sites == FeedSite.all + FeedSite.authenticatedPornHub)
         XCTAssertEqual(page.page, 2)
         XCTAssertEqual(page.items, [])
         XCTAssertFalse(page.hasMore)

@@ -33,6 +33,7 @@ public actor AgentService {
     private let destinationSecrets: RemoteDestinationSecretStore
     private let folderPicker: FolderPicker
     private let feed: FeedService
+    private let feedAssetProxy: FeedAssetProxy
     private let pornHubAuth: PornHubAuthService
     private let maximumConcurrentDownloads: Int
     private var activeDownloadTasks: [UUID: ActiveDownload] = [:]
@@ -55,6 +56,7 @@ public actor AgentService {
         stagedRemoteUploader: StagedRemoteUploader? = nil,
         remoteDestinationTester: RemoteDestinationTester? = nil,
         feed: FeedService? = nil,
+        feedAssetProxy: FeedAssetProxy = FeedAssetProxy(),
         pornHubAuth: PornHubAuthService = PornHubAuthService(),
         maximumConcurrentDownloads: Int = 1
     ) throws {
@@ -84,10 +86,10 @@ public actor AgentService {
                 throw error
             }
         }
-        self.ytDlpMaterializer = ytDlpMaterializer ?? { resolution, quality, directory, _ in
+        self.ytDlpMaterializer = ytDlpMaterializer ?? { resolution, quality, directory, reportProgress in
             guard let selector = quality.formatSelector else { throw PornHubYtDlpError.invalidFormat }
             let cookies = (try? await pornHubAuth.cookiesForYtDlp()) ?? []
-            do { return try await PornHubYtDlp.materialize(source: resolution.sourcePageURL, formatSelector: selector, directory: directory, cookies: cookies) }
+            do { return try await PornHubYtDlp.materialize(source: resolution.sourcePageURL, formatSelector: selector, directory: directory, cookies: cookies, onProgress: reportProgress) }
             catch let error as PornHubYtDlpError {
                 if !cookies.isEmpty { await pornHubAuth.recordYtDlpFailure(error) }
                 throw error
@@ -96,7 +98,19 @@ public actor AgentService {
         self.stagedRemoteUploader = stagedRemoteUploader ?? AgentService.uploadMaterializedFileToWebDAV
         self.remoteDestinationTester = remoteDestinationTester ?? AgentService.testWebDAVDestination
         self.folderPicker = folderPicker ?? AgentService.chooseDownloadFolder
-        self.feed = feed ?? FeedService(fetch: PornHubFeedRequest.fetch, pornHubCookieHeader: { url in try await pornHubAuth.cookieHeader(for: url) })
+        self.feed = feed ?? FeedService(
+            fetch: PornHubFeedRequest.fetch,
+            pornHubCookieHeader: { url in try await pornHubAuth.cookieHeader(for: url) },
+            pornHubHomepageSession: { url in
+                do {
+                    guard let cookieHeader = try await pornHubAuth.regularHomepageCookieHeader(for: url) else { return .anonymous }
+                    return .authenticated(cookieHeader: cookieHeader)
+                } catch {
+                    throw FeedError.authenticationUnavailable
+                }
+            }
+        )
+        self.feedAssetProxy = feedAssetProxy
         self.maximumConcurrentDownloads = max(1, maximumConcurrentDownloads)
         Task { [weak self] in
             await self?.recoverDurableJobs()
@@ -120,8 +134,13 @@ public actor AgentService {
         try await feed.page(site: site, page: page)
     }
 
+    public func feedAsset(url: URL, kind: FeedAssetKind) async throws -> FeedAssetResponse {
+        try await feedAssetProxy.load(url: url, kind: kind)
+    }
+
     public func pornHubAuthStatus() async -> PornHubAuthStatus { await pornHubAuth.status() }
     public func signInWithPornHub() async throws -> PornHubAuthStatus { try await pornHubAuth.login() }
+    public func cancelPornHubSignIn() async -> PornHubAuthStatus { await pornHubAuth.cancelLogin() }
     public func signOutOfPornHub() async throws -> PornHubAuthStatus {
         try await pornHubAuth.logout()
     }
@@ -319,6 +338,7 @@ public actor AgentService {
             active.progress = nil
             active.downloadedBytes = 0
             active.totalBytes = nil
+            active.transferPhase = .resolving
             active.updatedAt = .now
             try await jobs.update(active)
             guard !Task.isCancelled,
@@ -336,12 +356,29 @@ public actor AgentService {
                     throw RemoteDestinationError.missingCredentials
                 }
                 record(&active, level: .info, message: "Materializing \(quality.label) before upload to \(profile.name).")
+                active.transferPhase = .materializing
+                active.phaseProgress = nil
+                active.phaseBytes = 0
+                active.phaseTotalBytes = nil
                 try await jobs.update(active)
                 let staging = FileManager.default.temporaryDirectory.appending(path: "lustre-materialized-\(UUID().uuidString)", directoryHint: .isDirectory)
                 defer { try? FileManager.default.removeItem(at: staging) }
                 let media = quality.mediaKind == .hls
                     ? try await hlsMaterializer(resolution, quality, staging, reportProgress)
                     : try await ytDlpMaterializer(resolution, quality, staging, reportProgress)
+                guard var uploading = try await jobs.job(id: id), uploading.status == .running else { return }
+                let size = (try? media.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init)
+                uploading.transferPhase = .uploading
+                uploading.phaseProgress = 0
+                uploading.phaseBytes = 0
+                uploading.phaseTotalBytes = size
+                uploading.phaseTotalIsEstimated = false
+                uploading.progress = 0
+                uploading.downloadedBytes = 0
+                uploading.totalBytes = size
+                record(&uploading, level: .info, message: "Uploading \(quality.label) to \(profile.name).")
+                uploading.updatedAt = .now
+                try await jobs.update(uploading)
                 output = try await stagedRemoteUploader(resolution, quality, media, profile, password, reportProgress)
             } else if quality.mediaKind == .hls {
                 output = try await hlsMaterializer(resolution, quality, try downloadDirectory(for: current.destination), reportProgress)
@@ -443,6 +480,13 @@ public actor AgentService {
         job.progress = progress.fraction
         job.downloadedBytes = progress.bytesWritten
         job.totalBytes = progress.totalBytes
+        job.transferPhase = progress.phase ?? job.transferPhase
+        job.phaseProgress = progress.fraction
+        job.phaseBytes = progress.bytesWritten
+        job.phaseTotalBytes = progress.totalBytes
+        job.phaseTotalIsEstimated = progress.totalIsEstimated
+        job.phaseBytesPerSecond = progress.bytesPerSecond
+        job.phaseETASeconds = progress.etaSeconds
         job.updatedAt = now
         try? await jobs.update(job)
     }
@@ -685,6 +729,7 @@ public actor AgentService {
             throw DownloadError.invalidResponse
         }
         let size = (try file.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init)
+        if let size { await onProgress(DownloadProgress(bytesWritten: 0, totalBytes: size, phase: .uploading)) }
         let destination = webDAVFileURL(profile: profile, filename: file.lastPathComponent)
         try await ensureWebDAVDirectories(profile: profile, password: password)
         var request = URLRequest(url: destination)
@@ -697,7 +742,7 @@ public actor AgentService {
         guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
             throw RemoteTransferError.uploadFailed((response as? HTTPURLResponse)?.statusCode ?? 0)
         }
-        if let size { await onProgress(DownloadProgress(bytesWritten: size, totalBytes: size)) }
+        if let size { await onProgress(DownloadProgress(bytesWritten: size, totalBytes: size, phase: .uploading)) }
         return destination
     }
 

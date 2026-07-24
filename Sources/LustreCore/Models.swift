@@ -4,10 +4,10 @@ public enum PornHubAuthState: String, Codable, Equatable, Sendable { case signed
 
 public struct PornHubAuthStatus: Codable, Equatable, Sendable {
     public let state: PornHubAuthState
-    public let displayName: String?
     public let lastValidatedAt: Date?
-    public init(state: PornHubAuthState, displayName: String? = nil, lastValidatedAt: Date? = nil) {
-        self.state = state; self.displayName = displayName; self.lastValidatedAt = lastValidatedAt
+    public let message: String?
+    public init(state: PornHubAuthState, lastValidatedAt: Date? = nil, message: String? = nil) {
+        self.state = state; self.lastValidatedAt = lastValidatedAt; self.message = message
     }
 }
 
@@ -151,13 +151,23 @@ public struct ProviderResolution: Codable, Equatable, Sendable {
     }
 }
 
+public enum TransferPhase: String, Codable, Equatable, Sendable { case resolving, downloading, materializing, postProcessing, uploading, verifying }
+
 public struct DownloadProgress: Equatable, Sendable {
     public let bytesWritten: Int64
     public let totalBytes: Int64?
+    public let phase: TransferPhase?
+    public let totalIsEstimated: Bool
+    public let bytesPerSecond: Double?
+    public let etaSeconds: Int?
 
-    public init(bytesWritten: Int64, totalBytes: Int64? = nil) {
-        self.bytesWritten = bytesWritten
-        self.totalBytes = totalBytes
+    public init(bytesWritten: Int64, totalBytes: Int64? = nil, phase: TransferPhase? = nil, totalIsEstimated: Bool = false, bytesPerSecond: Double? = nil, etaSeconds: Int? = nil) {
+        self.bytesWritten = max(0, bytesWritten)
+        self.totalBytes = totalBytes.map { max(0, $0) }
+        self.phase = phase
+        self.totalIsEstimated = totalIsEstimated
+        self.bytesPerSecond = bytesPerSecond.flatMap { $0.isFinite && $0 >= 0 ? $0 : nil }
+        self.etaSeconds = etaSeconds.flatMap { (0...7_200).contains($0) ? $0 : nil }
     }
 
     public var fraction: Double? {
@@ -176,6 +186,13 @@ public struct DownloadJob: Codable, Identifiable, Equatable, Sendable {
     public var progress: Double?
     public var downloadedBytes: Int64?
     public var totalBytes: Int64?
+    public var transferPhase: TransferPhase?
+    public var phaseProgress: Double?
+    public var phaseBytes: Int64?
+    public var phaseTotalBytes: Int64?
+    public var phaseTotalIsEstimated: Bool?
+    public var phaseBytesPerSecond: Double?
+    public var phaseETASeconds: Int?
     public var attempts: Int
     public var logs: [JobLogEntry]?
     public let createdAt: Date
@@ -191,6 +208,13 @@ public struct DownloadJob: Codable, Identifiable, Equatable, Sendable {
         progress: Double? = nil,
         downloadedBytes: Int64? = nil,
         totalBytes: Int64? = nil,
+        transferPhase: TransferPhase? = nil,
+        phaseProgress: Double? = nil,
+        phaseBytes: Int64? = nil,
+        phaseTotalBytes: Int64? = nil,
+        phaseTotalIsEstimated: Bool? = nil,
+        phaseBytesPerSecond: Double? = nil,
+        phaseETASeconds: Int? = nil,
         attempts: Int = 0,
         logs: [JobLogEntry]? = nil,
         createdAt: Date = .now,
@@ -205,6 +229,13 @@ public struct DownloadJob: Codable, Identifiable, Equatable, Sendable {
         self.progress = progress
         self.downloadedBytes = downloadedBytes
         self.totalBytes = totalBytes
+        self.transferPhase = transferPhase
+        self.phaseProgress = phaseProgress
+        self.phaseBytes = phaseBytes
+        self.phaseTotalBytes = phaseTotalBytes
+        self.phaseTotalIsEstimated = phaseTotalIsEstimated
+        self.phaseBytesPerSecond = phaseBytesPerSecond
+        self.phaseETASeconds = phaseETASeconds
         self.attempts = attempts
         self.logs = logs
         self.createdAt = createdAt

@@ -24,6 +24,45 @@ final class PornHubAuthTests: XCTestCase {
         XCTAssertThrowsError(try PornHubCookieSanitizer.sanitize([cookie(name: "external", domain: "example.test", value: String(repeating: "x", count: PornHubCookieSanitizer.maximumAggregateBytes))], now: now))
     }
 
+    func testHelperCandidateFilteringKeepsTrustedSessionWhenForeignStoreIsLargeOrMalformed() throws {
+        let foreign = (0..<PornHubCookieSanitizer.maximumCookies + 16).map { index in
+            cookie(name: "foreign\(index)", domain: "tracker\(index).example.test", value: String(repeating: "x", count: 8_192))
+        }
+        let malformedForeign = PornHubCookieRecord(name: "bad\tname", value: "bad", domain: "pornhub.com.evil.test", path: "/", expiresAt: nil, secure: false)
+        let trusted = [cookie(name: "il", domain: ".pornhub.com"), cookie(name: "host", domain: "www.pornhub.com", hostOnly: true)]
+
+        let candidates = try PornHubHelperCookieCandidatePolicy.sanitizeTrustedCookies(foreign + [malformedForeign] + trusted, now: now)
+
+        XCTAssertEqual(candidates, try PornHubCookieSanitizer.sanitize(trusted, now: now))
+        XCTAssertTrue(PornHubHelperCookieCandidatePolicy.hasSessionCandidate(candidates))
+    }
+
+    func testHelperCandidateFilteringFailsClosedForTooManyTrustedCookiesAndExcludesLookalikes() throws {
+        let tooManyTrusted = (0...PornHubCookieSanitizer.maximumCookies).map { index in
+            cookie(name: "trusted\(index)", domain: ".pornhub.com")
+        }
+        XCTAssertThrowsError(try PornHubHelperCookieCandidatePolicy.sanitizeTrustedCookies(tooManyTrusted, now: now))
+
+        let candidates = try PornHubHelperCookieCandidatePolicy.sanitizeTrustedCookies([
+            cookie(name: "il", domain: ".pornhub.com"),
+            cookie(name: "lookalike", domain: "pornhub.com.evil.test"),
+            cookie(name: "sibling", domain: "notpornhub.com")
+        ], now: now)
+        XCTAssertEqual(candidates.map(\.name), ["il"])
+    }
+
+    func testPremiumRedirectIsOnlyATrustedLoginCompletionTrigger() throws {
+        let redirect = try PornHubHelperCookieCandidatePolicy.sanitizeTrustedCookies([cookie(name: "premium_redirect", domain: ".pornhub.com")], now: now)
+        let session = try PornHubHelperCookieCandidatePolicy.sanitizeTrustedCookies([cookie(name: "il", domain: ".pornhub.com")], now: now)
+        let foreignRedirect = try PornHubHelperCookieCandidatePolicy.sanitizeTrustedCookies([cookie(name: "premium_redirect", domain: "pornhub.com.evil.test")], now: now)
+
+        XCTAssertTrue(PornHubHelperCookieCandidatePolicy.hasLoginCompletionTrigger(redirect))
+        XCTAssertFalse(PornHubHelperCookieCandidatePolicy.hasSessionProofCandidate(redirect))
+        XCTAssertTrue(PornHubHelperCookieCandidatePolicy.hasLoginCompletionTrigger(session))
+        XCTAssertTrue(PornHubHelperCookieCandidatePolicy.hasSessionProofCandidate(session))
+        XCTAssertFalse(PornHubHelperCookieCandidatePolicy.hasLoginCompletionTrigger(foreignRedirect))
+    }
+
     func testCookieHeaderUsesRFCPathDomainAndSecureMatchingWithDeterministicOrdering() throws {
         let root = cookie(name: "root", domain: ".pornhub.com", path: "/")
         let account = cookie(name: "account", domain: ".pornhub.com", path: "/account")
@@ -83,23 +122,37 @@ final class PornHubAuthTests: XCTestCase {
         let helper = BlockingHelper()
         let fixedNow = now
         let service = PornHubAuthService(store: FakeCookieStore(), helper: helper, now: { fixedNow })
-        let first = Task { try await service.login() }
+        let first = try await service.login()
+        XCTAssertEqual(first.state, .signingIn)
         await helper.waitUntilStarted()
         await XCTAssertThrowsErrorAsync(try await service.login()) { XCTAssertEqual($0 as? PornHubAuthError, .signingIn) }
+        let cancelled = await service.cancelLogin()
+        XCTAssertEqual(cancelled.state, .signedOut)
+        XCTAssertEqual(cancelled.message, PornHubAuthError.cancelled.errorDescription)
         await helper.finish(.cancelled)
-        await XCTAssertThrowsErrorAsync(try await first.value)
     }
 
     func testSuccessfulLoginRevalidatesStoredSessionAndRecordsValidationTime() async throws {
         let store = FakeCookieStore()
-        try store.save([cookie(name: "il", domain: ".pornhub.com")])
         let fixedNow = now
-        let service = PornHubAuthService(store: store, helper: FakeHelper(result: .signedIn), now: { fixedNow })
+        let service = PornHubAuthService(store: store, helper: SessionWritingHelper(store: store, cookies: [cookie(name: "il", domain: ".pornhub.com")]), now: { fixedNow })
 
         let status = try await service.login()
+        XCTAssertEqual(status.state, .signingIn)
+        for _ in 0..<20 where (await service.status()).state == .signingIn {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let completed = await service.status()
 
-        XCTAssertEqual(status.state, .signedIn)
-        XCTAssertEqual(status.lastValidatedAt, now)
+        XCTAssertEqual(completed.state, .signedIn)
+        XCTAssertEqual(completed.lastValidatedAt, now)
+    }
+
+    func testSemanticAuthenticationRequiresSessionCookieAndExplicitAuthenticatedPageState() {
+        XCTAssertTrue(PornHubAuthenticationValidation.isAuthenticated(.init(hasSessionCookie: true, pageReportsAuthenticatedUser: true)))
+        XCTAssertFalse(PornHubAuthenticationValidation.isAuthenticated(.init(hasSessionCookie: true, pageReportsAuthenticatedUser: false)))
+        XCTAssertFalse(PornHubAuthenticationValidation.isAuthenticated(.init(hasSessionCookie: true, pageReportsAuthenticatedUser: nil)))
+        XCTAssertFalse(PornHubAuthenticationValidation.isAuthenticated(.init(hasSessionCookie: false, pageReportsAuthenticatedUser: true)))
     }
 
     func testCookieFileIsExclusivePrivateAndCleansUpOnWriteFailure() throws {
@@ -131,6 +184,47 @@ final class PornHubAuthTests: XCTestCase {
         XCTAssertFalse(PornHubHelperNavigationPolicy.allows(url: URL(string: "https://www.pornhub.com/")!, isMainFrame: true, opensNewWindow: false, requestsDownload: true))
     }
 
+    func testHelperNavigationPolicyAllowsProviderControlledSubframesOnlyUnderTrustedPornHub() {
+        let login = URL(string: "https://www.pornhub.com/login")!
+        let foreignFrame = URL(string: "https://provider-challenge.example.test/runtime/frame")!
+
+        XCTAssertTrue(PornHubHelperNavigationPolicy.allows(url: URL(string: "https://www.pornhub.com/login")!, isMainFrame: true, topLevelURL: login, opensNewWindow: false, requestsDownload: false))
+        XCTAssertTrue(PornHubHelperNavigationPolicy.allows(url: URL(string: "https://api.pornhub.com/login")!, isMainFrame: true, topLevelURL: login, opensNewWindow: false, requestsDownload: false))
+        XCTAssertTrue(PornHubHelperNavigationPolicy.allows(url: foreignFrame, isMainFrame: false, topLevelURL: login, opensNewWindow: false, requestsDownload: false))
+        XCTAssertFalse(PornHubHelperNavigationPolicy.allows(url: foreignFrame, isMainFrame: true, topLevelURL: login, opensNewWindow: false, requestsDownload: false))
+
+        for topLevel in [
+            URL(string: "https://evil.test/login")!,
+            URL(string: "http://www.pornhub.com/login")!,
+            URL(string: "https://www.pornhub.com.evil.test/login")!,
+            nil
+        ] {
+            XCTAssertFalse(PornHubHelperNavigationPolicy.allows(url: foreignFrame, isMainFrame: false, topLevelURL: topLevel, opensNewWindow: false, requestsDownload: false))
+        }
+    }
+
+    func testHelperNavigationPolicyRejectsUnsafeFramesAndMirrorsResponsePolicy() {
+        let login = URL(string: "https://www.pornhub.com/login")!
+        let foreignFrame = URL(string: "https://provider-challenge.example.test/runtime/frame")!
+        let cases = [
+            URL(string: "http://provider-challenge.example.test/runtime/frame")!,
+            URL(string: "file:///tmp/frame")!,
+            URL(string: "data:text/html,test")!,
+            URL(string: "javascript:alert(1)")!
+        ]
+
+        XCTAssertFalse(PornHubHelperNavigationPolicy.allows(url: foreignFrame, isMainFrame: false, topLevelURL: login, opensNewWindow: true, requestsDownload: false))
+        XCTAssertFalse(PornHubHelperNavigationPolicy.allows(url: foreignFrame, isMainFrame: false, topLevelURL: login, opensNewWindow: false, requestsDownload: true))
+        for url in cases {
+            XCTAssertFalse(PornHubHelperNavigationPolicy.allows(url: url, isMainFrame: false, topLevelURL: login, opensNewWindow: false, requestsDownload: false))
+        }
+
+        XCTAssertTrue(PornHubHelperNavigationPolicy.allowsResponse(url: foreignFrame, isMainFrame: false, topLevelURL: login, canShowMIMEType: true))
+        XCTAssertFalse(PornHubHelperNavigationPolicy.allowsResponse(url: foreignFrame, isMainFrame: true, topLevelURL: login, canShowMIMEType: true))
+        XCTAssertFalse(PornHubHelperNavigationPolicy.allowsResponse(url: foreignFrame, isMainFrame: false, topLevelURL: URL(string: "http://www.pornhub.com/login")!, canShowMIMEType: true))
+        XCTAssertFalse(PornHubHelperNavigationPolicy.allowsResponse(url: cases[0], isMainFrame: false, topLevelURL: login, canShowMIMEType: true))
+    }
+
     func testHelperOutputCapAndTimeoutTerminateChild() async throws {
         let root = temporaryDirectory()
         let agent = root.appendingPathComponent("lustre-agent")
@@ -152,6 +246,123 @@ final class PornHubAuthTests: XCTestCase {
         let pid = try XCTUnwrap(Int32((try String(contentsOf: pidFile)).trimmingCharacters(in: .whitespacesAndNewlines)))
         for _ in 0..<20 where kill(pid, 0) == 0 { try? await Task.sleep(for: .milliseconds(25)) }
         XCTAssertNotEqual(kill(pid, 0), 0)
+    }
+
+    func testHelperFailureTokensStayStaticAndPreserveCancellation() async throws {
+        let root = temporaryDirectory()
+        let agent = root.appendingPathComponent("lustre-agent")
+        try Data("agent".utf8).write(to: agent)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: agent.path)
+        let helper = root.appendingPathComponent("lustre-auth-helper")
+        try Data("#!/bin/sh\nprintf storage-unavailable\n".utf8).write(to: helper)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: helper.path)
+
+        await XCTAssertThrowsErrorAsync(try await PornHubAuthHelper(executableURL: agent, timeout: 1).login()) {
+            XCTAssertEqual($0 as? PornHubAuthError, .storageUnavailable)
+        }
+        try Data("#!/bin/sh\nprintf helper-failed\n".utf8).write(to: helper)
+        await XCTAssertThrowsErrorAsync(try await PornHubAuthHelper(executableURL: agent, timeout: 1).login()) {
+            XCTAssertEqual($0 as? PornHubAuthError, .helperFailed)
+        }
+        try Data("#!/bin/sh\nprintf cancelled\n".utf8).write(to: helper)
+        let cancelled = try await PornHubAuthHelper(executableURL: agent, timeout: 1).login()
+        XCTAssertEqual(cancelled, .cancelled)
+    }
+
+    func testValidationCoordinatorRetriesOnceThenResetsAndCoalescesCookieChanges() {
+        var coordinator = PornHubHelperValidationCoordinator(maximumAttempts: 2)
+        XCTAssertEqual(coordinator.cookieChanged(hasSessionCookie: true), .loadSubscriptions)
+        XCTAssertTrue(coordinator.isValidating)
+        XCTAssertEqual(coordinator.cookieChanged(hasSessionCookie: true), .none)
+        XCTAssertEqual(coordinator.terminalNavigation(), .loadSubscriptions)
+        XCTAssertEqual(coordinator.terminalNavigation(), .fail)
+        XCTAssertFalse(coordinator.isValidating)
+        XCTAssertEqual(coordinator.cookieChanged(hasSessionCookie: false), .none)
+        XCTAssertEqual(coordinator.cookieChanged(hasSessionCookie: true), .loadSubscriptions)
+    }
+
+    func testValidationCoordinatorBoundsPersistentCompletionTriggerRetries() {
+        var coordinator = PornHubHelperValidationCoordinator(maximumAttempts: 2)
+        XCTAssertEqual(coordinator.cookieChanged(hasLoginCompletionTrigger: true), .loadSubscriptions)
+        XCTAssertEqual(coordinator.cookieChanged(hasLoginCompletionTrigger: true), .none)
+        XCTAssertEqual(coordinator.authenticationResult(isAuthenticated: false), .loadSubscriptions)
+        XCTAssertEqual(coordinator.authenticationResult(isAuthenticated: false), .fail)
+        XCTAssertFalse(coordinator.isValidating)
+    }
+
+    func testTrustedLoginNavigationCompletionSchedulesCoalescedCookieValidation() {
+        var coordinator = PornHubHelperValidationCoordinator(maximumAttempts: 2)
+        XCTAssertEqual(coordinator.loginNavigationFinished(url: URL(string: "https://www.pornhub.com/")!, hasSessionCookie: true), .loadSubscriptions)
+        XCTAssertEqual(coordinator.cookieChanged(hasSessionCookie: true), .none)
+        XCTAssertEqual(coordinator.loginNavigationFinished(url: URL(string: "https://www.pornhub.com/login")!, hasSessionCookie: true), .none)
+        XCTAssertEqual(coordinator.loginNavigationFinished(url: URL(string: "https://pornhub.com.evil.test/")!, hasSessionCookie: true), .none)
+
+        var observerFirst = PornHubHelperValidationCoordinator(maximumAttempts: 2)
+        XCTAssertEqual(observerFirst.cookieChanged(hasSessionCookie: true), .loadSubscriptions)
+        XCTAssertEqual(observerFirst.loginNavigationFinished(url: URL(string: "https://www.pornhub.com/")!, hasSessionCookie: true), .none)
+    }
+
+    func testValidationCoordinatorFailsAfterSemanticAuthenticationRetriesExhaust() {
+        var coordinator = PornHubHelperValidationCoordinator(maximumAttempts: 2)
+        XCTAssertEqual(coordinator.cookieChanged(hasSessionCookie: true), .loadSubscriptions)
+        XCTAssertEqual(coordinator.authenticationResult(isAuthenticated: false), .loadSubscriptions)
+        XCTAssertEqual(coordinator.authenticationResult(isAuthenticated: false), .fail)
+        XCTAssertFalse(coordinator.isValidating)
+    }
+
+    func testValidationCoordinatorOnlyEvaluatesExactSubscriptionsPage() {
+        var coordinator = PornHubHelperValidationCoordinator(maximumAttempts: 2)
+        XCTAssertEqual(coordinator.cookieChanged(hasSessionCookie: true), .loadSubscriptions)
+        XCTAssertEqual(coordinator.navigationFinished(url: URL(string: "https://www.pornhub.com/login")!), .loadSubscriptions)
+        XCTAssertEqual(coordinator.navigationFinished(url: URL(string: "https://www.pornhub.com/subscriptions?x=1")!), .evaluatePage)
+        XCTAssertEqual(coordinator.authenticationChallenge(), .none)
+        XCTAssertFalse(coordinator.isValidating)
+    }
+
+    func testServerTrustChallengeDoesNotResetValidation() {
+        XCTAssertFalse(PornHubHelperChallengePolicy.resetsValidation(authenticationMethod: NSURLAuthenticationMethodServerTrust))
+        XCTAssertTrue(PornHubHelperChallengePolicy.resetsValidation(authenticationMethod: NSURLAuthenticationMethodHTTPBasic))
+    }
+
+    func testHostOnlyCookieCaptureFailsClosedToExactHostAndNetscapeOutput() throws {
+        let hostOnly = PornHubWebKitCookieCapture.record(name: "il", value: secret, domain: "www.pornhub.com", path: "/", expiresAt: nil, secure: true)
+        let domain = PornHubWebKitCookieCapture.record(name: "root", value: secret, domain: ".pornhub.com", path: "/", expiresAt: nil, secure: true)
+        XCTAssertTrue(hostOnly.hostOnly)
+        XCTAssertFalse(domain.hostOnly)
+        XCTAssertNil(try PornHubCookieSanitizer.cookieHeader([hostOnly], for: URL(string: "https://api.pornhub.com/subscriptions")!, now: now))
+        let root = temporaryDirectory()
+        let file = try PornHubCookieFile.create(in: root, cookies: [hostOnly, domain], now: now)
+        let contents = try String(contentsOf: file)
+        XCTAssertTrue(contents.contains("www.pornhub.com\tFALSE\t/\tTRUE"))
+        XCTAssertTrue(contents.contains(".pornhub.com\tTRUE\t/\tTRUE"))
+    }
+
+    func testCancellationIgnoresLateHelperSuccess() async throws {
+        let helper = BlockingHelper()
+        let fixedNow = now
+        let service = PornHubAuthService(store: FakeCookieStore(), helper: helper, now: { fixedNow })
+        _ = try await service.login()
+        await helper.waitUntilStarted()
+        let cancelled = await service.cancelLogin()
+        XCTAssertEqual(cancelled.state, .signedOut)
+        await helper.finish(.signedIn)
+        for _ in 0..<5 { await Task.yield() }
+        let status = await service.status()
+        XCTAssertEqual(status.state, .signedOut)
+    }
+
+    func testCancelledHelperCompletionRemovesAnyPartiallyStoredSession() async throws {
+        let store = FakeCookieStore()
+        let fixedNow = now
+        let helper = SessionWritingResultHelper(store: store, cookies: [cookie(name: "il", domain: ".pornhub.com")], result: .cancelled)
+        let service = PornHubAuthService(store: store, helper: helper, now: { fixedNow })
+        _ = try await service.login()
+        for _ in 0..<20 where (await service.status()).state == .signingIn {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual((try store.load()).count, 0)
+        let status = await service.status()
+        XCTAssertEqual(status.state, .signedOut)
     }
 
     private func cookie(name: String, domain: String, path: String = "/", expiresAt: Date? = nil, secure: Bool = true, hostOnly: Bool = false, value: String? = nil) -> PornHubCookieRecord {
@@ -192,6 +403,25 @@ private actor FakeHelper: PornHubAuthHelping {
     func login() async throws -> PornHubHelperResult { result }
     func logout() async throws { logoutAttempted = true; if let logoutError { throw logoutError } }
     func didAttemptLogout() -> Bool { logoutAttempted }
+}
+
+private actor SessionWritingHelper: PornHubAuthHelping {
+    let store: FakeCookieStore
+    let cookies: [PornHubCookieRecord]
+    init(store: FakeCookieStore, cookies: [PornHubCookieRecord]) { self.store = store; self.cookies = cookies }
+    func login() async throws -> PornHubHelperResult { try store.save(cookies); return .signedIn }
+    func logout() async throws {}
+}
+
+private actor SessionWritingResultHelper: PornHubAuthHelping {
+    let store: FakeCookieStore
+    let cookies: [PornHubCookieRecord]
+    let result: PornHubHelperResult
+    init(store: FakeCookieStore, cookies: [PornHubCookieRecord], result: PornHubHelperResult) {
+        self.store = store; self.cookies = cookies; self.result = result
+    }
+    func login() async throws -> PornHubHelperResult { try store.save(cookies); return result }
+    func logout() async throws {}
 }
 
 private actor BlockingHelper: PornHubAuthHelping {

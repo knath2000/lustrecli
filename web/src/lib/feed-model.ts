@@ -46,6 +46,14 @@ export function feedPreviewFrames(item: Pick<FeedItem, "thumbnailURL" | "preview
   return thumbnail ? [thumbnail] : [];
 }
 
+export function feedPreviewMediaKind(url: string): "image" | "video" {
+  return /\.(?:webm|mp4|mov)(?:$|[?#])/i.test(url) ? "video" : "image";
+}
+
+export function feedUsesAuthenticatedAssetProxy(siteID: FeedSiteID): boolean {
+  return siteID === "hqporner" || siteID.startsWith("pornhub");
+}
+
 export function feedPreviewDelay(hovered: boolean, frameCount: number): number | null {
   return hovered && frameCount > 1 ? 800 : null;
 }

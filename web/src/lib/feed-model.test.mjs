@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { feedPreviewDelay, feedPreviewFrames, feedTransferState, queueFeedItems, toggleFeedSelection } from "./feed-model.ts";
+import { feedPreviewDelay, feedPreviewFrames, feedPreviewMediaKind, feedTransferState, feedUsesAuthenticatedAssetProxy, queueFeedItems, toggleFeedSelection } from "./feed-model.ts";
 
 const alpha = { id: "alpha", sourcePageURL: "https://allpornstream.com/post/alpha" };
 const beta = { id: "beta", sourcePageURL: "https://allpornstream.com/post/beta" };
@@ -24,6 +24,19 @@ test("feedPreviewDelay rotates multi-frame previews whenever the user is hoverin
   assert.equal(feedPreviewDelay(false, 4), null);
   assert.equal(feedPreviewDelay(true, 1), null);
   assert.equal(feedPreviewDelay(true, 4), 800);
+});
+
+test("feedPreviewMediaKind keeps video previews out of image elements", () => {
+  assert.equal(feedPreviewMediaKind("https://di.phncdn.com/preview.webm?token=one"), "video");
+  assert.equal(feedPreviewMediaKind("https://img.hqporner.com/scene-1.jpg"), "image");
+});
+
+test("feedUsesAuthenticatedAssetProxy keeps non-PornHub feeds in the browser", () => {
+  assert.equal(feedUsesAuthenticatedAssetProxy("pornhub"), true);
+  assert.equal(feedUsesAuthenticatedAssetProxy("pornhub-liked"), true);
+  assert.equal(feedUsesAuthenticatedAssetProxy("hqporner"), true);
+  assert.equal(feedUsesAuthenticatedAssetProxy("allpornstream"), false);
+  assert.equal(feedUsesAuthenticatedAssetProxy("onlyfan420"), false);
 });
 
 test("feedTransferState prefers active jobs over completed history", () => {
