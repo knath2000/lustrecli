@@ -42,7 +42,7 @@ This document records the accepted behavior in the current `main` working tree, 
 - Downloads, Activity, Destinations, Settings, Queue Transfer, Feed, Force Start, and PornHub auth controls call the real API.
 - Auth poll/action responses are sequenced so stale polling cannot overwrite a newer sign-in, cancellation, or sign-out result.
 - Browser-held bearer tokens remain in the current React session only.
-- AllPornStream, HQPorner, and PornHub expose agent-owned provider-native search. Search text is normalized and bounded, provider URLs are constructed from fixed trusted origins, pagination preserves the active query, and the Next.js proxy preserves the complete query string. AllPornStream uses its current `search` parameter, HQPorner uses `q`, and PornHub uses `/video/search?search=...`.
+- AllPornStream, HQPorner, and PornHub expose agent-owned provider-native search. Search text is normalized and bounded, provider URLs are constructed from fixed trusted origins, pagination preserves the active query, and the Next.js proxy preserves the complete query string. AllPornStream uses its current `s` parameter, HQPorner uses `q`, and PornHub uses `/video/search?search=...`.
 - The Feed toolbar keeps source, search, destination, and refresh controls in a deliberate primary grid with a separate result/query metadata row. Search is a horizontal compound control; clearing an active query reloads the ordinary feed; desktop, medium, and mobile layouts use explicit grid areas.
 
 ### PornHub output naming

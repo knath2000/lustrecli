@@ -67,7 +67,7 @@ Creating a job durably acknowledges it as `queued` immediately. The scheduler st
 
 ## API
 
-Feed discovery accepts a typed `FeedQuery` with site, optional text, and page. The agent constructs provider-native search URLs only from fixed trusted origins and parameters: PornHub `/video/search?search=`, HQPorner `?q=` with `p=` pagination, and AllPornStream `?s=` with `page=` pagination. The API never accepts an arbitrary provider URL.
+Feed discovery accepts a typed `FeedQuery` with site, optional text, and page. The agent constructs provider-native search URLs only from fixed trusted origins and parameters: PornHub `/video/search?search=`, HQPorner `?q=` with `p=` pagination, and AllPornStream `?search=` with `page=` pagination. The API never accepts an arbitrary provider URL.
 
 `GET /health` is unauthenticated. All other API endpoints require `Authorization: Bearer <token>`.
 

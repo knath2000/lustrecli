@@ -2,6 +2,7 @@ import Foundation
 
 enum FilenamePolicy {
     static let maximumFilenameUTF8Length = 180
+    private static let maximumExtensionLength = 16
 
     static func uniqueLocalURL(directory: URL, title: String?, mediaURL: URL) -> URL {
         let fileExtension = safeExtension(mediaURL.pathExtension, fallback: "mp4")
@@ -65,6 +66,7 @@ enum FilenamePolicy {
     private static func safeExtension(_ value: String, fallback: String) -> String {
         let allowed = CharacterSet.alphanumerics
         let result = value.unicodeScalars.filter(allowed.contains).map(String.init).joined().lowercased()
-        return result.isEmpty ? fallback : result
+        guard !result.isEmpty, result.count <= maximumExtensionLength else { return fallback }
+        return result
     }
 }

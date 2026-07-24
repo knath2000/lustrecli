@@ -135,6 +135,26 @@ final class PornHubYtDlpTests: XCTestCase {
         XCTAssertLessThanOrEqual(pornHub.path(percentEncoded: false).split(separator: "/").last!.lengthOfBytes(using: .utf8), FilenamePolicy.maximumFilenameUTF8Length)
     }
 
+    func testFilenamePolicyRejectsOversizedExtensionsForOrdinaryAndPornHubNames() {
+        let oversizedExtension = String(repeating: "a", count: 300)
+        let ordinary = FilenamePolicy.uniqueLocalURL(
+            directory: URL(fileURLWithPath: "/tmp"),
+            title: String(repeating: "Long title ", count: 30),
+            mediaURL: URL(string: "https://cdn.example/video.\(oversizedExtension)")!
+        )
+        let pornHub = FilenamePolicy.uniquePornHubURL(
+            directory: URL(fileURLWithPath: "/tmp"),
+            title: String(repeating: "Long title ", count: 30),
+            source: source,
+            fileExtension: oversizedExtension
+        )
+
+        for filename in [ordinary.lastPathComponent, pornHub.lastPathComponent] {
+            XCTAssertTrue(filename.hasSuffix(".mp4"))
+            XCTAssertLessThanOrEqual(filename.lengthOfBytes(using: .utf8), FilenamePolicy.maximumFilenameUTF8Length)
+        }
+    }
+
     func testFakeExecutableNonzeroAndMissingOutputUseStaticErrors() async throws {
         let nonzero = try FakeYtDlpFixture(body: "exit 1")
         let missing = try FakeYtDlpFixture(body: "exit 0")
