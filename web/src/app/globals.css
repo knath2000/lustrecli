@@ -132,3 +132,16 @@ button:focus-visible,a:focus-visible { outline:2px solid var(--cyan); outline-of
 @media (max-width:920px) { .feed-grid { grid-template-columns:repeat(2,minmax(210px,1fr)); }.feed-toolbar { grid-template-columns:1fr 1fr; }.feed-toolbar>p { display:none; } }
 @media (max-width:760px) { .feed-page { padding:18px 14px 30px; }.feed-header { align-items:flex-start; }.feed-header h2 { font-size:24px; }.feed-toolbar { grid-template-columns:1fr; }.feed-grid { grid-template-columns:1fr; }.feed-selection-bar { top:8px; grid-template-columns:1fr auto; }.feed-selection-bar span { display:none; } }
 @media (prefers-reduced-motion:reduce) { *,*::before,*::after { animation-duration:.01ms!important; animation-iteration-count:1!important; scroll-behavior:auto!important; transition-duration:.01ms!important; } }
+ .progress-fill.static { width:0; box-shadow:none; }
+ .transfer-telemetry { display:flex; flex-wrap:wrap; gap:10px; margin:8px 0 -2px; color:#7ee8ec; font:9px var(--font-geist-mono),monospace; }
+ .transfer-telemetry span+span { padding-left:10px; border-left:1px solid var(--line); }
+ .download-progress>span i.indeterminate { width:38%; }
+ .download-progress>span.static i { width:0; }
+ .download-progress small { display:grid; gap:2px; white-space:nowrap; }
+ .download-progress small em { color:#6edce1; font-size:8px; font-style:normal; }
+ .progress-telemetry { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:7px 13px; margin:13px 0 0; }
+ .progress-telemetry div { min-width:0; display:flex; justify-content:space-between; gap:8px; padding-bottom:6px; border-bottom:1px solid rgba(255,255,255,.045); }
+ .progress-telemetry dt { color:#718083; font:8px var(--font-geist-mono),monospace; text-transform:uppercase; }
+ .progress-telemetry dd { min-width:0; overflow:hidden; margin:0; color:#c0cbcc; font:9px var(--font-geist-mono),monospace; text-align:right; text-overflow:ellipsis; white-space:nowrap; }
+ .progress-telemetry small { display:inline-block; margin-left:5px; color:#8c999b; font-size:8px; }
+ @media (prefers-reduced-motion:reduce) { .progress-fill.indeterminate,.download-progress>span i.indeterminate { width:38%!important; transform:translateX(0)!important; animation:none!important; } }

@@ -119,26 +119,27 @@ Current provider behavior can complete credential submission but stall its own U
 
 Cancellation, helper failure, storage failure, logout, and late helper completion are isolated. Only a still-current successful helper may save a session, and cancellation/failure removes partial state. Frontend auth polls and mutations are sequence-ordered so stale polling cannot overwrite a newer action.
 
-## Transfer-progress foundation and boundary
+## Transfer-progress pipeline
 
 `DownloadJob` has backward-compatible optional phase fields and `TransferPhase` supports resolving, downloading, materializing, post-processing, uploading, and verifying. The active-phase compatibility aliases remain `progress`, `downloadedBytes`, and `totalBytes`.
 
-The strict internal yt-dlp progress protocol is `LUSTRE_PROGRESS:v1` with exactly ten tab-separated fields. `YtDlpProgressParser` produces only typed samples and fixed messages; `BoundedLineDecoder` handles CR/LF/CRLF incrementally; `YtDlpProgressEventBuffer` bounds/coalesces typed samples; and an initial mailbox actor and readiness-driven `StreamingProcessRunner` exist as standalone scaffolding.
+The strict internal yt-dlp progress protocol is `LUSTRE_PROGRESS:v1` with exactly ten tab-separated fields. `YtDlpProgressParser` produces only typed samples and fixed messages; `BoundedLineDecoder` handles CR/LF/CRLF incrementally; and `YtDlpProgressEventBuffer` bounds/coalesces typed samples.
 
-These pieces are not yet connected to production yt-dlp execution. The mailbox still lacks cancellation-safe waiter cleanup and full race tests; the runner still lacks bounded mailbox integration plus complete timeout/cancellation/reaping/backpressure coverage. WebDAV staged upload still reports only start/completion rather than `URLSessionTaskDelegate.didSendBodyData`, and the web UI does not render phase speed/ETA/estimated totals. See `CURRENT_STATUS.md`; do not claim live staged yt-dlp/WebDAV percentage from this revision.
+`YtDlpProgressEventChannel` is the canonical bounded asynchronous layer: one waiter at a time, UUID waiter identity, direct handoff, buffer-backed delivery, cancellation-safe waiter removal, graceful finish, and abortive channel cancellation. `StreamingProcessRunner` owns fixed-size independent pipe readers, incremental stderr decoding, one bounded channel per process, and one serial callback consumer. It finishes the channel only after stderr EOF/final decode and joins work before normal completion.
+
+`PornHubYtDlp` uses `StreamingProcessRunner` and emits the strict progress template to stderr. The agent persists phase-aware materialization samples through its existing callback path. WebDAV file and direct streamed uploads report URLSession `didSendBodyData` telemetry through a bounded coalescing reporter; final upload completion is published only after successful HTTP validation. The web client consumes only durable job telemetry and never fabricates cross-phase percentages, totals, speed, or ETA.
 
 ## Deliberate next seams
 
-1. Finish cancellation-safe mailbox delivery and standalone runner lifecycle/backpressure proof, then integrate machine-readable yt-dlp progress.
-2. Add live WebDAV upload callbacks and phase-aware web rendering without fabricating unknown totals.
-3. Add hosted account authentication, device enrollment, revocation, and an outbound agent realtime channel without exposing the loopback API.
+1. Resolve the intermittent aggregate runner-fixture hang, then renew full-suite/release acceptance counts.
+2. Add hosted account authentication, device enrollment, revocation, and an outbound agent realtime channel without exposing the loopback API.
 4. Add device enrollment/selection and server-backed pagination as job histories grow.
 5. Make the current single-transfer scheduler limit configurable and add per-destination limits.
 6. Add resumable `.part` transfers and bounded automatic re-resolution for expired media responses.
 
 ## Validation
 
-`swift test` verifies SQLite persistence, Force Start isolation, serialized scheduling, multi-provider feeds, provider pairing and diagnostics, HLS handling, mydaddy parsing, yt-dlp format/process safety, authenticated cookie sanitization/routing, helper lifecycle, private cookie-file cleanup, WebDAV staging, cancellation, transfer-time re-resolution, feed asset proxy boundaries, auth sequencing, and the isolated progress parser/decoder/buffer/mailbox/runner foundations. `web/` tests plus lint and production build validate the proxy, feed identities/previews, auth sequencing, Force Start, live operational views, TypeScript, and the production bundle. Exact accepted counts are recorded in `CURRENT_STATUS.md` and `SESSION_LOG.md` after each release verification.
+`swift test` verifies SQLite persistence, Force Start isolation, serialized scheduling, multi-provider feeds, provider pairing and diagnostics, HLS handling, mydaddy parsing, yt-dlp format/process safety, authenticated cookie sanitization/routing, helper lifecycle, private cookie-file cleanup, WebDAV staging, cancellation, transfer-time re-resolution, feed asset proxy boundaries, auth sequencing, and the progress parser/decoder/buffer/channel/runner pipeline. `web/` tests plus lint and production build validate the proxy, feed identities/previews, auth sequencing, Force Start, live operational views, TypeScript, and the production bundle. Exact accepted counts are recorded in `CURRENT_STATUS.md` and `SESSION_LOG.md` after each release verification.
 ## PornHub authentication and authenticated feeds
 
 `LustreCore` contains only the public `PornHubAuthStatus` model and feed contract. `LustreAgent` owns the private cookie store, helper process launch, redirect-safe request handling, and yt-dlp cookie-file lifecycle. `lustre-auth-helper` is a dedicated AppKit/WebKit executable with its own visible NSApplication event loop. It restricts the main frame to HTTPS PornHub, allows HTTPS subframes only under a trusted PornHub top level, rejects popups/downloads, and emits one fixed status token. It persists Codable cookie records directly to the fixed `com.pmvdl.lustre-agent` Keychain service/account only after bounded canonical-page semantic validation.

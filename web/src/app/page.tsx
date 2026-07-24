@@ -1,10 +1,11 @@
 "use client";
 
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { agentDateMilliseconds, type AgentDate } from "@/lib/agent-date";
-import { jobProgressPercent } from "@/lib/download-filters";
+import { agentDateMilliseconds } from "@/lib/agent-date";
+import { downloadProgressDisplay, formatBytes, formatETA, formatSpeed } from "@/lib/download-progress";
+import type { DownloadJob } from "@/lib/download-job";
 import { AuthStatusSequence } from "@/lib/auth-status-sequence";
-import { availableJobActions, jobActionLabel, type JobAction, type JobStatus } from "@/lib/job-actions";
+import { availableJobActions, jobActionLabel, type JobAction } from "@/lib/job-actions";
 import type { FeedItem, FeedPage, FeedSite } from "@/lib/feed-model";
 import { pornHubAuthMutationMessage } from "@/lib/pornhub-auth-model";
 import type { PollingInterval } from "@/lib/settings-model";
@@ -14,8 +15,6 @@ import { DownloadsView } from "./downloads-view";
 import { FeedView } from "./feed-view";
 import { SettingsView } from "./settings-view";
 
-type JobLog = { timestamp: AgentDate; level: "info" | "error"; message: string };
-type DownloadJob = { id: string; sourcePageURL: string; preferredQualityLabel?: string; destination: string; status: JobStatus; message: string; progress?: number; downloadedBytes?: number; totalBytes?: number; logs?: JobLog[]; updatedAt: AgentDate };
 type Destination = DestinationProfile;
 type PornHubAuthStatus = { state: "signedOut" | "signingIn" | "signedIn" | "expired"; lastValidatedAt?: string; message?: string };
 
@@ -49,7 +48,6 @@ function Glyph({ name, size = 18 }: { name: string; size?: number }) {
 function titleFor(job: DownloadJob) {
   try { return decodeURIComponent(new URL(job.sourcePageURL).pathname.split("/").filter(Boolean).at(-1) || new URL(job.sourcePageURL).hostname); } catch { return job.sourcePageURL; }
 }
-function formatBytes(bytes?: number) { if (bytes === undefined) return "—"; const units = ["B", "KiB", "MiB", "GiB", "TiB"]; let value = bytes; let unit = 0; while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit += 1; } return `${value.toFixed(unit ? 1 : 0)} ${units[unit]}`; }
 function destinationName(job: DownloadJob, destinations: Destination[]) { if (job.destination === "local") return "Local Downloads"; const id = job.destination.replace(/^webdav:/i, ""); return destinations.find((destination) => destination.id.toLowerCase() === id.toLowerCase())?.name ?? "Remote WebDAV"; }
 async function agentRequest<T>(token: string, path: string, options: RequestInit = {}): Promise<T> {
   const response = await fetch(`/api/agent${path}`, { ...options, headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", ...(options.headers ?? {}) }, cache: "no-store" });
@@ -74,9 +72,12 @@ function QueueSheet({ destinations, token, onClose, onQueued }: { destinations: 
 }
 
 function TransferCard({ job, destinations, onAction }: { job: DownloadJob; destinations: Destination[]; onAction: (action: JobAction) => Promise<void> }) {
-  const [open, setOpen] = useState(false); const [workingAction, setWorkingAction] = useState<JobAction | null>(null); const actions = availableJobActions(job.status); const progress = jobProgressPercent(job.progress);
+  const [open, setOpen] = useState(false); const [workingAction, setWorkingAction] = useState<JobAction | null>(null); const actions = availableJobActions(job.status); const progress = downloadProgressDisplay(job);
   const act = async (action: JobAction) => { setWorkingAction(action); try { await onAction(action); setOpen(false); } finally { setWorkingAction(null); } };
-  return <article className={`transfer-card status-${job.status}`}><div className="transfer-heading"><span className="file-icon"><Glyph name={job.sourcePageURL.match(/\.(zip|tar|gz|rar|7z)(?:$|\?)/i) ? "archive" : "media"} /></span><div className="file-identity"><h3>{titleFor(job)}</h3><p>{job.preferredQualityLabel || "Automatic quality"}</p></div><span className="phase-label">{job.status.replace(/([A-Z])/g, " $1")}</span></div><p className="job-message">{job.message}</p><div className="transfer-status"><span>{formatBytes(job.downloadedBytes)}</span><strong>{progress === undefined ? "Working" : `${progress}%`}</strong><span>{job.totalBytes ? formatBytes(job.totalBytes) : "Total unavailable"}</span></div><div className="progress-track" role="progressbar" aria-label={`${titleFor(job)} progress`} aria-valuetext={progress === undefined ? "Indeterminate" : `${progress}%`} {...(progress === undefined ? {} : { "aria-valuenow": progress, "aria-valuemin": 0, "aria-valuemax": 100 })}><span className={`progress-fill ${progress === undefined ? "indeterminate" : ""}`} style={progress === undefined ? undefined : { width: `${progress}%` }} /></div><div className="transfer-footer"><dl><div><dt>Destination</dt><dd>{destinationName(job, destinations)}</dd></div><div><dt>Updated</dt><dd>{new Date(agentDateMilliseconds(job.updatedAt)).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</dd></div></dl>{actions.length > 0 && <div className="control-menu"><button className="control-button" onClick={() => setOpen((value) => !value)} aria-expanded={open}><Glyph name="control" size={15} /> Control</button>{open && <div className="control-popover">{actions.map((action) => <button disabled={workingAction === action} className={action === "cancel" ? "danger-action" : ""} key={action} onClick={() => void act(action)}>{workingAction === action ? `${jobActionLabel(action)}…` : jobActionLabel(action)}</button>)}</div>}</div>}</div></article>;
+  const totalLabel = progress.totalBytes === undefined ? "Total unavailable" : `${progress.totalIsEstimated ? "Estimated " : ""}${formatBytes(progress.totalBytes)}`;
+  const speed = formatSpeed(progress.speed); const eta = formatETA(progress.etaSeconds);
+  const active = progress.state === "indeterminate";
+  return <article className={`transfer-card status-${job.status}`}><div className="transfer-heading"><span className="file-icon"><Glyph name={job.sourcePageURL.match(/\.(zip|tar|gz|rar|7z)(?:$|\?)/i) ? "archive" : "media"} /></span><div className="file-identity"><h3>{titleFor(job)}</h3><p>{job.preferredQualityLabel || "Automatic quality"}</p></div><span className="phase-label">{progress.phaseLabel}</span></div><p className="job-message">{job.message}</p><div className="transfer-status"><span>{formatBytes(progress.bytesWritten)}</span><strong>{progress.progressLabel}</strong><span>{totalLabel}</span></div><div className="progress-track" {...(progress.state === "static" ? {} : { role: "progressbar", "aria-label": `${titleFor(job)} progress`, "aria-valuetext": progress.accessibleText, ...(progress.percent === undefined ? {} : { "aria-valuenow": progress.percent, "aria-valuemin": 0, "aria-valuemax": 100 }) })}><span className={`progress-fill ${active ? "indeterminate" : ""} ${progress.state === "static" ? "static" : ""}`} style={progress.percent === undefined ? undefined : { width: `${progress.percent}%` }} /></div>{(speed || eta) && <div className="transfer-telemetry">{speed && <span>{speed}</span>}{eta && <span>{eta}</span>}</div>}<div className="transfer-footer"><dl><div><dt>Destination</dt><dd>{destinationName(job, destinations)}</dd></div><div><dt>Updated</dt><dd>{new Date(agentDateMilliseconds(job.updatedAt)).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</dd></div></dl>{actions.length > 0 && <div className="control-menu"><button className="control-button" onClick={() => setOpen((value) => !value)} aria-expanded={open}><Glyph name="control" size={15} /> Control</button>{open && <div className="control-popover">{actions.map((action) => <button disabled={workingAction === action} className={action === "cancel" ? "danger-action" : ""} key={action} onClick={() => void act(action)}>{workingAction === action ? `${jobActionLabel(action)}…` : jobActionLabel(action)}</button>)}</div>}</div>}</div></article>;
 }
 
 export default function Home() {

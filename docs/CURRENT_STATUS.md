@@ -41,43 +41,30 @@ This document records the accepted behavior in the current `main` working tree, 
 - Auth poll/action responses are sequenced so stale polling cannot overwrite a newer sign-in, cancellation, or sign-out result.
 - Browser-held bearer tokens remain in the current React session only.
 
-## Transfer-progress work: deliberately incomplete
+## Transfer-progress implementation
 
-The existing transfer API still shows only legacy progress for paths that emit `DownloadProgress`. For staged PornHub yt-dlp materialization and completion-only WebDAV upload, full live telemetry is **not integrated yet**.
+`DownloadJob` persists optional active-phase telemetry while retaining the compatibility aliases `progress`, `downloadedBytes`, and `totalBytes`. The durable fields are `transferPhase`, `phaseProgress`, `phaseBytes`, `phaseTotalBytes`, `phaseTotalIsEstimated`, `phaseBytesPerSecond`, and `phaseETASeconds`.
 
-Implemented foundations:
+- `YtDlpProgressEventChannel` is the sole bounded async typed-event primitive. It has open, finished, and cancelled terminal states; one identity-protected suspended consumer; direct handoff; buffer-backed FIFO/coalescing; graceful drain; abortive cancellation; and static errors only. The former duplicate mailbox source and tests are removed.
+- `StreamingProcessRunner` uses fixed 16 KiB independent Darwin read loops rather than raw `AsyncStream<Data>` buffering. Stderr is incrementally decoded and parsed into the bounded channel; one separate consumer invokes callbacks serially. Success waits for child exit, both EOFs, final decoder processing, channel drain, and callback completion. Timeout, caller cancellation, decoder/channel failure, and launch failure use static errors and lifecycle cleanup/reaping.
+- `PornHubYtDlp` now delegates process execution to that runner. Its materialization command adds `--newline`, `--progress`, and one strict stderr `--progress-template` for `LUSTRE_PROGRESS:v1`'s ten tab-separated fields. The component is the fixed safe `media` class. Parsed samples flow through the existing `DownloadProgress` callback; valid protocol records are excluded from diagnostics.
+- Cookie-file handling remains private: each authenticated invocation receives an exclusive mode-0600 Netscape file, and its path/value never enter API output, durable jobs, logs, or diagnostics. Fake local executables cover command construction and lifecycle behavior; no real yt-dlp transfer was run.
+- `AgentService` initializes local and staged yt-dlp work as `.materializing`, persists phase-aware samples without suppressing phase/total/counter-reset transitions, rejects stale materializing/post-processing callbacks after `.uploading`, and clears stale speed/ETA on phase completion or upload entry. Repeated comparable samples retain the bounded 512 KiB/0.5 second durability cadence.
+- WebDAV file and direct-stream PUT paths emit `.uploading` telemetry from `URLSessionTaskDelegate.didSendBodyData`. A lock-protected coalescing reporter retains at most one latest sample and has at most one delivery task; it flushes a final exact sample only after an accepted 2xx response and stops/joins on cancellation or failure. Direct streamed PUTs use URLSession telemetry rather than competing source-read counters. TLS, redirect, authentication, and response-validation policy are unchanged.
+- The Lustre Cloud frontend has one shared job contract and one phase-aware display model. Dashboard cards, the Downloads ledger, and the inspector show phase labels, determinate or indeterminate progress, exact/estimated/unknown totals, bytes, supplied speed, and supplied ETA without aggregate phase weighting or invented values. Static/terminal jobs do not animate; reduced-motion users receive a stable indeterminate segment.
 
-- Backward-compatible `TransferPhase` and optional per-phase durable fields.
-- Phase-aware validated `DownloadProgress` fields for bytes, total, estimated-total flag, speed, and ETA.
-- Staged jobs persist materializing and uploading transitions; upload starts with zero bytes and the exact local file size.
-- `LUSTRE_PROGRESS:v1` is a strict versioned tab protocol with exactly ten fields: status, downloaded bytes, exact total, estimated total, speed, ETA, fragment index/count, and a bounded component class.
-- `YtDlpProgressParser` accepts only enumerated status/component grammar, fixed safe messages, bounded finite numbers, coherent fragments, strict UTF-8/control characters, and exact version/field count.
-- `BoundedLineDecoder` handles LF, CR, and CRLF incrementally with bounded partial-line storage and deterministic failure after overflow.
-- `YtDlpProgressEventBuffer` is a pure bounded typed-event coalescer preserving the first sample, latest same-category sample, FIFO transitions, and final state; pathological transition overflow fails statically rather than growing without bound.
-- `YtDlpProgressEventMailbox` currently provides initial actor-based open/closed/failed/cancelled behavior and one suspended waiter.
-- `StreamingProcessRunner` is a standalone readiness-driven experiment. Independent stdout/stderr `FileHandle.readabilityHandler`s are installed before launch, a causal fixture proves a progress callback can occur before child exit, recognized progress is excluded from bounded diagnostics, and retention caps do not intentionally stop pipe drainage.
-
-Not yet accepted or integrated:
-
-- The mailbox still needs cancellation-safe waiter removal and deterministic multi-consumer/race coverage.
-- The standalone runner still needs bounded typed-event mailbox integration, cancellation/timeout/reaping tests, slow-callback backpressure proof, partial/CR/EOF tests, and exact cap coverage.
-- `PornHubYtDlp.run()` still uses the existing EOF-oriented implementation and does not use `StreamingProcessRunner` or `--progress-template`.
-- Live `URLSessionTaskDelegate.didSendBodyData` WebDAV upload progress is not implemented.
-- Lustre Cloud does not yet render phase-specific estimated totals, speed, or ETA.
-- PornHub materialized output still uses the generic `Lustre-PornHub.mp4` name; resolved-title filename sanitization remains future work.
-
-Do not describe this revision as providing live staged yt-dlp/WebDAV percentage. The current scaffolding is intentionally isolated until its lifecycle guarantees and integration tests are complete.
+Known follow-up risk: focused runner and fake-yt-dlp suites passed, but an aggregate `swift test`/strict-concurrency run intermittently hung in an existing `StreamingProcessRunner.waitForExit()` fixture when run after the wider suite. No runner redesign was made during the WebDAV pass; resolve that lifecycle-test flake before treating a new all-suite count as an acceptance snapshot.
 
 ## Verification commands
 
-Accepted verification snapshot for this revision:
+Latest recorded verification:
 
-- `swift test`: 132 tests passed, 0 failed.
+- Focused `StreamingProcessRunnerTests`: 8 passed.
+- Focused `PornHubYtDlpTests`: 12 passed.
 - `swift build -c release`: passed.
-- `web/npm test`: 34 tests passed, 0 failed.
-- `web/npm run lint`: passed.
-- `web/npm run build`: passed.
+- Frontend: 33 tests passed; ESLint passed; Next.js production build and TypeScript passed.
 - `git diff --check`: passed.
+- A full strict-concurrency Swift run advanced through the broader suite but reproduced the documented aggregate runner-fixture hang and was terminated after its 10-minute bound; the orphaned XCTest process was explicitly cleaned up before focused verification.
 
 Run before release:
 
@@ -98,4 +85,4 @@ Real-account/manual checks that cannot be replaced by fixtures:
 2. Regular PornHub feed changes between authenticated homepage and anonymous homepage after sign-in/sign-out.
 3. Subscriptions, Liked, and Favorites remain authenticated-only.
 4. A PornHub yt-dlp transfer resolves and completes without exposing cookies.
-5. After progress integration is finished, a staged PornHub → WebDAV job must show live materialization and upload phases before completion.
+5. A staged PornHub → WebDAV job must be manually confirmed to show live materialization and upload phases before completion.

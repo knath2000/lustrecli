@@ -59,7 +59,7 @@ TLS validation is strict by default. If a private/self-signed certificate or an 
 
 ## Transfer progress status
 
-Direct Foundation transfers report live bytes and percentage when the provider supplies a usable length. Phase-aware durable fields, a strict `LUSTRE_PROGRESS:v1` parser, bounded CR/LF line decoding, a typed event coalescer/mailbox, and a standalone readiness-driven process-runner experiment now exist for yt-dlp work. They are intentionally **not integrated** into `PornHubYtDlp.run()` yet: cancellation-safe mailbox delivery, runner lifecycle/backpressure coverage, WebDAV `didSendBodyData`, and phase-aware frontend rendering remain incomplete. Staged PornHub/WebDAV jobs must not be described as having live percentage until those seams are finished. See [CURRENT_STATUS.md](docs/CURRENT_STATUS.md).
+Transfers persist active-phase telemetry while retaining the compatibility fields `progress`, `downloadedBytes`, and `totalBytes`. PornHub yt-dlp materialization uses a bounded streaming process runner and strict `LUSTRE_PROGRESS:v1` records; WebDAV file and direct-stream PUTs report actual URLSession upload bytes. The Devices workspace, Downloads ledger, and Transfer Inspector render the current phase, determinate or indeterminate progress, exact or estimated totals, bytes, and supplied speed/ETA without inventing cross-phase percentages. See [CURRENT_STATUS.md](docs/CURRENT_STATUS.md) for the accepted boundary and deferred hardening.
 
 ## API
 

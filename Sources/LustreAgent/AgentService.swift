@@ -18,6 +18,15 @@ public actor AgentService {
         let task: Task<Void, Never>
     }
 
+    private struct LastProgressUpdate {
+        let phase: TransferPhase?
+        let bytesWritten: Int64
+        let totalBytes: Int64?
+        let totalIsEstimated: Bool
+        let fraction: Double?
+        let timestamp: Date
+    }
+
     private let jobs: JobStore
     private let resolver: StaticProviderResolver
     private let downloadsDirectory: URL
@@ -37,7 +46,7 @@ public actor AgentService {
     private let pornHubAuth: PornHubAuthService
     private let maximumConcurrentDownloads: Int
     private var activeDownloadTasks: [UUID: ActiveDownload] = [:]
-    private var lastProgressUpdates: [UUID: (bytesWritten: Int64, timestamp: Date)] = [:]
+    private var lastProgressUpdates: [UUID: LastProgressUpdate] = [:]
 
     public init(
         databaseURL: URL = AgentPaths.database,
@@ -360,6 +369,12 @@ public actor AgentService {
                 active.phaseProgress = nil
                 active.phaseBytes = 0
                 active.phaseTotalBytes = nil
+                active.phaseTotalIsEstimated = false
+                active.phaseBytesPerSecond = nil
+                active.phaseETASeconds = nil
+                active.progress = nil
+                active.downloadedBytes = 0
+                active.totalBytes = nil
                 try await jobs.update(active)
                 let staging = FileManager.default.temporaryDirectory.appending(path: "lustre-materialized-\(UUID().uuidString)", directoryHint: .isDirectory)
                 defer { try? FileManager.default.removeItem(at: staging) }
@@ -373,6 +388,8 @@ public actor AgentService {
                 uploading.phaseBytes = 0
                 uploading.phaseTotalBytes = size
                 uploading.phaseTotalIsEstimated = false
+                uploading.phaseBytesPerSecond = nil
+                uploading.phaseETASeconds = nil
                 uploading.progress = 0
                 uploading.downloadedBytes = 0
                 uploading.totalBytes = size
@@ -383,6 +400,19 @@ public actor AgentService {
             } else if quality.mediaKind == .hls {
                 output = try await hlsMaterializer(resolution, quality, try downloadDirectory(for: current.destination), reportProgress)
             } else if quality.mediaKind == .ytDlp {
+                active.transferPhase = .materializing
+                active.phaseProgress = nil
+                active.phaseBytes = 0
+                active.phaseTotalBytes = nil
+                active.phaseTotalIsEstimated = false
+                active.phaseBytesPerSecond = nil
+                active.phaseETASeconds = nil
+                active.progress = nil
+                active.downloadedBytes = 0
+                active.totalBytes = nil
+                record(&active, level: .info, message: "Materializing media.")
+                active.updatedAt = .now
+                try await jobs.update(active)
                 output = try await ytDlpMaterializer(resolution, quality, try downloadDirectory(for: current.destination), reportProgress)
             } else if let profileID = RemoteDestination.webDAVProfileID(from: current.destination) {
                 guard let profile = await destinationProfiles.profile(id: profileID) else { throw RemoteDestinationError.notFound }
@@ -402,6 +432,8 @@ public actor AgentService {
                   completed.status == .running else { return }
             completed.status = .completed
             completed.progress = 1
+            completed.phaseBytesPerSecond = nil
+            completed.phaseETASeconds = nil
             record(&completed, level: .info, message: "Completed: \(output.lastPathComponent)")
             completed.updatedAt = .now
             try await jobs.update(completed)
@@ -469,24 +501,44 @@ public actor AgentService {
         guard ownsDownload(id, taskID: taskID),
               var job = try? await jobs.job(id: id),
               job.status == .running else { return }
+        if job.transferPhase == .uploading,
+           progress.phase == .materializing || progress.phase == .postProcessing { return }
         let now = Date()
-        if let last = lastProgressUpdates[id],
+        let phase = progress.phase
+        let fraction = progress.fraction
+        let meaningful = lastProgressUpdates[id].map { last in
+            last.phase != phase ||
+            progress.bytesWritten < last.bytesWritten ||
+            last.totalBytes == nil && progress.totalBytes != nil ||
+            last.totalIsEstimated && !progress.totalIsEstimated ||
+            last.totalBytes != progress.totalBytes ||
+            last.fraction != 1 && fraction == 1 ||
+            job.transferPhase != phase
+        } ?? true
+        if !meaningful,
+           let last = lastProgressUpdates[id],
+           progress.bytesWritten >= last.bytesWritten,
            progress.bytesWritten - last.bytesWritten < 512 * 1_024,
            now.timeIntervalSince(last.timestamp) < 0.5,
-           progress.fraction != 1 {
+           fraction != 1 {
             return
         }
-        lastProgressUpdates[id] = (progress.bytesWritten, now)
-        job.progress = progress.fraction
+        lastProgressUpdates[id] = LastProgressUpdate(phase: phase, bytesWritten: progress.bytesWritten, totalBytes: progress.totalBytes, totalIsEstimated: progress.totalIsEstimated, fraction: fraction, timestamp: now)
+        job.progress = fraction
         job.downloadedBytes = progress.bytesWritten
         job.totalBytes = progress.totalBytes
         job.transferPhase = progress.phase ?? job.transferPhase
-        job.phaseProgress = progress.fraction
+        job.phaseProgress = fraction
         job.phaseBytes = progress.bytesWritten
         job.phaseTotalBytes = progress.totalBytes
         job.phaseTotalIsEstimated = progress.totalIsEstimated
         job.phaseBytesPerSecond = progress.bytesPerSecond
         job.phaseETASeconds = progress.etaSeconds
+        if phase == .materializing && job.transferPhase != .materializing {
+            record(&job, level: .info, message: "Materializing media.")
+        } else if phase == .postProcessing && job.transferPhase != .postProcessing {
+            record(&job, level: .info, message: "Merging video and audio.")
+        }
         job.updatedAt = now
         try? await jobs.update(job)
     }
@@ -645,11 +697,18 @@ public actor AgentService {
         request.setValue(String(expectedTotal), forHTTPHeaderField: "Content-Length")
         applyBasicAuthentication(username: profile.username, password: password, request: &request)
 
+        await onProgress(DownloadProgress(bytesWritten: 0, totalBytes: expectedTotal, phase: .uploading))
+        let progressReporter = WebDAVUploadProgressReporter(expectedTotal: expectedTotal, onProgress: onProgress)
+
         guard let streams = BoundStreams.boundPair(bufferSize: 1_024 * 1_024) else {
             throw RemoteTransferError.streamUnavailable
         }
         request.httpBodyStream = streams.input
-        let delegate = WebDAVUploadDelegate(allowedHost: profile.baseURL.host, allowInvalidCertificate: profile.allowInvalidCertificate)
+        let delegate = WebDAVUploadDelegate(
+            allowedHost: profile.baseURL.host,
+            allowInvalidCertificate: profile.allowInvalidCertificate,
+            progressReporter: progressReporter
+        )
         let uploadSession = URLSession(configuration: .ephemeral, delegate: delegate, delegateQueue: nil)
         defer { uploadSession.invalidateAndCancel() }
         streams.output.open()
@@ -667,21 +726,21 @@ public actor AgentService {
                     try streams.output.writeAll(buffer)
                     totalWritten += Int64(buffer.count)
                     buffer.removeAll(keepingCapacity: true)
-                    await onProgress(DownloadProgress(bytesWritten: totalWritten, totalBytes: expectedTotal))
                 }
             }
             if !buffer.isEmpty {
                 try streams.output.writeAll(buffer)
                 totalWritten += Int64(buffer.count)
-                await onProgress(DownloadProgress(bytesWritten: totalWritten, totalBytes: expectedTotal))
             }
             guard totalWritten >= 1_024 else { throw DownloadError.responseTooSmall }
             streams.output.close()
             try await delegate.waitForCompletion()
+            await progressReporter.finishSuccessfully(finalTotal: expectedTotal)
             return destination
         } catch {
             streams.output.close()
             task.cancel()
+            await progressReporter.cancelAndWait()
             throw error
         }
     }
@@ -708,12 +767,25 @@ public actor AgentService {
         request.timeoutInterval = 7_200
         request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
         applyBasicAuthentication(username: profile.username, password: password, request: &request)
-        let transport = WebDAVTLSDelegate(host: profile.baseURL.host, allowInvalidCertificate: profile.allowInvalidCertificate)
-        let (_, response) = try await transport.upload(for: request, fromFile: stagedFile)
-        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
-            throw RemoteTransferError.uploadFailed((response as? HTTPURLResponse)?.statusCode ?? 0)
+        let size = (try stagedFile.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init)
+        await onProgress(DownloadProgress(bytesWritten: 0, totalBytes: size, phase: .uploading))
+        let progressReporter = WebDAVUploadProgressReporter(expectedTotal: size, onProgress: onProgress)
+        let transport = WebDAVTLSDelegate(
+            host: profile.baseURL.host,
+            allowInvalidCertificate: profile.allowInvalidCertificate,
+            progressReporter: progressReporter
+        )
+        do {
+            let (_, response) = try await transport.upload(for: request, fromFile: stagedFile)
+            guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+                throw RemoteTransferError.uploadFailed((response as? HTTPURLResponse)?.statusCode ?? 0)
+            }
+            await progressReporter.finishSuccessfully(finalTotal: size)
+            return destination
+        } catch {
+            await progressReporter.cancelAndWait()
+            throw error
         }
-        return destination
     }
 
     private static func uploadMaterializedFileToWebDAV(
@@ -729,7 +801,7 @@ public actor AgentService {
             throw DownloadError.invalidResponse
         }
         let size = (try file.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init)
-        if let size { await onProgress(DownloadProgress(bytesWritten: 0, totalBytes: size, phase: .uploading)) }
+        await onProgress(DownloadProgress(bytesWritten: 0, totalBytes: size, phase: .uploading))
         let destination = webDAVFileURL(profile: profile, filename: file.lastPathComponent)
         try await ensureWebDAVDirectories(profile: profile, password: password)
         var request = URLRequest(url: destination)
@@ -737,13 +809,23 @@ public actor AgentService {
         request.timeoutInterval = 7_200
         request.setValue("video/mp4", forHTTPHeaderField: "Content-Type")
         applyBasicAuthentication(username: profile.username, password: password, request: &request)
-        let transport = WebDAVTLSDelegate(host: profile.baseURL.host, allowInvalidCertificate: profile.allowInvalidCertificate)
-        let (_, response) = try await transport.upload(for: request, fromFile: file)
-        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
-            throw RemoteTransferError.uploadFailed((response as? HTTPURLResponse)?.statusCode ?? 0)
+        let progressReporter = WebDAVUploadProgressReporter(expectedTotal: size, onProgress: onProgress)
+        let transport = WebDAVTLSDelegate(
+            host: profile.baseURL.host,
+            allowInvalidCertificate: profile.allowInvalidCertificate,
+            progressReporter: progressReporter
+        )
+        do {
+            let (_, response) = try await transport.upload(for: request, fromFile: file)
+            guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+                throw RemoteTransferError.uploadFailed((response as? HTTPURLResponse)?.statusCode ?? 0)
+            }
+            await progressReporter.finishSuccessfully(finalTotal: size)
+            return destination
+        } catch {
+            await progressReporter.cancelAndWait()
+            throw error
         }
-        if let size { await onProgress(DownloadProgress(bytesWritten: size, totalBytes: size, phase: .uploading)) }
-        return destination
     }
 
     private static func testWebDAVDestination(
@@ -902,13 +984,96 @@ private enum WebDAVTLSTrust {
     }
 }
 
+private final class WebDAVUploadProgressReporter: @unchecked Sendable {
+    private let expectedTotal: Int64?
+    private let onProgress: @Sendable (DownloadProgress) async -> Void
+    private let lock = NSLock()
+    private var latestPending: DownloadProgress?
+    private var deliveryTask: Task<Void, Never>?
+    private var stopped = false
+
+    init(
+        expectedTotal: Int64?,
+        onProgress: @escaping @Sendable (DownloadProgress) async -> Void
+    ) {
+        self.expectedTotal = expectedTotal.map { max(0, $0) }
+        self.onProgress = onProgress
+    }
+
+    func didSend(totalBytesSent: Int64, totalBytesExpectedToSend: Int64) {
+        let reportedTotal = totalBytesExpectedToSend >= 0 ? totalBytesExpectedToSend : expectedTotal
+        let total = reportedTotal.map { max(0, $0) }
+        let sent = total.map { min(max(0, totalBytesSent), $0) } ?? max(0, totalBytesSent)
+        let progress = DownloadProgress(bytesWritten: sent, totalBytes: total, phase: .uploading)
+
+        lock.withLock {
+            guard !stopped else { return }
+            latestPending = progress
+            if deliveryTask == nil {
+                deliveryTask = Task { [weak self] in
+                    await self?.deliverPending()
+                }
+            }
+        }
+    }
+
+    func finishSuccessfully(finalTotal: Int64?) async {
+        if let finalTotal {
+            didSend(totalBytesSent: finalTotal, totalBytesExpectedToSend: finalTotal)
+        }
+        await waitForDelivery()
+        lock.withLock {
+            stopped = true
+            latestPending = nil
+        }
+    }
+
+    func cancelAndWait() async {
+        let task = lock.withLock {
+            stopped = true
+            latestPending = nil
+            return deliveryTask
+        }
+        task?.cancel()
+        await task?.value
+    }
+
+    private func deliverPending() async {
+        while !Task.isCancelled {
+            let progress = lock.withLock { () -> DownloadProgress? in
+                guard !stopped, let progress = latestPending else {
+                    deliveryTask = nil
+                    return nil
+                }
+                latestPending = nil
+                return progress
+            }
+            guard let progress else { return }
+            await onProgress(progress)
+        }
+        lock.withLock {
+            deliveryTask = nil
+        }
+    }
+
+    private func waitForDelivery() async {
+        while true {
+            let task = lock.withLock { deliveryTask }
+            guard let task else { return }
+            await task.value
+        }
+    }
+}
+
 private final class WebDAVTLSDelegate: NSObject, URLSessionDelegate, URLSessionTaskDelegate, @unchecked Sendable {
     private let allowedHost: String?
     private let allowInvalidCertificate: Bool
+    private let progressReporter: WebDAVUploadProgressReporter?
 
-    init(host: String?, allowInvalidCertificate: Bool) {
+    init(host: String?, allowInvalidCertificate: Bool, progressReporter: WebDAVUploadProgressReporter? = nil) {
         self.allowedHost = host?.lowercased()
         self.allowInvalidCertificate = allowInvalidCertificate
+        self.progressReporter = progressReporter
     }
 
     func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge, completionHandler: @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
@@ -917,6 +1082,10 @@ private final class WebDAVTLSDelegate: NSObject, URLSessionDelegate, URLSessionT
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge, completionHandler: @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
         WebDAVTLSTrust.handle(challenge, allowedHost: allowedHost, allowInvalidCertificate: allowInvalidCertificate, completionHandler: completionHandler)
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didSendBodyData bytesSent: Int64, totalBytesSent: Int64, totalBytesExpectedToSend: Int64) {
+        progressReporter?.didSend(totalBytesSent: totalBytesSent, totalBytesExpectedToSend: totalBytesExpectedToSend)
     }
 
     func data(for request: URLRequest) async throws -> (Data, URLResponse) {
@@ -954,31 +1123,62 @@ private final class WebDAVTLSDelegate: NSObject, URLSessionDelegate, URLSessionT
     func upload(for request: URLRequest, fromFile fileURL: URL) async throws -> (Data, URLResponse) {
         let session = URLSession(configuration: .ephemeral, delegate: self, delegateQueue: nil)
         defer { session.finishTasksAndInvalidate() }
-        return try await withCheckedThrowingContinuation { continuation in
-            session.uploadTask(with: request, fromFile: fileURL) { data, response, error in
-                if let error {
-                    continuation.resume(throwing: error)
-                } else if let data, let response {
-                    continuation.resume(returning: (data, response))
-                } else {
-                    continuation.resume(throwing: URLError(.badServerResponse))
+        let taskBox = WebDAVUploadTaskBox()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                let task = session.uploadTask(with: request, fromFile: fileURL) { data, response, error in
+                    if let error {
+                        continuation.resume(throwing: error)
+                    } else if let data, let response {
+                        continuation.resume(returning: (data, response))
+                    } else {
+                        continuation.resume(throwing: URLError(.badServerResponse))
+                    }
                 }
-            }.resume()
+                taskBox.store(task)
+                task.resume()
+            }
+        } onCancel: {
+            taskBox.cancel()
         }
+    }
+}
+
+private final class WebDAVUploadTaskBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var task: URLSessionUploadTask?
+    private var cancelled = false
+
+    func store(_ task: URLSessionUploadTask) {
+        let shouldCancel = lock.withLock {
+            self.task = task
+            return cancelled
+        }
+        if shouldCancel { task.cancel() }
+    }
+
+    func cancel() {
+        let task = lock.withLock {
+            cancelled = true
+            return self.task
+        }
+        task?.cancel()
     }
 }
 
 private final class WebDAVUploadDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     private let allowedHost: String?
     private let allowInvalidCertificate: Bool
+    private let progressReporter: WebDAVUploadProgressReporter
     private let lock = NSLock()
     private var result: Result<Void, Error>?
     private var continuation: CheckedContinuation<Void, Error>?
     private var responseStatus: Int?
 
-    init(allowedHost: String?, allowInvalidCertificate: Bool) {
+    init(allowedHost: String?, allowInvalidCertificate: Bool, progressReporter: WebDAVUploadProgressReporter) {
         self.allowedHost = allowedHost?.lowercased()
         self.allowInvalidCertificate = allowInvalidCertificate
+        self.progressReporter = progressReporter
     }
 
     func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge, completionHandler: @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
@@ -989,16 +1189,23 @@ private final class WebDAVUploadDelegate: NSObject, URLSessionDataDelegate, @unc
         WebDAVTLSTrust.handle(challenge, allowedHost: allowedHost, allowInvalidCertificate: allowInvalidCertificate, completionHandler: completionHandler)
     }
 
+    func urlSession(_ session: URLSession, task: URLSessionTask, didSendBodyData bytesSent: Int64, totalBytesSent: Int64, totalBytesExpectedToSend: Int64) {
+        progressReporter.didSend(totalBytesSent: totalBytesSent, totalBytesExpectedToSend: totalBytesExpectedToSend)
+    }
+
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse, completionHandler: @escaping @Sendable (URLSession.ResponseDisposition) -> Void) {
-        responseStatus = (response as? HTTPURLResponse)?.statusCode
+        lock.withLock {
+            responseStatus = (response as? HTTPURLResponse)?.statusCode
+        }
         completionHandler(.allow)
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         let completion: Result<Void, Error>
+        let status = lock.withLock { responseStatus }
         if let error {
             completion = .failure(error)
-        } else if let status = responseStatus, !(200...299).contains(status) {
+        } else if let status, !(200...299).contains(status) {
             completion = .failure(RemoteTransferError.uploadFailed(status))
         } else {
             completion = .success(())

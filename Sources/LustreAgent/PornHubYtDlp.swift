@@ -1,5 +1,4 @@
 import Foundation
-import Darwin
 import LustreCore
 
 public enum PornHubURL {
@@ -86,7 +85,9 @@ public enum PornHubYtDlp {
         var arguments = [
             "--no-playlist", "--no-warnings", "--restrict-filenames",
             "--format", formatSelector, "--merge-output-format", "mp4",
-            "--output", directory.appendingPathComponent("lustre-pornhub.%(ext)s").path
+            "--output", directory.appendingPathComponent("lustre-pornhub.%(ext)s").path,
+            "--newline", "--progress",
+            "--progress-template", "download:LUSTRE_PROGRESS:v1\t%(progress.status)s\t%(progress.downloaded_bytes|NA)s\t%(progress.total_bytes|NA)s\t%(progress.total_bytes_estimate|NA)s\t%(progress.speed|NA)s\t%(progress.eta|NA)s\t%(progress.fragment_index|NA)s\t%(progress.fragment_count|NA)s\tmedia"
         ]
         if let cookieFile { arguments.append(contentsOf: ["--cookies", cookieFile.path]) }
         arguments.append(source.absoluteString)
@@ -104,6 +105,14 @@ public enum PornHubYtDlp {
 
     public static func materialize(source: URL, formatSelector: String, directory: URL, cookies: [PornHubCookieRecord] = [], onProgress: @escaping @Sendable (DownloadProgress) async -> Void = { _ in }) async throws -> URL {
         guard let executable = installedExecutable() else { throw PornHubYtDlpError.executableUnavailable }
+        return try await materialize(executable: executable, source: source, formatSelector: formatSelector, directory: directory, cookies: cookies, onProgress: onProgress, allowUnapprovedExecutable: false)
+    }
+
+    static func materializeForTesting(executable: URL, source: URL, formatSelector: String, directory: URL, cookies: [PornHubCookieRecord] = [], timeout: TimeInterval = 7_200, onProgress: @escaping @Sendable (DownloadProgress) async -> Void = { _ in }) async throws -> URL {
+        try await materialize(executable: executable, source: source, formatSelector: formatSelector, directory: directory, cookies: cookies, timeout: timeout, onProgress: onProgress, allowUnapprovedExecutable: true)
+    }
+
+    private static func materialize(executable: URL, source: URL, formatSelector: String, directory: URL, cookies: [PornHubCookieRecord], timeout: TimeInterval = 7_200, onProgress: @escaping @Sendable (DownloadProgress) async -> Void, allowUnapprovedExecutable: Bool) async throws -> URL {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let working = directory.appendingPathComponent(".lustre-pornhub-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: working, withIntermediateDirectories: true)
@@ -115,9 +124,11 @@ public enum PornHubYtDlp {
         let result = try await run(
             executable: executable,
             arguments: materializationArguments(source: source, formatSelector: formatSelector, directory: working, cookieFile: cookieFile),
-            timeout: 7_200,
+            timeout: timeout,
             stdoutCap: 256 * 1024,
-            stderrCap: 512 * 1024
+            stderrCap: 512 * 1024,
+            onProgress: { sample in await onProgress(sample.progress) },
+            allowUnapprovedExecutable: allowUnapprovedExecutable
         )
         guard result.status == 0 else { throw classifiedFailure(result.stderr) }
         let outputs = try FileManager.default.contentsOfDirectory(
@@ -283,96 +294,19 @@ public enum PornHubYtDlp {
         let stderr: Data
     }
 
-    private enum ProcessEvent: Sendable {
-        case stdout(Data)
-        case stderr(Data)
-        case exited(Int32)
-    }
-
-    private static func run(executable: URL, arguments: [String], timeout: TimeInterval, stdoutCap: Int, stderrCap: Int) async throws -> ProcessResult {
-        guard executableIsAllowed(executable) else { throw PornHubYtDlpError.executableUnavailable }
-        let process = Process()
-        let stdout = Pipe()
-        let stderr = Pipe()
-        process.executableURL = executable
-        process.arguments = arguments
-        process.standardOutput = stdout
-        process.standardError = stderr
-        try process.run()
-        defer {
-            try? stdout.fileHandleForReading.close()
-            try? stderr.fileHandleForReading.close()
-        }
+    private static func run(executable: URL, arguments: [String], timeout: TimeInterval, stdoutCap: Int, stderrCap: Int, onProgress: @escaping @Sendable (YtDlpProgressSample) async -> Void = { _ in }, allowUnapprovedExecutable: Bool = false) async throws -> ProcessResult {
+        guard allowUnapprovedExecutable || executableIsAllowed(executable) else { throw PornHubYtDlpError.executableUnavailable }
         do {
-            return try await withTaskCancellationHandler {
-                try await withThrowingTaskGroup(of: ProcessResult.self) { group in
-                group.addTask {
-                    var output = Data()
-                    var diagnostics = Data()
-                    var status: Int32?
-                    try await withThrowingTaskGroup(of: ProcessEvent.self) { events in
-                        defer {
-                            events.cancelAll()
-                            terminateAndWait(process)
-                        }
-                        events.addTask { .stdout(try await readCapped(stdout.fileHandleForReading, limit: stdoutCap)) }
-                        events.addTask { .stderr(try await readCapped(stderr.fileHandleForReading, limit: stderrCap)) }
-                        events.addTask { process.waitUntilExit(); return .exited(process.terminationStatus) }
-                        for try await event in events {
-                            switch event {
-                            case .stdout(let data): output = data
-                            case .stderr(let data): diagnostics = data
-                            case .exited(let value): status = value
-                            }
-                        }
-                    }
-                    guard let status else { throw PornHubYtDlpError.processFailed }
-                    return ProcessResult(status: status, stdout: output, stderr: diagnostics)
-                }
-                group.addTask {
-                    try await Task.sleep(for: .seconds(timeout))
-                    throw PornHubYtDlpError.timedOut
-                }
-                defer {
-                    group.cancelAll()
-                    terminateAndWait(process)
-                }
-                guard let result = try await group.next() else { throw PornHubYtDlpError.processFailed }
-                return result
+            let result = try await StreamingProcessRunner.run(executable: executable, arguments: arguments, timeout: timeout, stdoutCap: stdoutCap, stderrCap: stderrCap, onProgress: onProgress)
+            return ProcessResult(status: result.status, stdout: result.stdout, stderr: result.stderrDiagnostics)
+        } catch let error as StreamingProcessRunnerError {
+            switch error {
+            case .timedOut: throw PornHubYtDlpError.timedOut
+            case .cancelled: throw PornHubYtDlpError.cancelled
+            case .processFailed, .streamFailed: throw PornHubYtDlpError.processFailed
             }
-            } onCancel: {
-                terminateAndWait(process)
-            }
-        } catch is CancellationError {
-            terminateAndWait(process)
-            throw PornHubYtDlpError.cancelled
         } catch {
-            terminateAndWait(process)
-            throw error
-        }
-    }
-
-    private static func terminateAndWait(_ process: Process) {
-        guard process.isRunning else { return }
-        process.terminate()
-        for _ in 0..<20 where process.isRunning {
-            usleep(100_000)
-        }
-        if process.isRunning {
-            kill(process.processIdentifier, SIGKILL)
-        }
-        if process.isRunning {
-            process.waitUntilExit()
-        }
-    }
-
-    private static func readCapped(_ handle: FileHandle, limit: Int) async throws -> Data {
-        var data = Data()
-        while true {
-            let chunk = try handle.read(upToCount: min(64 * 1024, limit - data.count + 1)) ?? Data()
-            if chunk.isEmpty { return data }
-            data.append(chunk)
-            guard data.count <= limit else { throw PornHubYtDlpError.oversizedOutput }
+            throw PornHubYtDlpError.processFailed
         }
     }
 }

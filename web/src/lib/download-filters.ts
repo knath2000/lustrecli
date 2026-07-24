@@ -60,14 +60,7 @@ export function jobStatusCounts(jobs: FilterableJob[]) {
   return counts;
 }
 
-export function jobProgressLabel(status: FilterableJob["status"], progress?: number): string {
-  const percent = jobProgressPercent(progress);
-  if (percent !== undefined) return `${percent}%`;
-  if (status === "running") return "Working";
-  return status.replace(/([A-Z])/g, " $1").replace(/^./, (character) => character.toUpperCase());
-}
-
 export function jobProgressPercent(progress?: number): number | undefined {
-  if (progress === undefined || !Number.isFinite(progress)) return undefined;
-  return Math.min(100, Math.max(0, Math.round(progress * 100)));
+  if (progress === undefined || !Number.isFinite(progress) || progress < 0) return undefined;
+  return Math.min(100, Math.round(progress * 100));
 }

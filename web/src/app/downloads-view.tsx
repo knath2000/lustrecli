@@ -1,12 +1,12 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { agentDateMilliseconds, type AgentDate } from "@/lib/agent-date";
-import { filterAndSortJobs, jobProgressLabel, jobProgressPercent, jobStatusCounts, type DownloadFilterStatus } from "@/lib/download-filters";
-import { availableJobActions, jobActionLabel, type JobAction, type JobStatus } from "@/lib/job-actions";
+import { agentDateMilliseconds } from "@/lib/agent-date";
+import { filterAndSortJobs, jobStatusCounts, type DownloadFilterStatus } from "@/lib/download-filters";
+import { downloadProgressDisplay, formatBytes, formatETA, formatJobStatus, formatSpeed } from "@/lib/download-progress";
+import type { DownloadJob } from "@/lib/download-job";
+import { availableJobActions, jobActionLabel, type JobAction } from "@/lib/job-actions";
 
-type JobLog = { timestamp: AgentDate; level: "info" | "error"; message: string };
-export type DownloadJob = { id: string; sourcePageURL: string; preferredQualityLabel?: string; destination: string; status: JobStatus; message: string; progress?: number; downloadedBytes?: number; totalBytes?: number; logs?: JobLog[]; updatedAt: AgentDate };
 export type Destination = { id: string; name: string; baseURL: string; remotePath: string };
 
 type DownloadsViewProps = {
@@ -40,19 +40,6 @@ function jobTitle(job: DownloadJob) {
   }
 }
 
-function formatBytes(bytes?: number) {
-  if (bytes === undefined) return "—";
-  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
-  let value = bytes;
-  let unit = 0;
-  while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit += 1; }
-  return `${value.toFixed(unit ? 1 : 0)} ${units[unit]}`;
-}
-
-function displayStatus(status: JobStatus) {
-  return status.replace(/([A-Z])/g, " $1").trim();
-}
-
 function destinationName(job: DownloadJob, destinations: Destination[]) {
   if (job.destination === "local") return "Local Downloads";
   const id = job.destination.replace(/^webdav:/i, "");
@@ -72,7 +59,7 @@ export function DownloadsView({ jobs, destinations, error, selectedJobId, onSele
   const filteredJobs = useMemo(() => filterAndSortJobs(jobs, { status, query, destination }), [jobs, status, query, destination]);
   const counts = useMemo(() => jobStatusCounts(jobs), [jobs]);
   const selectedJob = filteredJobs.find((job) => job.id === selectedJobId) ?? filteredJobs[0] ?? null;
-  const selectedProgress = jobProgressPercent(selectedJob?.progress);
+  const selectedProgress = selectedJob ? downloadProgressDisplay(selectedJob) : null;
 
 
   const act = async (job: DownloadJob, action: JobAction) => {
@@ -104,14 +91,13 @@ export function DownloadsView({ jobs, destinations, error, selectedJobId, onSele
         <div className="ledger-head"><span>Transfer</span><span>Status</span><span>Progress</span><span>Destination</span><span>Updated</span><span>Action</span></div>
         <div className="ledger-body">
           {filteredJobs.map((job) => {
-            const progress = jobProgressPercent(job.progress);
-            const visualProgress = progress ?? (job.status === "running" ? 34 : job.status === "completed" ? 100 : 0);
+            const progress = downloadProgressDisplay(job);
             const forcing = workingAction?.jobId === job.id && workingAction.action === "forceStart";
             return <div key={job.id} className={`download-row status-${job.status} ${selectedJob?.id === job.id ? "selected" : ""}`}>
               <button className="download-row-select" onClick={() => onSelectJob(job.id)} aria-pressed={selectedJob?.id === job.id}>
                 <span className="download-name"><i>↓</i><span><strong>{jobTitle(job)}</strong><small>{job.preferredQualityLabel || job.sourcePageURL}</small></span></span>
-                <span className="download-state"><i />{displayStatus(job.status)}</span>
-                <span className="download-progress"><span><i style={{ width: `${visualProgress}%` }} className={progress === undefined && job.status === "running" ? "indeterminate" : ""} /></span><small>{jobProgressLabel(job.status, job.progress)}</small></span>
+                <span className="download-state"><i />{formatJobStatus(job.status)}</span>
+                <span className="download-progress"><span className={progress.state === "static" ? "static" : ""}><i style={progress.percent === undefined ? undefined : { width: `${progress.percent}%` }} className={progress.state === "indeterminate" ? "indeterminate" : ""} /></span><small>{progress.progressLabel}{progress.percent !== undefined && job.status === "running" ? <em>{progress.phaseLabel}</em> : null}</small></span>
                 <span className="download-destination">{destinationName(job, destinations)}</span>
                 <time dateTime={new Date(agentDateMilliseconds(job.updatedAt)).toISOString()}>{new Date(agentDateMilliseconds(job.updatedAt)).toLocaleDateString([], { month: "short", day: "numeric" })}<small>{new Date(agentDateMilliseconds(job.updatedAt)).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</small></time>
               </button>
@@ -124,8 +110,8 @@ export function DownloadsView({ jobs, destinations, error, selectedJobId, onSele
 
       <aside className="transfer-inspector glass-panel" aria-label="Transfer inspector">
         {selectedJob ? <>
-          <header className="inspector-heading"><div><p className="eyebrow">Transfer inspector</p><h3>{jobTitle(selectedJob)}</h3><p className="inspector-id">ID · {selectedJob.id}</p></div><span className={`inspector-status status-${selectedJob.status}`}>{displayStatus(selectedJob.status)}</span></header>
-          <section className="inspector-progress"><div><span>{formatBytes(selectedJob.downloadedBytes)}</span><strong>{selectedProgress === undefined ? displayStatus(selectedJob.status) : `${selectedProgress}%`}</strong><span>{selectedJob.totalBytes ? formatBytes(selectedJob.totalBytes) : "Total unavailable"}</span></div><div className="progress-track"><span className={`progress-fill ${selectedProgress === undefined ? "indeterminate" : ""}`} style={selectedProgress === undefined ? undefined : { width: `${selectedProgress}%` }} /></div><p>{selectedJob.message}</p></section>
+          <header className="inspector-heading"><div><p className="eyebrow">Transfer inspector</p><h3>{jobTitle(selectedJob)}</h3><p className="inspector-id">ID · {selectedJob.id}</p></div><span className={`inspector-status status-${selectedJob.status}`}>{formatJobStatus(selectedJob.status)}</span></header>
+          {selectedProgress && <section className="inspector-progress"><div><span>{formatBytes(selectedProgress.bytesWritten)}</span><strong>{selectedProgress.percent === undefined ? selectedProgress.phaseLabel : `${selectedProgress.percent}%`}</strong><span>{selectedProgress.totalBytes === undefined ? "Total unavailable" : `${selectedProgress.totalIsEstimated ? "Estimated " : ""}${formatBytes(selectedProgress.totalBytes)}`}</span></div><div className="progress-track" {...(selectedProgress.state === "static" ? {} : { role: "progressbar", "aria-label": `${jobTitle(selectedJob)} progress`, "aria-valuetext": selectedProgress.accessibleText, ...(selectedProgress.percent === undefined ? {} : { "aria-valuenow": selectedProgress.percent, "aria-valuemin": 0, "aria-valuemax": 100 }) })}><span className={`progress-fill ${selectedProgress.state === "indeterminate" ? "indeterminate" : ""} ${selectedProgress.state === "static" ? "static" : ""}`} style={selectedProgress.percent === undefined ? undefined : { width: `${selectedProgress.percent}%` }} /></div><dl className="progress-telemetry"><div><dt>Phase</dt><dd>{selectedProgress.phaseLabel}</dd></div><div><dt>Transferred</dt><dd>{formatBytes(selectedProgress.bytesWritten)}</dd></div><div><dt>Total</dt><dd>{selectedProgress.totalBytes === undefined ? "Total unavailable" : <>{formatBytes(selectedProgress.totalBytes)}{selectedProgress.totalIsEstimated && <small>Estimated</small>}</>}</dd></div>{formatSpeed(selectedProgress.speed) && <div><dt>Speed</dt><dd>{formatSpeed(selectedProgress.speed)}</dd></div>}{formatETA(selectedProgress.etaSeconds) && <div><dt>ETA</dt><dd>{formatETA(selectedProgress.etaSeconds)}</dd></div>}</dl><p>{selectedJob.message}</p></section>}
           <dl className="inspector-metadata"><div><dt>Source</dt><dd><a href={selectedJob.sourcePageURL} target="_blank" rel="noreferrer">{selectedJob.sourcePageURL}</a></dd></div><div><dt>Quality</dt><dd>{selectedJob.preferredQualityLabel || "Automatic"}</dd></div><div><dt>Destination</dt><dd>{destinationName(selectedJob, destinations)}</dd></div><div><dt>Updated</dt><dd>{new Date(agentDateMilliseconds(selectedJob.updatedAt)).toLocaleString()}</dd></div></dl>
           <section className="inspector-log"><header><span>Worker event log</span><b>{selectedJob.logs?.length ?? 0} events</b></header>{selectedJob.logs?.length ? <ol>{[...selectedJob.logs].sort((a, b) => agentDateMilliseconds(a.timestamp) - agentDateMilliseconds(b.timestamp)).map((log, index) => <li key={`${log.timestamp}-${index}`}><time>{new Date(agentDateMilliseconds(log.timestamp)).toLocaleTimeString()}</time><b className={log.level === "error" ? "error" : ""}>{log.level}</b><span>{log.message}</span></li>)}</ol> : <p>No worker events recorded for this job.</p>}</section>
           {availableJobActions(selectedJob.status).length > 0 && <footer className="inspector-actions">{availableJobActions(selectedJob.status).map((action) => { const working = workingAction?.jobId === selectedJob.id && workingAction.action === action; return <button key={action} className={action === "cancel" ? "danger" : ""} disabled={working} onClick={() => void act(selectedJob, action)}>{working ? `${jobActionLabel(action)}…` : jobActionLabel(action)}</button>; })}</footer>}

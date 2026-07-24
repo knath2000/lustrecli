@@ -69,11 +69,88 @@ final class PornHubYtDlpTests: XCTestCase {
     func testMaterializationArgumentsConstrainFormatAndOutputDirectory() throws {
         let dir = URL(fileURLWithPath: "/tmp/stage")
         let args = try PornHubYtDlp.materializationArguments(source: source, formatSelector: "h720", directory: dir)
-        XCTAssertEqual(args.suffix(2), ["\(dir.path)/lustre-pornhub.%(ext)s", source.absoluteString])
+        XCTAssertEqual(args.last, source.absoluteString)
+        XCTAssertEqual(args[args.firstIndex(of: "--output")! + 1], "\(dir.path)/lustre-pornhub.%(ext)s")
         XCTAssertTrue(args.contains("--restrict-filenames"))
         XCTAssertTrue(args.contains("--merge-output-format"))
+        XCTAssertEqual(args.filter { $0 == "--progress-template" }.count, 1)
+        XCTAssertEqual(args[args.firstIndex(of: "--progress-template")! + 1].split(separator: "\t", omittingEmptySubsequences: false).count, 10)
         XCTAssertFalse(args.contains("--cookies-from-browser"))
         XCTAssertThrowsError(try PornHubYtDlp.materializationArguments(source: source, formatSelector: "best;rm", directory: dir))
+    }
+
+    func testFakeExecutableMaterializesAndForwardsMachineProgress() async throws {
+        let fixture = try FakeYtDlpFixture()
+        let directory = fixture.directory.appendingPathComponent("output", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let recorder = MaterializationRecorder()
+        let output = try await PornHubYtDlp.materializeForTesting(executable: fixture.executable, source: source, formatSelector: "safe720", directory: directory) { progress in
+            await recorder.record(progress)
+        }
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: output.path))
+        let progress = await recorder.values()
+        XCTAssertEqual(progress.first?.bytesWritten, 0)
+        XCTAssertTrue(progress.contains { $0.bytesWritten == 7 && $0.totalBytes == 10 && $0.bytesPerSecond == 2.5 && $0.etaSeconds == 3 })
+        XCTAssertEqual(progress.last?.phase, .postProcessing)
+    }
+
+    func testFakeExecutableNonzeroAndMissingOutputUseStaticErrors() async throws {
+        let nonzero = try FakeYtDlpFixture(body: "exit 1")
+        let missing = try FakeYtDlpFixture(body: "exit 0")
+        let nonzeroDirectory = nonzero.directory.appendingPathComponent("output", isDirectory: true)
+        let missingDirectory = missing.directory.appendingPathComponent("output", isDirectory: true)
+        try FileManager.default.createDirectory(at: nonzeroDirectory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: missingDirectory, withIntermediateDirectories: true)
+
+        await XCTAssertPornHubError(try await PornHubYtDlp.materializeForTesting(executable: nonzero.executable, source: source, formatSelector: "safe720", directory: nonzeroDirectory), .processFailed)
+        await XCTAssertPornHubError(try await PornHubYtDlp.materializeForTesting(executable: missing.executable, source: source, formatSelector: "safe720", directory: missingDirectory), .invalidOutput)
+    }
+
+    func testFakeExecutableTimeoutMapsStatically() async throws {
+        let fixture = try FakeYtDlpFixture(body: "while :; do sleep 1; done")
+        let directory = fixture.directory.appendingPathComponent("output", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+
+        await XCTAssertPornHubError(try await PornHubYtDlp.materializeForTesting(executable: fixture.executable, source: source, formatSelector: "safe720", directory: directory, timeout: 1), .timedOut)
+    }
+
+    func testFakeExecutableReceivesMode0600CookieFileAndItIsRemovedAfterSuccess() async throws {
+        let fixture = try FakeYtDlpFixture()
+        let marker = fixture.directory.appendingPathComponent("cookie-state")
+        try fixture.replace(body: """
+        previous=""
+        output=""
+        for argument in "$@"; do
+          if [ "$previous" = "--cookies" ]; then [ -f "$argument" ] && [ "$(stat -f %Lp "$argument")" = "600" ] && printf present > '\(marker.path)'; fi
+          if [ "$previous" = "--output" ]; then output="$argument"; fi
+          previous="$argument"
+        done
+        target=$(printf '%s' "$output" | sed 's/%(ext)s/mp4/')
+        dd if=/dev/zero of="$target" bs=1024 count=1 2>/dev/null
+        """)
+        let directory = fixture.directory.appendingPathComponent("output", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let cookies = [PornHubCookieRecord(name: "il", value: "synthetic", domain: ".pornhub.com", path: "/", expiresAt: nil, secure: true)]
+
+        _ = try await PornHubYtDlp.materializeForTesting(executable: fixture.executable, source: source, formatSelector: "safe720", directory: directory, cookies: cookies)
+        XCTAssertEqual(try String(contentsOf: marker), "present")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.appendingPathComponent(".lustre-pornhub").path))
+    }
+
+    func testFakeExecutableCancellationMapsStatically() async throws {
+        let fixture = try FakeYtDlpFixture(body: "while :; do sleep 1; done")
+        let directory = fixture.directory.appendingPathComponent("output", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let executable = fixture.executable
+        let sourceURL = URL(string: "https://www.pornhub.com/view_video.php?viewkey=ph-safe_1")!
+        let task = Task<Result<URL, Error>, Never> {
+            do { return .success(try await PornHubYtDlp.materializeForTesting(executable: executable, source: sourceURL, formatSelector: "safe720", directory: directory, timeout: 10)) }
+            catch { return .failure(error) }
+        }
+        task.cancel()
+        let result = await task.value
+        assertPornHubError(result, .cancelled)
     }
 
     func testFailureClassificationOnlyInvalidatesClearSessionFailures() async throws {
@@ -109,4 +186,51 @@ private final class AuthCookieStore: PornHubCookieStore, @unchecked Sendable {
 private struct AuthHelper: PornHubAuthHelping {
     func login() async throws -> PornHubHelperResult { .signedOut }
     func logout() async throws {}
+}
+
+private final class FakeYtDlpFixture {
+    let directory: URL
+    let executable: URL
+
+    init(body: String? = nil) throws {
+        directory = FileManager.default.temporaryDirectory.appendingPathComponent("lustre-fake-ytdlp-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        executable = directory.appendingPathComponent("yt-dlp")
+        try replace(body: body ?? """
+        output=""
+        previous=""
+        for argument in "$@"; do
+          if [ "$previous" = "--output" ]; then output="$argument"; fi
+          previous="$argument"
+        done
+        printf 'LUSTRE_PROGRESS:v1\tdownloading\t7\t10\tNA\t2.5\t3\tNA\tNA\tmedia\n' >&2
+        target=$(printf '%s' "$output" | sed 's/%(ext)s/mp4/')
+        dd if=/dev/zero of="$target" bs=1024 count=1 2>/dev/null
+        """)
+    }
+
+    func replace(body: String) throws {
+        try Data("#!/bin/sh\n\(body)\n".utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
+    }
+
+    deinit { try? FileManager.default.removeItem(at: directory) }
+}
+
+private actor MaterializationRecorder {
+    private var progress: [DownloadProgress] = []
+    func record(_ value: DownloadProgress) { progress.append(value) }
+    func values() -> [DownloadProgress] { progress }
+}
+
+private func XCTAssertPornHubError<T>(_ expression: @autoclosure () async throws -> T, _ expected: PornHubYtDlpError, file: StaticString = #filePath, line: UInt = #line) async {
+    do { _ = try await expression(); XCTFail("Expected \(expected)", file: file, line: line) }
+    catch { XCTAssertEqual(error as? PornHubYtDlpError, expected, file: file, line: line) }
+}
+
+private func assertPornHubError(_ result: Result<URL, Error>, _ expected: PornHubYtDlpError, file: StaticString = #filePath, line: UInt = #line) {
+    switch result {
+    case .success: XCTFail("Expected \(expected)", file: file, line: line)
+    case .failure(let error): XCTAssertEqual(error as? PornHubYtDlpError, expected, file: file, line: line)
+    }
 }
