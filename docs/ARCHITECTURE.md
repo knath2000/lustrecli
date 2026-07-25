@@ -111,7 +111,7 @@ The root loopback page is an authenticated Monitor/Operate surface at `http://12
 - Feed fetches normalized multi-provider cards through the agent, preserves query parameters through the authenticated Next.js proxy, supports pagination, individual or bounded batch queueing, destination selection, and job-derived transfer status. Provider thumbnails and hover images/videos use the bounded `/v1/feed/assets` proxy; object URLs are cached per source, failed sources are remembered, and object URLs are revoked on teardown.
 - Swift's default `JSONEncoder` emits `Date` as Foundation reference-date seconds. The web boundary normalizes those numeric values while also accepting ISO-8601 strings, so sorting and time display remain compatible with a future API encoding change.
 
-This bridge is deliberately development-only. The hosted service must not attempt to call a visitor's loopback address. Production remote control will keep the Swift agent authoritative for downloads, paths, SQLite state, and Keychain secrets while the agent establishes an outbound authenticated realtime connection to the cloud control plane. Browser account identity and paired-device identity remain separate trust domains.
+This bridge is deliberately development-only. The hosted service must not attempt to call a visitor's loopback address. Production remote control keeps the Swift agent authoritative for downloads, paths, SQLite state, and Keychain secrets. Slice 1 adds Clerk-backed Lustre accounts, pairing, device management, Keychain P-256 identities, and device-session tokens. Slice 2A adds an outbound, experimental Vercel WebSocket gateway for bounded heartbeat presence only: the gateway persists server-received heartbeat state in Neon and the browser reads it through authenticated HTTP. Browser account identity and paired-device identity remain separate trust domains; no remote command or job data crosses the cloud connection.
 
 ## PornHub visible authentication
 
@@ -138,7 +138,8 @@ Feed search is an agent-owned extension of the structured feed contract rather t
 ## Deliberate next seams
 
 1. Resolve the intermittent aggregate runner-fixture hang, then renew full-suite/release acceptance counts.
-2. Add hosted account authentication, device enrollment, revocation, and an outbound agent realtime channel without exposing the loopback API.
+2. Measure the experimental Vercel WebSocket adapter through deployment replacement, sleep/wake, network loss, revocation, and sustained presence tests; replace it with a dedicated gateway if its lifecycle or cost is unsuitable.
+3. Add an authenticated remote command protocol only after a separate command authorization and audit design review.
 4. Add device enrollment/selection and server-backed pagination as job histories grow.
 5. Make the current single-transfer scheduler limit configurable and add per-destination limits.
 6. Add resumable `.part` transfers and bounded automatic re-resolution for expired media responses.

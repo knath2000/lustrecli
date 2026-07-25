@@ -1,6 +1,6 @@
 # Current implementation status
 
-Last updated: 2026-07-24
+Last updated: 2026-07-25
 
 This document records the accepted behavior in the current `main` working tree, including the pieces that are intentionally still incomplete. `ARCHITECTURE.md` remains the component-level design reference; `SESSION_LOG.md` records the delivery chronology.
 
@@ -38,6 +38,11 @@ This document records the accepted behavior in the current `main` working tree, 
 - Cancellation, helper failure, storage failure, and sign-out remain distinct. A cancelled/closed helper cannot save a late session, and partial sessions are removed after cancellation or failure.
 
 ### Lustre Cloud
+
+- Slice 1 is implemented and deployed: Clerk authenticates browser users; Lustre-owned accounts, devices, pairing challenges, enrollment/session challenges, audits, and revocation live in Neon through Drizzle migrations. Device signatures use one permanent macOS Keychain P-256 key and deterministic, domain-separated envelopes. Local `lustre cloud disconnect` only removes local enrollment metadata.
+- Slice 2A is deployed and manually accepted at `https://lustrecli.vercel.app`: an enrolled `lustre-agent` obtains a fresh session token, connects through the native experimental Vercel WebSocket adapter using a token-bearing subprotocol rather than a URL, sends bounded heartbeats, and appears Online in the browser only after Neon accepts a server-timestamped heartbeat.
+- Presence has a dedicated `lustre_device_presence` record. Browser state is truthful (`online`, `offline`, `neverConnected`, or `revoked`) and is read through Clerk-authenticated HTTP. It does not imply job synchronization, remote control, storage state, latency, or transfer availability.
+- The Vercel WebSocket adapter is an experimental, replaceable Slice 2A implementation. It has no Redis, job payloads, destinations, provider state, commands, or browser socket broadcast. The agent reconnects with a fresh token after interruptions and does not assume a fixed socket lifetime.
 
 - The Next.js UI is backed by the live loopback agent rather than fabricated telemetry.
 - Downloads, Activity, Destinations, Settings, Queue Transfer, Feed, Force Start, and PornHub auth controls call the real API.
