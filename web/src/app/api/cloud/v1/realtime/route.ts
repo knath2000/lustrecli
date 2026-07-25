@@ -27,9 +27,13 @@ export async function GET(request: Request) {
           if (Buffer.byteLength(text, "utf8") > MAX_HEARTBEAT_FRAME_BYTES) { socket.close(4400, "frame-too-large"); return; }
           try {
             const frame = parseHeartbeatFrame(JSON.parse(text));
-            await acceptHeartbeat(deviceID, connectionID, frame.sequence, frame.agentVersion);
-            await Promise.all([acknowledgeCommands(deviceID, frame.commandAcks), syncJobStatus(deviceID, frame.jobs)]);
-            const command = await nextPendingCommand(deviceID);
+            try { await acceptHeartbeat(deviceID, connectionID, frame.sequence, frame.agentVersion); }
+            catch { console.error("cloud_realtime_failure", { stage: "heartbeat_presence" }); throw new Error("heartbeat_presence"); }
+            try { await Promise.all([acknowledgeCommands(deviceID, frame.commandAcks), syncJobStatus(deviceID, frame.jobs)]); }
+            catch { console.error("cloud_realtime_failure", { stage: "heartbeat_sync" }); throw new Error("heartbeat_sync"); }
+            let command;
+            try { command = await nextPendingCommand(deviceID); }
+            catch { console.error("cloud_realtime_failure", { stage: "command_dispatch" }); throw new Error("command_dispatch"); }
             socket.send(JSON.stringify({ version: 1, type: "heartbeat-accepted", sequence: frame.sequence, serverTime: new Date().toISOString(), acknowledgedCommandAcks: frame.commandAcks, command: command ? { id: command.id, kind: command.kind, payload: command.payload } : null }));
           } catch { console.error("cloud_realtime_failure", { stage: "heartbeat" }); socket.send(errorFrame("heartbeat_rejected")); socket.close(4403, "heartbeat-rejected"); }
         })();
