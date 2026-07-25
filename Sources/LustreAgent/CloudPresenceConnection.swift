@@ -88,7 +88,7 @@ public actor CloudPresenceConnection {
             }
             guard object["type"] as? String == "heartbeat-accepted", object["sequence"] as? Int == sequence else { throw CloudDeviceError.invalidResponse }
             if let acknowledgements = try? JSONSerialization.data(withJSONObject: object["acknowledgedCommandAcks"] ?? []), let decoded = try? JSONDecoder.cloud.decode([CloudRemoteCommandAck].self, from: acknowledgements) { await remoteControl.acknowledgedByCloud(decoded) }
-            if let commandData = try? JSONSerialization.data(withJSONObject: object["command"] ?? NSNull()), let command = try? JSONDecoder.cloud.decode(CloudRemoteCommand?.self, from: commandData) { await remoteControl.handle(command) }
+            if let commandObject = object["command"], !(commandObject is NSNull), let commandData = try? JSONSerialization.data(withJSONObject: commandObject), let command = try? JSONDecoder.cloud.decode(CloudRemoteCommand.self, from: commandData) { await remoteControl.handle(command) }
             sequence += 1
             try await Task.sleep(nanoseconds: UInt64(Self.heartbeatInterval * 1_000_000_000))
         }
