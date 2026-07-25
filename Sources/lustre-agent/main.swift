@@ -16,14 +16,17 @@ struct LustreAgentMain {
             let service = try AgentService()
             let cloudPresence = CloudPresenceConnection(service: service)
             await cloudPresence.startIfEnrolled()
-            let token = try KeychainTokenStore.token()
-            let server = try LoopbackServer(service: service, token: token)
-            let port = try await server.start()
-            guard port != 0 else { throw AgentLaunchError.noPort }
-            let endpoint = try JSONEncoder().encode(AgentEndpoint(port: port))
-            try endpoint.write(to: AgentPaths.endpoint, options: .atomic)
-            print("Lustre Agent listening at http://127.0.0.1:\(port)")
-            print("Open that address in a browser, then use `lustre token` to authenticate the panel.")
+            if let token = try? KeychainTokenStore.token() {
+                let server = try LoopbackServer(service: service, token: token)
+                let port = try await server.start()
+                guard port != 0 else { throw AgentLaunchError.noPort }
+                let endpoint = try JSONEncoder().encode(AgentEndpoint(port: port))
+                try endpoint.write(to: AgentPaths.endpoint, options: .atomic)
+                print("Lustre Agent listening at http://127.0.0.1:\(port)")
+                print("Open that address in a browser, then use `lustre token` to authenticate the panel.")
+            } else {
+                fputs("Lustre Agent loopback listener is unavailable until Keychain access is authorized.\n", stderr)
+            }
             await withUnsafeContinuation { (_: UnsafeContinuation<Void, Never>) in }
         } catch {
             fputs("lustre-agent: \(error.localizedDescription)\n", stderr)

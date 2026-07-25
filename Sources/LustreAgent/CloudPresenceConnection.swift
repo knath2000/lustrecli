@@ -44,6 +44,11 @@ public actor CloudPresenceConnection {
                 fputs("Lustre Cloud presence stopped: reason=device_revoked generation=\(generation).\n", stderr)
                 return
             }
+            catch CloudDeviceError.keychainFailure {
+                reconnectState.stop()
+                fputs("Lustre Cloud presence stopped: Keychain access requires user authorization.\n", stderr)
+                return
+            }
             catch {
                 guard let delay = reconnectState.connectionFailed(generation) else { return }
                 fputs(reconnectReason.logMessage(generation: generation, retryDelay: delay) + "\n", stderr)

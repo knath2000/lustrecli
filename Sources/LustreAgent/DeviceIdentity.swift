@@ -1,6 +1,7 @@
 import Foundation
 import Security
 import CryptoKit
+import LocalAuthentication
 import LustreCore
 
 public final class DeviceIdentity: @unchecked Sendable {
@@ -8,7 +9,8 @@ public final class DeviceIdentity: @unchecked Sendable {
     public init(tag: Data = Data("com.pmvdl.lustre-agent.cloud-device-p256-v1".utf8)) { self.tag = tag }
 
     private func privateKey() throws -> SecKey {
-        let query: [String: Any] = [kSecClass as String: kSecClassKey, kSecAttrApplicationTag as String: tag, kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom, kSecReturnRef as String: true, kSecMatchLimit as String: kSecMatchLimitOne]
+        let context = LAContext(); context.interactionNotAllowed = true
+        let query: [String: Any] = [kSecClass as String: kSecClassKey, kSecAttrApplicationTag as String: tag, kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom, kSecReturnRef as String: true, kSecMatchLimit as String: kSecMatchLimitOne, kSecUseAuthenticationUI as String: kSecUseAuthenticationUIFail, kSecUseAuthenticationContext as String: context]
         var existing: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &existing)
         if status == errSecSuccess, let key = existing as! SecKey? { return key }
