@@ -80,15 +80,16 @@ public actor CloudPresenceConnection {
             let response = try await task.receive()
             let responseData: Data
             switch response { case let .data(data): responseData = data; case let .string(text): responseData = Data(text.utf8); @unknown default: throw CloudDeviceError.invalidResponse }
-            guard let object = try JSONSerialization.jsonObject(with: responseData) as? [String: Any], object["version"] as? Int == 1 else { throw CloudDeviceError.invalidResponse }
-            if object["type"] as? String == "reconnect-requested", object["reason"] as? String == "lease_expired" {
+            let responseFrame = try JSONDecoder.cloud.decode(CloudHeartbeatResponse.self, from: responseData)
+            guard responseFrame.version == 1 else { throw CloudDeviceError.invalidResponse }
+            if responseFrame.type == "reconnect-requested", responseFrame.reason == "lease_expired" {
                 task.cancel(with: .goingAway, reason: nil)
                 if socket === task { socket = nil }
                 throw CloudPresenceConnectionError.serverRequestedReconnect
             }
-            guard object["type"] as? String == "heartbeat-accepted", object["sequence"] as? Int == sequence else { throw CloudDeviceError.invalidResponse }
-            if let acknowledgements = try? JSONSerialization.data(withJSONObject: object["acknowledgedCommandAcks"] ?? []), let decoded = try? JSONDecoder.cloud.decode([CloudRemoteCommandAck].self, from: acknowledgements) { await remoteControl.acknowledgedByCloud(decoded) }
-            if let commandObject = object["command"], !(commandObject is NSNull), let commandData = try? JSONSerialization.data(withJSONObject: commandObject), let command = try? JSONDecoder.cloud.decode(CloudRemoteCommand.self, from: commandData) { await remoteControl.handle(command) }
+            guard responseFrame.type == "heartbeat-accepted", responseFrame.sequence == sequence else { throw CloudDeviceError.invalidResponse }
+            await remoteControl.acknowledgedByCloud(responseFrame.acknowledgedCommandAcks ?? [])
+            await remoteControl.handle(responseFrame.command)
             sequence += 1
             try await Task.sleep(nanoseconds: UInt64(Self.heartbeatInterval * 1_000_000_000))
         }

@@ -42,6 +42,15 @@ struct CloudHeartbeat: Encodable {
     let jobs: [CloudRemoteJobStatus]
 }
 
+struct CloudHeartbeatResponse: Decodable {
+    let version: Int
+    let type: String
+    let sequence: Int?
+    let reason: String?
+    let command: CloudRemoteCommand?
+    let acknowledgedCommandAcks: [CloudRemoteCommandAck]?
+}
+
 actor CloudRemoteControl {
     private let service: AgentService
     private var acknowledgements: [CloudRemoteCommandAck] = []
