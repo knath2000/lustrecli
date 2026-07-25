@@ -1,0 +1,27 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1784956860000,
+      "tag": "0000_lustre_device_identity",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1784964000000,
+      "tag": "0001_lustre_device_presence",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1784964600000,
+      "tag": "0002_lustre_presence_truthful_heartbeat",
+      "breakpoints": true
+    }
+  ]
+}

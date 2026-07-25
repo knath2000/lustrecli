@@ -31,6 +31,20 @@ npm run dev
 
 Open `http://localhost:3000`, run `swift run lustre token` in a separate terminal, and paste that token into the connection screen. The browser keeps it in memory only. The local Next.js route handler proxies only authenticated `/v1/*` calls to the fixed loopback agent at `127.0.0.1:63406`, so every operational surface reflects live agent state. Queueing a transfer through the sheet creates a real durable job; destination creation, connection testing, deletion, and job actions call the real agent API.
 
+## Lustre Cloud device pairing (Slice 1)
+
+The hosted cloud control-plane lives at `web/devices`. It uses Clerk for browser sign-in, Neon Postgres through Drizzle, and a separate permanent P-256 Keychain identity for the local agent. Copy `web/.env.example` to `web/.env.local` and configure a Clerk development instance, a Neon development branch, and distinct local-only `LUSTRE_PAIRING_PEPPER` and `LUSTRE_DEVICE_TOKEN_SECRET` values before running `cd web && npx drizzle-kit migrate`.
+
+With the web app running, sign in at `http://localhost:3000/devices`, create a pairing code, and run:
+
+```sh
+LUSTRE_CLOUD_ORIGIN=http://localhost:3000 swift run lustre cloud pair <code> --name "My Mac"
+swift run lustre cloud status
+swift run lustre cloud disconnect
+```
+
+`disconnect` removes this Mac's local cloud enrollment only. Revoke the device in Lustre Cloud to stop future cloud authentication. The protocol boundary is in [CLOUD_DEVICE_IDENTITY.md](docs/CLOUD_DEVICE_IDENTITY.md).
+
 ## Runtime roles
 
 `lustre-agent` is the persistent local worker. It owns provider resolution, downloads, retries, SQLite state, filesystem access, WebDAV transfers, Keychain secrets, progress, and the authenticated loopback API. The web UI and `lustre` CLI are clients of that service; neither owns transfer execution.

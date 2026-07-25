@@ -1,6 +1,7 @@
 import Foundation
 import Darwin
 import LustreCore
+import LustreAgent
 
 @main
 struct LustreCLI {
@@ -10,6 +11,10 @@ struct LustreCLI {
             guard let command = arguments.first else { throw CLIError.usage }
             if command == "token" {
                 print(try KeychainTokenStore.token())
+                return
+            }
+            if command == "cloud" {
+                try await cloud(arguments: Array(arguments.dropFirst()))
                 return
             }
             let client = try AgentClient()
@@ -69,6 +74,28 @@ struct LustreCLI {
         return arguments[index + 1]
     }
 
+    private static func cloud(arguments: [String]) async throws {
+        guard let command = arguments.first else { throw CLIError.usage }
+        switch command {
+        case "status":
+            if let enrollment = try DeviceEnrollmentStore.load() { try printJSON(enrollment) } else { print("Disconnected from Lustre Cloud.") }
+        case "disconnect":
+            try DeviceEnrollmentStore.disconnect()
+            print("Disconnected locally. This Mac remains enrolled until you revoke it in Lustre Cloud.")
+        case "pair":
+            guard arguments.count >= 2, let name = option("--name", in: arguments), !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw CLIError.usage }
+            guard let rawOrigin = ProcessInfo.processInfo.environment[CloudDeviceProtocol.audienceEnvironment], let origin = URL(string: rawOrigin) else { throw CloudDeviceError.invalidOrigin }
+            let identity = DeviceIdentity(); let client = try CloudEnrollmentClient(origin: origin)
+            let challenge = try await client.beginEnrollment(code: arguments[1], publicKey: try identity.publicKey(), name: name, version: "0.1.0")
+            let envelope = try CloudDeviceProtocol.envelope(purpose: "enrollment", audience: rawOrigin, subjectID: challenge.enrollmentID.uuidString.lowercased(), nonce: challenge.nonce, thumbprint: try identity.thumbprint(), expiresAt: challenge.expiresAt)
+            let completed = try await client.completeEnrollment(id: challenge.enrollmentID, signature: try identity.sign(envelope))
+            let enrollment = CloudEnrollmentMetadata(cloudOrigin: completed.cloudOrigin, deviceID: completed.deviceID, deviceName: name.trimmingCharacters(in: .whitespacesAndNewlines), enrolledAt: completed.enrolledAt)
+            try DeviceEnrollmentStore.save(enrollment)
+            print("Paired \(enrollment.deviceName) with Lustre Cloud as \(enrollment.deviceID.uuidString).")
+        default: throw CLIError.usage
+        }
+    }
+
     private static func printJSON<T: Encodable>(_ value: T) throws {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -85,6 +112,9 @@ private enum CLIError: Error, LocalizedError {
           lustre token
           lustre status
           lustre auth status|login|logout
+          lustre cloud pair <code> --name <name>
+          lustre cloud status
+          lustre cloud disconnect
           lustre extract <url>
           lustre feed sites
           lustre feed list --site allpornstream|hqporner|onlyfan420|pornhub [--query <text>] [--page <number>]

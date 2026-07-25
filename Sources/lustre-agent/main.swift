@@ -16,6 +16,8 @@ struct LustreAgentMain {
             let token = try KeychainTokenStore.token()
             let service = try AgentService()
             let server = try LoopbackServer(service: service, token: token)
+            let cloudPresence = CloudPresenceConnection()
+            await cloudPresence.startIfEnrolled()
             let port = try await server.start()
             guard port != 0 else { throw AgentLaunchError.noPort }
             let endpoint = try JSONEncoder().encode(AgentEndpoint(port: port))

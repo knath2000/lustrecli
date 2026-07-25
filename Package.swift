@@ -17,7 +17,7 @@ let package = Package(
         .target(name: "LustreAgent", dependencies: ["LustreCore"]),
         .executableTarget(name: "lustre-agent", dependencies: ["LustreAgent"]),
         .executableTarget(name: "lustre-auth-helper", dependencies: ["LustreAgent"]),
-        .executableTarget(name: "lustre", dependencies: ["LustreCore"]),
+        .executableTarget(name: "lustre", dependencies: ["LustreCore", "LustreAgent"]),
         .testTarget(name: "LustreCoreTests", dependencies: ["LustreCore", "LustreAgent"])
     ]
 )
