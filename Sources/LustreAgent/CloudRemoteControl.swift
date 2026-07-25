@@ -9,6 +9,8 @@ struct CloudRemoteCommand: Decodable {
     struct Payload: Decodable {
         let url: URL?
         let preferredQualityLabel: String?
+        let jobID: UUID?
+        let action: JobAction?
     }
 }
 
@@ -76,6 +78,15 @@ actor CloudRemoteControl {
             do {
                 let job = try await service.createJob(CreateJobRequest(sourcePageURL: url, preferredQualityLabel: command.payload.preferredQualityLabel))
                 acknowledgement = CloudRemoteCommandAck(id: command.id, status: "completed", jobID: job.id)
+            } catch {
+                acknowledgement = CloudRemoteCommandAck(id: command.id, status: "failed", jobID: nil)
+            }
+        case "job_action":
+            guard let jobID = command.payload.jobID, let action = command.payload.action else { acknowledgement = CloudRemoteCommandAck(id: command.id, status: "failed", jobID: nil); break }
+            guard action == .pause || action == .resume || action == .cancel || action == .retry else { acknowledgement = CloudRemoteCommandAck(id: command.id, status: "failed", jobID: nil); break }
+            do {
+                _ = try await service.apply(action, to: jobID)
+                acknowledgement = CloudRemoteCommandAck(id: command.id, status: "completed", jobID: jobID)
             } catch {
                 acknowledgement = CloudRemoteCommandAck(id: command.id, status: "failed", jobID: nil)
             }

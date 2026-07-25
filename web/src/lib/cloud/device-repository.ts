@@ -116,9 +116,15 @@ export async function presenceForOwnedDevice(accountID: string, deviceID: string
   return row;
 }
 export async function queueURLCommand(accountID: string, deviceID: string, url: string, preferredQualityLabel?: string) {
+  return createCommand(accountID, deviceID, "queue_url", { url, preferredQualityLabel });
+}
+export async function jobActionCommand(accountID: string, deviceID: string, jobID: string, action: "pause" | "resume" | "cancel" | "retry") {
+  return createCommand(accountID, deviceID, "job_action", { jobID, action });
+}
+async function createCommand(accountID: string, deviceID: string, kind: string, payload: Record<string, string | undefined>) {
   const device = (await db.select({ id: lustreDevices.id }).from(lustreDevices).where(and(eq(lustreDevices.id, deviceID), eq(lustreDevices.accountID, accountID), isNull(lustreDevices.revokedAt))).limit(1))[0];
   if (!device) throw new DeviceContractError("device_not_found", "Device not found.");
-  return (await db.insert(lustreDeviceCommands).values({ accountID, deviceID, kind: "queue_url", payload: { url, preferredQualityLabel } }).returning())[0];
+  return (await db.insert(lustreDeviceCommands).values({ accountID, deviceID, kind, payload }).returning())[0];
 }
 export async function nextPendingCommand(deviceID: string) { return (await db.select().from(lustreDeviceCommands).where(and(eq(lustreDeviceCommands.deviceID, deviceID), eq(lustreDeviceCommands.status, "pending"))).orderBy(lustreDeviceCommands.createdAt).limit(1))[0] ?? null; }
 export async function acknowledgeCommands(deviceID: string, acknowledgements: Array<{ id: string; status: "completed" | "failed"; jobID?: string }>) {
