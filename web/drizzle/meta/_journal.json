@@ -29,6 +29,13 @@
       "when": 1784970000000,
       "tag": "0003_lustre_remote_commands",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1785024000000,
+      "tag": "0004_lustre_cloud_job_display",
+      "breakpoints": true
     }
   ]
 }
