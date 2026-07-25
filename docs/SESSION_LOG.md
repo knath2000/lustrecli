@@ -1,5 +1,13 @@
 # Session Log
 
+## 2026-07-24 — MixDrop static resolution and network-route diagnosis
+
+- Added deterministic P.A.C.K.E.R decoding to the Foundation-only static MixDrop resolver, with a realistic packed-player fixture and strict `mxcontent.net` media validation.
+- Preserved provider-attempt diagnostics and separated no-resolved-provider from an explicitly unavailable requested quality.
+- Verified the exact MixDrop embed resolves through `Static MixDrop resolver` when the provider is reachable: the mirror page is used as Referer and no browser fallback is involved.
+- Diagnosed the home-route failure as transport-level TLS negotiation before HTTP. VPN routing made the same provider page reachable; TLS verification was not weakened. Network diagnostics now distinguish DNS, TLS, timeout-before-HTTP, HTTP, and no-media outcomes.
+- Removed the unsupported MixDrop WebKit/browser fallback experiments. Static resolution remains original-first, then the known mirror only after original failure or unusable HTML.
+
 ## 2026-07-20 — Agent bootstrap, aggregate resolution, and local downloads
 
 - Created the macOS Swift Package with `LustreCore`, `LustreAgent`, `lustre-agent`, and `lustre` products.

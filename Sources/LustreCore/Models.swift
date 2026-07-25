@@ -72,19 +72,22 @@ public struct ProviderAttempt: Codable, Equatable, Sendable {
     public let outcome: ProviderAttemptOutcome
     public let resolutionMethod: String?
     public let reason: String?
+    public let diagnostics: [String]?
 
     public init(
         providerName: String,
         sourceURL: URL?,
         outcome: ProviderAttemptOutcome,
         resolutionMethod: String? = nil,
-        reason: String? = nil
+        reason: String? = nil,
+        diagnostics: [String]? = nil
     ) {
         self.providerName = providerName
         self.sourceURL = sourceURL
         self.outcome = outcome
         self.resolutionMethod = resolutionMethod
         self.reason = reason
+        self.diagnostics = diagnostics
     }
 }
 

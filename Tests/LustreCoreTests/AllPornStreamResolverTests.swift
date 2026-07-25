@@ -276,6 +276,7 @@ final class AllPornStreamResolverTests: XCTestCase {
         XCTAssertEqual(result.attempts.first?.outcome, .timedOut)
         XCTAssertTrue(result.resolution.trace.contains { $0.contains("timed out") })
     }
+
 }
 
 private actor ConcurrentFetchTracker {

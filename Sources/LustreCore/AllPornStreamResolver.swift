@@ -181,7 +181,7 @@ public struct AllPornStreamResolver: Sendable {
         guard let sourceURL = candidate.sourceURL, let provider = candidate.trustedProvider else {
             return CandidateResult(index: index, attempt: preflightAttempt(for: candidate), qualities: [])
         }
-        let outcome = await resolveWithTimeout(sourceURL: sourceURL, provider: provider)
+        let outcome = await resolveWithStages(sourceURL: sourceURL, provider: provider)
         switch outcome {
         case .resolved(let resolution):
             let method = resolution.qualities.first?.resolutionMethod
@@ -202,7 +202,7 @@ public struct AllPornStreamResolver: Sendable {
             }
             return CandidateResult(
                 index: index,
-                attempt: ProviderAttempt(providerName: candidate.providerName, sourceURL: sourceURL, outcome: .resolved, resolutionMethod: method),
+                attempt: ProviderAttempt(providerName: candidate.providerName, sourceURL: sourceURL, outcome: .resolved, resolutionMethod: method, diagnostics: resolution.trace),
                 qualities: qualities
             )
         case .verificationRequired:
@@ -214,40 +214,62 @@ public struct AllPornStreamResolver: Sendable {
         case .timedOut:
             return CandidateResult(
                 index: index,
-                attempt: ProviderAttempt(providerName: candidate.providerName, sourceURL: sourceURL, outcome: .timedOut, reason: "Static provider resolution timed out after 15 seconds."),
+                attempt: ProviderAttempt(providerName: candidate.providerName, sourceURL: sourceURL, outcome: .timedOut, reason: "Static provider resolution timed out after \(providerTimeout.components.seconds) seconds."),
                 qualities: []
             )
         case .failed(let reason):
             return CandidateResult(
                 index: index,
-                attempt: ProviderAttempt(providerName: candidate.providerName, sourceURL: sourceURL, outcome: .failed, reason: reason),
+                attempt: ProviderAttempt(providerName: candidate.providerName, sourceURL: sourceURL, outcome: .failed, reason: reason, diagnostics: [reason]),
                 qualities: []
             )
         }
     }
 
-    private func resolveWithTimeout(sourceURL: URL, provider: ProviderKind) async -> TimedResolution {
-        await withTaskGroup(of: TimedResolution.self) { group in
-            group.addTask {
-                do {
-                    return .resolved(try await providerResolver.resolve(url: sourceURL, trustedProvider: provider))
-                } catch ProviderResolverError.cloudflareChallenge {
-                    return .verificationRequired
-                } catch {
-                    return .failed(error.localizedDescription)
-                }
+    private func resolveWithStages(sourceURL: URL, provider: ProviderKind) async -> TimedResolution {
+        let staticResult = await race(timeout: providerTimeout) {
+            do {
+                return .resolved(try await providerResolver.resolve(url: sourceURL, trustedProvider: provider))
+            } catch let error as ProviderResolverError {
+                if case .cloudflareChallenge = error { return .verificationRequired }
+                return .failed(error.localizedDescription)
+            } catch {
+                return .failed(error.localizedDescription)
             }
-            group.addTask {
-                do {
-                    try await Task.sleep(for: providerTimeout)
-                    return .timedOut
-                } catch {
-                    return .failed(error.localizedDescription)
-                }
-            }
-            let result = await group.next() ?? .failed("Provider resolution did not return a result.")
-            group.cancelAll()
-            return result
+        }
+        return staticResult
+    }
+
+    private func race(timeout: Duration, operation: @escaping @Sendable () async -> TimedResolution) async -> TimedResolution {
+        let result = FirstStageResult<TimedResolution>()
+        let operationTask = Task { await result.finish(await operation()) }
+        let timeoutTask = Task {
+            try? await Task.sleep(for: timeout)
+            await result.finish(.timedOut)
+        }
+        let value = await result.value()
+        operationTask.cancel()
+        timeoutTask.cancel()
+        return value
+    }
+}
+
+private actor FirstStageResult<Value: Sendable> {
+    private var result: Value?
+    private var continuation: CheckedContinuation<Value, Never>?
+
+    func finish(_ value: Value) {
+        guard result == nil else { return }
+        result = value
+        continuation?.resume(returning: value)
+        continuation = nil
+    }
+
+    func value() async -> Value {
+        if let result { return result }
+        return await withCheckedContinuation { continuation in
+            if let result { continuation.resume(returning: result) }
+            else { self.continuation = continuation }
         }
     }
 }

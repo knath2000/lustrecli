@@ -219,17 +219,35 @@ public struct StaticProviderResolver: Sendable {
     }
 
     private func resolveMixDrop(url: URL) async throws -> ProviderResolution {
-        let initialPage = try await fetchProviderPage(url, headers: htmlHeaders(referer: nil))
-        if let resolution = mixDropResolution(from: initialPage, requestedURL: url, usedFallbackMirror: false) {
-            return resolution
-        }
-        if let mirrorURL = mixDropFallbackMirrorURL(for: initialPage.finalURL) {
-            let mirrorPage = try await fetchProviderPage(mirrorURL, headers: htmlHeaders(referer: nil))
-            if let resolution = mixDropResolution(from: mirrorPage, requestedURL: url, usedFallbackMirror: true) {
-                return resolution
+        let mirrorURL = mixDropFallbackMirrorURL(for: url)
+        var pages = [(url, false)]
+        if let mirrorURL { pages.append((mirrorURL, true)) }
+        var diagnostics: [String] = []
+        var errors: [ProviderResolverError] = []
+        for (pageURL, usedFallbackMirror) in pages {
+            do {
+                let page = try await fetchProviderPage(pageURL, headers: htmlHeaders(referer: nil))
+                if let resolution = mixDropResolution(from: page, requestedURL: url, usedFallbackMirror: usedFallbackMirror) {
+                    return resolution
+                }
+                diagnostics.append("Static \(page.finalURL.host ?? pageURL.host ?? "MixDrop") page exposed no usable media URL.")
+            } catch let error as ProviderResolverError {
+                errors.append(error)
+                diagnostics.append("Static \(pageURL.host ?? "MixDrop") request failed: \(error.localizedDescription)")
+            } catch {
+                diagnostics.append("Static \(pageURL.host ?? "MixDrop") request failed: \(error.localizedDescription)")
             }
         }
-        throw ProviderResolverError.noMediaFound
+        if errors.contains(where: { if case .invalidURL = $0 { true } else { false } }) {
+            throw ProviderResolverError.invalidURL
+        }
+        if errors.contains(where: { if case .cloudflareChallenge = $0 { true } else { false } }) {
+            throw ProviderResolverError.cloudflareChallenge
+        }
+        if errors.isEmpty || errors.contains(where: { if case .noMediaFound = $0 { true } else { false } }) {
+            throw ProviderResolverError.noMediaFound
+        }
+        throw ProviderResolverError.network(diagnostics.joined(separator: " "))
     }
 
     private func mixDropResolution(from page: HTTPPage, requestedURL: URL, usedFallbackMirror: Bool) -> ProviderResolution? {
@@ -344,7 +362,7 @@ public struct StaticProviderResolver: Sendable {
         } catch let error as ProviderResolverError {
             throw error
         } catch {
-            throw ProviderResolverError.network(error.localizedDescription)
+            throw ProviderResolverError.network(transportDiagnostic(error))
         }
     }
 
@@ -501,6 +519,21 @@ private func isCloudflareChallenge(_ page: HTTPPage) -> Bool {
     page.statusCode == 403 && (page.body.localizedCaseInsensitiveContains("cf-mitigated") || page.body.localizedCaseInsensitiveContains("just a moment"))
 }
 
+private func transportDiagnostic(_ error: Error) -> String {
+    let error = error as NSError
+    guard error.domain == NSURLErrorDomain else { return error.localizedDescription }
+    switch error.code {
+    case NSURLErrorCannotFindHost, NSURLErrorDNSLookupFailed:
+        return "DNS lookup failed before the provider could be reached."
+    case NSURLErrorSecureConnectionFailed, NSURLErrorServerCertificateUntrusted, NSURLErrorServerCertificateHasBadDate, NSURLErrorServerCertificateHasUnknownRoot, NSURLErrorServerCertificateNotYetValid:
+        return "TLS negotiation failed before the provider returned an HTTP response. The current network route may be incompatible with this provider."
+    case NSURLErrorTimedOut:
+        return "The provider request timed out before an HTTP response was received."
+    default:
+        return error.localizedDescription
+    }
+}
+
 private func normalize(_ value: String) -> String {
     value
         .replacingOccurrences(of: "\\/", with: "/")
@@ -592,17 +625,23 @@ private func doodMediaURL(in html: String) -> URL? {
     return (url.host?.contains("dood.video") == true && names.contains("token") && names.contains("expiry")) ? url : nil
 }
 
-private func mixDropMediaURL(in html: String, relativeTo pageURL: URL) -> URL? {
+private func mixDropMediaURL(in html: String, relativeTo pageURL: URL, unpackPacked: Bool = true) -> URL? {
     let patterns = [
         #"MDCore\.wurl\s*=\s*['\"]([^'\"]+)['\"]"#,
         #"\bwurl\s*[:=]\s*['\"]([^'\"]+)['\"]"#,
         #"sources\s*:\s*\[\s*\{\s*file\s*:\s*['\"]([^'\"]+)['\"]"#,
         #"data-src\s*=\s*['\"]([^'\"]+)['\"]"#
     ]
-    guard let raw = firstMatch(patterns, in: html) else { return nil }
-    let normalized = raw.replacingOccurrences(of: "\\/", with: "/")
-    guard let url = URL(string: normalized, relativeTo: pageURL)?.absoluteURL else { return nil }
-    return isMixDropMediaURL(url) ? url : nil
+    if let raw = firstMatch(patterns, in: html),
+       let url = URL(string: raw.replacingOccurrences(of: "\\/", with: "/"), relativeTo: pageURL)?.absoluteURL,
+       isMixDropMediaURL(url) {
+        return url
+    }
+    guard unpackPacked else { return nil }
+    for decoded in PackedJavaScriptDecoder.decodeAll(in: html) {
+        if let url = mixDropMediaURL(in: decoded, relativeTo: pageURL, unpackPacked: false) { return url }
+    }
+    return nil
 }
 
 private func isMixDropMediaURL(_ url: URL) -> Bool {

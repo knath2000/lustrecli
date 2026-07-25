@@ -171,6 +171,27 @@ final class StaticProviderResolverTests: XCTestCase {
         XCTAssertEqual(resolution.qualities.first?.headers["Referer"], "https://mixdrop.co/e/xyz")
     }
 
+    func testResolvesMixDropMediaFromPackedJavaScript() async throws {
+        let resolver = StaticProviderResolver(
+            fetch: { url, _ in
+                HTTPPage(
+                    body: #"""
+                    <script>eval(function(p,a,c,k,e,d){e=function(c){return c};if(!''.replace(/^/,String)){while(c--){d[c]=k[c]||c}k=[function(e){return d[e]}];e=function(){return'\\w+'};c=1};while(c--){if(k[c]){p=p.replace(new RegExp('\\b'+e(c)+'\\b','g'),k[c])}}return p}('0.1="//2.3.4/5/6.7?8=9&10=11&12=13";0.14="badfile.mp4";',10,15,'MDCore|wurl|q2dgt5pce|mxcontent|net|v2|039jlq83he41d6|mp4|s|sig|e|9999999999|_t|8888888888|vfile'.split('|'),0,{}))</script>
+                    """#,
+                    finalURL: url,
+                    statusCode: 200
+                )
+            },
+            randomSuffix: { "unused" },
+            nowMilliseconds: { "0" }
+        )
+
+        let resolution = try await resolver.resolve(url: URL(string: "https://mixdrop.co/e/packed")!)
+
+        XCTAssertEqual(resolution.qualities.first?.url.absoluteString, "https://q2dgt5pce.mxcontent.net/v2/039jlq83he41d6.mp4?s=sig&e=9999999999&_t=8888888888")
+        XCTAssertEqual(resolution.qualities.first?.resolutionMethod, "Static MixDrop resolver")
+    }
+
     func testFallsBackToCurrentMixDropMirrorAndAcceptsExtensionlessMediaURL() async throws {
         let requestedURL = URL(string: "https://mxdrop.to/e/abc123")!
         let mirrorURL = URL(string: "https://miiiixdrop.net/f/abc123")!

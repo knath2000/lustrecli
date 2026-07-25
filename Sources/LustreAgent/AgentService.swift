@@ -235,7 +235,7 @@ public actor AgentService {
             } else if aggregate.attempts.contains(where: { $0.outcome == .verificationRequired }) {
                 state = "verificationRequired"
             } else {
-                state = "staticResolutionFailed"
+                state = "noProviderResolved"
             }
             return ExtractionResult(
                 sourcePageURL: url,
@@ -337,8 +337,13 @@ public actor AgentService {
                 try await jobs.update(active)
                 return
             }
-            guard let resolution = extraction.resolution,
-                  let quality = selectedQuality(in: resolution, preferredLabel: active.preferredQualityLabel) else {
+            guard let resolution = extraction.resolution else {
+                throw AgentServiceError.noProviderResolved
+            }
+            guard !resolution.qualities.isEmpty else {
+                throw AgentServiceError.noProviderResolved
+            }
+            guard let quality = selectedQuality(in: resolution, preferredLabel: active.preferredQualityLabel) else {
                 throw AgentServiceError.noSelectedQuality
             }
 
@@ -895,6 +900,7 @@ enum AgentServiceError: Error, LocalizedError {
     case unsupportedDestination
     case invalidDestination
     case folderSelectionCancelled
+    case noProviderResolved
     case noSelectedQuality
 
     var errorDescription: String? {
@@ -903,6 +909,7 @@ enum AgentServiceError: Error, LocalizedError {
         case .unsupportedDestination: "Download destinations must be absolute local folder paths."
         case .invalidDestination: "The selected download destination is not an accessible folder."
         case .folderSelectionCancelled: "Folder selection was cancelled."
+        case .noProviderResolved: "No provider resolved usable media from the source page."
         case .noSelectedQuality: "The requested quality was not available after resolving the source page."
         }
     }

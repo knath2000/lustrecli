@@ -18,6 +18,7 @@ This document records the accepted behavior in the current `main` working tree, 
 ### Providers and feeds
 
 - Static/direct resolution supports direct media, AllPornStream, Playmogo/Dood, MixDrop, StreamTape, mydaddy.cc, LuluStream/Vidara HLS, HQPorner, OnlyFan420, and PornHub through agent-owned yt-dlp.
+- MixDrop remains Foundation-only: original host first, then the known mirror only after transport failure or unusable HTML. The resolver accepts only strict `mxcontent.net` media paths and forwards the resolved page as Referer with the Chrome user agent. The same source has been verified to resolve statically on a compatible VPN route; a home-route TLS failure occurs before HTTP and is reported as an actionable transport failure without weakening TLS.
 - Feed sources include AllPornStream, HQPorner, OnlyFan420, PornHub, and—while authenticated—PornHub Subscriptions, Liked, and Favorites.
 - The regular PornHub source is session-aware: signed-in requests send the agent-only sanitized PornHub cookie header and receive the account homepage; signed-out, signing-in, and expired states use the anonymous homepage. Session-storage failure returns a static error rather than silently downgrading an asserted signed-in request.
 - The separate Subscriptions, Liked, and Favorites sources always require a valid session and never fall back to anonymous pages.

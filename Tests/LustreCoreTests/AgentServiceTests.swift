@@ -149,10 +149,37 @@ final class AgentServiceTests: XCTestCase {
 
         let result = try await service.extract(url: postURL)
 
-        XCTAssertEqual(result.resolutionState, "staticResolutionFailed")
+        XCTAssertEqual(result.resolutionState, "noProviderResolved")
         XCTAssertEqual(result.resolution?.title, "Unsupported post")
         XCTAssertEqual(result.providerAttempts.first?.outcome, .failed)
         XCTAssertTrue(result.trace.contains { $0.contains("No static resolver") })
+    }
+
+    func testQueuedJobReportsNoProviderResolvedSeparatelyFromUnavailableQuality() async throws {
+        let noProviderURL = URL(string: "https://allpornstream.com/post/no-provider")!
+        let qualityURL = URL(string: "https://mixdrop.co/e/quality")!
+        let resolver = StaticProviderResolver(
+            fetch: { url, _ in
+                if url == noProviderURL {
+                    return HTTPPage(body: #"{"video_urls":[{"hosting_provider":"VIDARA","iframe":"https://vidara.example/e/no-provider"}]}"#, finalURL: url, statusCode: 200)
+                }
+                return HTTPPage(body: #"<script>MDCore.wurl = "https://edge.mxcontent.net/v2/quality.mp4"</script>"#, finalURL: url, statusCode: 200)
+            },
+            randomSuffix: { "unused" },
+            nowMilliseconds: { "0" }
+        )
+        let database = FileManager.default.temporaryDirectory.appending(path: "lustre-agent-resolution-errors-\(UUID().uuidString).sqlite3")
+        defer { try? FileManager.default.removeItem(at: database) }
+        let service = try AgentService(databaseURL: database, resolver: resolver, automaticallyStartsDownloads: false)
+
+        let noProviderJob = try await service.createJob(CreateJobRequest(sourcePageURL: noProviderURL))
+        let unavailableQualityJob = try await service.createJob(CreateJobRequest(sourcePageURL: qualityURL, preferredQualityLabel: "1080p"))
+        await service.processQueuedJob(id: noProviderJob.id)
+        await service.processQueuedJob(id: unavailableQualityJob.id)
+        let jobs = try await service.allJobs()
+
+        XCTAssertEqual(jobs.first(where: { $0.id == noProviderJob.id })?.message, "Download failed: No provider resolved usable media from the source page.")
+        XCTAssertEqual(jobs.first(where: { $0.id == unavailableQualityJob.id })?.message, "Download failed: The requested quality was not available after resolving the source page.")
     }
 
     func testProcessesQueuedJobByReresolvingAndPassingQualityHeadersToDownloader() async throws {
