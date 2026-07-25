@@ -27,8 +27,12 @@ public actor CloudPresenceConnection {
                 let completed = try await client.completeDeviceSession(deviceID: enrollment.deviceID, challengeID: challenge.challengeID, signature: try identity.sign(envelope))
                 try await connect(origin: enrollment.cloudOrigin, token: completed.accessToken)
                 delay = 1
-            } catch CloudDeviceError.deviceRevoked { return }
+            } catch CloudDeviceError.deviceRevoked {
+                fputs("Lustre Cloud presence stopped: device revoked.\n", stderr)
+                return
+            }
             catch {
+                fputs("Lustre Cloud presence reconnecting: \(error.localizedDescription)\n", stderr)
                 let nanoseconds = UInt64((delay + Double.random(in: 0...min(delay * 0.2, 3))) * 1_000_000_000)
                 try? await Task.sleep(nanoseconds: nanoseconds)
                 delay = min(delay * 2, 60)
@@ -43,6 +47,7 @@ public actor CloudPresenceConnection {
         components.query = nil
         guard let url = components.url else { throw CloudDeviceError.invalidOrigin }
         let task = session.webSocketTask(with: url, protocols: ["lustre-v1", "lustre.\(token)"])
+        fputs("Lustre Cloud presence connecting.\n", stderr)
         socket = task; task.resume()
         var sequence = 1
         while !Task.isCancelled {
