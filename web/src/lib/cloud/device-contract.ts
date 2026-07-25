@@ -4,7 +4,7 @@ export const MAX_PUBLIC_KEY_BYTES = 512;
 export const MAX_SIGNATURE_BYTES = 160;
 export const HEARTBEAT_INTERVAL_SECONDS = 30;
 export const PRESENCE_FRESHNESS_SECONDS = 75;
-export const MAX_HEARTBEAT_FRAME_BYTES = 512;
+export const MAX_HEARTBEAT_FRAME_BYTES = 16_384;
 
 export type DeviceErrorCode =
   | "unauthenticated" | "email_unverified" | "invalid_request" | "invalid_pairing_code"
@@ -54,10 +54,16 @@ export function deviceError(error: unknown): { error: { code: DeviceErrorCode; m
   return { error: { code: "internal_error", message: "Unable to process the device request." } };
 }
 
-export type HeartbeatFrame = { version: 1; type: "heartbeat"; sequence: number; sentAt: string; agentVersion: string };
+export type RemoteCommandAck = { id: string; status: "completed" | "failed"; jobID?: string };
+export type RemoteJobStatus = { id: string; status: string; progress?: number; downloadedBytes?: number; totalBytes?: number; phase?: string; attempts: number };
+export type HeartbeatFrame = { version: 1; type: "heartbeat"; sequence: number; sentAt: string; agentVersion: string; commandAcks: RemoteCommandAck[]; jobs: RemoteJobStatus[] };
 export function parseHeartbeatFrame(value: unknown): HeartbeatFrame {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new DeviceContractError("invalid_request", "Invalid heartbeat.");
   const frame = value as Record<string, unknown>;
   if (frame.version !== DEVICE_PROTOCOL_VERSION || frame.type !== "heartbeat" || !Number.isSafeInteger(frame.sequence) || (frame.sequence as number) < 1 || typeof frame.sentAt !== "string" || Number.isNaN(Date.parse(frame.sentAt)) || typeof frame.agentVersion !== "string" || frame.agentVersion.length < 1 || frame.agentVersion.length > 80) throw new DeviceContractError("invalid_request", "Invalid heartbeat.");
-  return frame as HeartbeatFrame;
+  const commandAcks = frame.commandAcks ?? []; const jobs = frame.jobs ?? [];
+  if (!Array.isArray(commandAcks) || commandAcks.length > 8 || !Array.isArray(jobs) || jobs.length > 50) throw new DeviceContractError("invalid_request", "Invalid heartbeat.");
+  for (const ack of commandAcks) if (!ack || typeof ack !== "object" || typeof (ack as Record<string, unknown>).id !== "string" || !["completed", "failed"].includes((ack as Record<string, unknown>).status as string)) throw new DeviceContractError("invalid_request", "Invalid heartbeat.");
+  for (const job of jobs) if (!job || typeof job !== "object" || typeof (job as Record<string, unknown>).id !== "string" || typeof (job as Record<string, unknown>).status !== "string" || !Number.isSafeInteger((job as Record<string, unknown>).attempts)) throw new DeviceContractError("invalid_request", "Invalid heartbeat.");
+  return { ...(frame as Omit<HeartbeatFrame, "commandAcks" | "jobs">), commandAcks: commandAcks as RemoteCommandAck[], jobs: jobs as RemoteJobStatus[] };
 }

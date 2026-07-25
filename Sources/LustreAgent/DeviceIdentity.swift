@@ -33,11 +33,13 @@ public final class DeviceIdentity: @unchecked Sendable {
         return signature
     }
 
-    func deleteForTesting() throws {
+    public func reset() throws {
         let query: [String: Any] = [kSecClass as String: kSecClassKey, kSecAttrApplicationTag as String: tag, kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom]
         let status = SecItemDelete(query as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else { throw CloudDeviceError.keychainFailure }
     }
+
+    func deleteForTesting() throws { try reset() }
 }
 
 private extension Data {

@@ -9,11 +9,12 @@ public actor CloudPresenceConnection {
     public static let heartbeatInterval: TimeInterval = 30
     private let identity: DeviceIdentity
     private let session: URLSession
+    private let remoteControl: CloudRemoteControl
     private var runner: Task<Void, Never>?
     private var socket: URLSessionWebSocketTask?
     private var reconnectState = CloudPresenceReconnectStateMachine()
 
-    public init(identity: DeviceIdentity = DeviceIdentity(), session: URLSession = .shared) { self.identity = identity; self.session = session }
+    public init(service: AgentService, identity: DeviceIdentity = DeviceIdentity(), session: URLSession = .shared) { self.identity = identity; self.session = session; remoteControl = CloudRemoteControl(service: service) }
 
     public func startIfEnrolled() {
         guard runner == nil, let enrollment = try? DeviceEnrollmentStore.load() else { return }
@@ -67,8 +68,9 @@ public actor CloudPresenceConnection {
                 task.cancel(with: .goingAway, reason: nil)
                 return
             }
-            let frame: [String: Any] = ["version": 1, "type": "heartbeat", "sequence": sequence, "sentAt": ISO8601DateFormatter().string(from: .now), "agentVersion": "0.1.0"]
-            let data = try JSONSerialization.data(withJSONObject: frame)
+            let payload = await remoteControl.heartbeatPayload()
+            let frame = CloudHeartbeat(sequence: sequence, sentAt: ISO8601DateFormatter().string(from: .now), agentVersion: "0.1.0", commandAcks: payload.acks, jobs: payload.jobs)
+            let data = try JSONEncoder.cloud.encode(frame)
             try await task.send(.data(data))
             let response = try await task.receive()
             let responseData: Data
@@ -80,6 +82,8 @@ public actor CloudPresenceConnection {
                 throw CloudPresenceConnectionError.serverRequestedReconnect
             }
             guard object["type"] as? String == "heartbeat-accepted", object["sequence"] as? Int == sequence else { throw CloudDeviceError.invalidResponse }
+            if let acknowledgements = try? JSONSerialization.data(withJSONObject: object["acknowledgedCommandAcks"] ?? []), let decoded = try? JSONDecoder.cloud.decode([CloudRemoteCommandAck].self, from: acknowledgements) { await remoteControl.acknowledgedByCloud(decoded) }
+            if let commandData = try? JSONSerialization.data(withJSONObject: object["command"] ?? NSNull()), let command = try? JSONDecoder.cloud.decode(CloudRemoteCommand?.self, from: commandData) { await remoteControl.handle(command) }
             sequence += 1
             try await Task.sleep(nanoseconds: UInt64(Self.heartbeatInterval * 1_000_000_000))
         }

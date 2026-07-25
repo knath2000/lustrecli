@@ -82,6 +82,10 @@ struct LustreCLI {
         case "disconnect":
             try DeviceEnrollmentStore.disconnect()
             print("Disconnected locally. This Mac remains enrolled until you revoke it in Lustre Cloud.")
+        case "reset-identity":
+            try DeviceEnrollmentStore.disconnect()
+            try DeviceIdentity().reset()
+            print("Reset this Mac's local Lustre Cloud identity. Existing cloud revocations remain in effect.")
         case "pair":
             guard arguments.count >= 2, let name = option("--name", in: arguments), !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw CLIError.usage }
             guard let rawOrigin = ProcessInfo.processInfo.environment[CloudDeviceProtocol.audienceEnvironment], let origin = URL(string: rawOrigin) else { throw CloudDeviceError.invalidOrigin }
@@ -113,6 +117,7 @@ private enum CLIError: Error, LocalizedError {
           lustre status
           lustre auth status|login|logout
           lustre cloud pair <code> --name <name>
+          lustre cloud reset-identity
           lustre cloud status
           lustre cloud disconnect
           lustre extract <url>

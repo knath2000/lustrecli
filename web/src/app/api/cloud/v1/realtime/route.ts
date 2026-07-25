@@ -1,7 +1,7 @@
 import { experimental_upgradeWebSocket, type WebSocketData } from "@vercel/functions";
 import { randomUUID } from "node:crypto";
 import { MAX_HEARTBEAT_FRAME_BYTES, parseHeartbeatFrame } from "@/lib/cloud/device-contract";
-import { acceptHeartbeat, establishPresence } from "@/lib/cloud/device-repository";
+import { acceptHeartbeat, acknowledgeCommands, establishPresence, nextPendingCommand, syncJobStatus } from "@/lib/cloud/device-repository";
 import { verifyDeviceToken } from "@/lib/cloud/device-token";
 import { presenceConnectionLeaseSeconds } from "@/lib/cloud/presence-lease";
 
@@ -28,7 +28,9 @@ export async function GET(request: Request) {
           try {
             const frame = parseHeartbeatFrame(JSON.parse(text));
             await acceptHeartbeat(deviceID, connectionID, frame.sequence, frame.agentVersion);
-            socket.send(JSON.stringify({ version: 1, type: "heartbeat-accepted", sequence: frame.sequence, serverTime: new Date().toISOString() }));
+            await Promise.all([acknowledgeCommands(deviceID, frame.commandAcks), syncJobStatus(deviceID, frame.jobs)]);
+            const command = await nextPendingCommand(deviceID);
+            socket.send(JSON.stringify({ version: 1, type: "heartbeat-accepted", sequence: frame.sequence, serverTime: new Date().toISOString(), acknowledgedCommandAcks: frame.commandAcks, command: command ? { id: command.id, kind: command.kind, payload: command.payload } : null }));
           } catch { socket.send(errorFrame("heartbeat_rejected")); socket.close(4403, "heartbeat-rejected"); }
         })();
       });

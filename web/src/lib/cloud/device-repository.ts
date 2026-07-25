@@ -2,7 +2,7 @@ import "server-only";
 import { and, desc, eq, gt, isNull, sql } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { db } from "@/lib/db/client";
-import { lustreDeviceAuditEvents, lustreDeviceEnrollments, lustreDevicePresence, lustreDevices, lustreDeviceSessionChallenges, lustrePairingChallenges } from "@/lib/db/schema";
+import { lustreDeviceAuditEvents, lustreDeviceCommands, lustreDeviceEnrollments, lustreDeviceJobStatus, lustreDevicePresence, lustreDevices, lustreDeviceSessionChallenges, lustrePairingChallenges } from "@/lib/db/schema";
 import { DeviceContractError } from "./device-contract";
 import { randomNonce } from "./device-crypto";
 
@@ -114,4 +114,20 @@ export async function presenceForOwnedDevice(accountID: string, deviceID: string
   const row = (await db.select({ revokedAt: lustreDevices.revokedAt, lastHeartbeatAt: lustreDevicePresence.lastHeartbeatAt, agentVersion: lustreDevicePresence.agentVersion }).from(lustreDevices).leftJoin(lustreDevicePresence, eq(lustreDevicePresence.deviceID, lustreDevices.id)).where(and(eq(lustreDevices.accountID, accountID), eq(lustreDevices.id, deviceID))).limit(1))[0];
   if (!row) throw new DeviceContractError("device_not_found", "Device not found.");
   return row;
+}
+export async function queueURLCommand(accountID: string, deviceID: string, url: string, preferredQualityLabel?: string) {
+  const device = (await db.select({ id: lustreDevices.id }).from(lustreDevices).where(and(eq(lustreDevices.id, deviceID), eq(lustreDevices.accountID, accountID), isNull(lustreDevices.revokedAt))).limit(1))[0];
+  if (!device) throw new DeviceContractError("device_not_found", "Device not found.");
+  return (await db.insert(lustreDeviceCommands).values({ accountID, deviceID, kind: "queue_url", payload: { url, preferredQualityLabel } }).returning())[0];
+}
+export async function nextPendingCommand(deviceID: string) { return (await db.select().from(lustreDeviceCommands).where(and(eq(lustreDeviceCommands.deviceID, deviceID), eq(lustreDeviceCommands.status, "pending"))).orderBy(lustreDeviceCommands.createdAt).limit(1))[0] ?? null; }
+export async function acknowledgeCommands(deviceID: string, acknowledgements: Array<{ id: string; status: "completed" | "failed"; jobID?: string }>) {
+  for (const acknowledgement of acknowledgements) await db.update(lustreDeviceCommands).set({ status: acknowledgement.status, result: acknowledgement.jobID ? { jobID: acknowledgement.jobID } : {}, acknowledgedAt: now() }).where(and(eq(lustreDeviceCommands.id, acknowledgement.id), eq(lustreDeviceCommands.deviceID, deviceID), eq(lustreDeviceCommands.status, "pending")));
+}
+export async function syncJobStatus(deviceID: string, jobs: Array<{ id: string; status: string; progress?: number; downloadedBytes?: number; totalBytes?: number; phase?: string; attempts: number }>) {
+  for (const job of jobs) await db.insert(lustreDeviceJobStatus).values({ deviceID, jobID: job.id, status: job.status, progress: job.progress === undefined ? null : Math.round(job.progress * 10_000), downloadedBytes: job.downloadedBytes ?? null, totalBytes: job.totalBytes ?? null, phase: job.phase ?? null, attempts: job.attempts, updatedAt: now() }).onConflictDoUpdate({ target: [lustreDeviceJobStatus.deviceID, lustreDeviceJobStatus.jobID], set: { status: job.status, progress: job.progress === undefined ? null : Math.round(job.progress * 10_000), downloadedBytes: job.downloadedBytes ?? null, totalBytes: job.totalBytes ?? null, phase: job.phase ?? null, attempts: job.attempts, updatedAt: now() } });
+}
+export async function jobStatusForOwnedDevice(accountID: string, deviceID: string) {
+  const device = (await db.select({ id: lustreDevices.id }).from(lustreDevices).where(and(eq(lustreDevices.id, deviceID), eq(lustreDevices.accountID, accountID))).limit(1))[0]; if (!device) throw new DeviceContractError("device_not_found", "Device not found.");
+  return db.select().from(lustreDeviceJobStatus).where(eq(lustreDeviceJobStatus.deviceID, deviceID)).orderBy(desc(lustreDeviceJobStatus.updatedAt));
 }
