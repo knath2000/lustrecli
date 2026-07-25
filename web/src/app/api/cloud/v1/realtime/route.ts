@@ -18,7 +18,7 @@ export async function GET(request: Request) {
     const verified = await verifyDeviceToken(token); const deviceID = verified.payload.sub!; const connectionID = randomUUID();
     return experimental_upgradeWebSocket(async (socket) => {
       try { await establishPresence(deviceID, connectionID, "unknown"); }
-      catch { socket.close(4403, "revoked"); return; }
+      catch { console.error("cloud_realtime_failure", { stage: "presence_establishment" }); socket.close(4403, "revoked"); return; }
       const leaseTimer = setTimeout(() => socket.send(reconnectRequestedFrame()), presenceConnectionLeaseSeconds() * 1_000);
       socket.on("close", () => clearTimeout(leaseTimer));
       socket.on("message", (data: WebSocketData) => {
@@ -31,7 +31,7 @@ export async function GET(request: Request) {
             await Promise.all([acknowledgeCommands(deviceID, frame.commandAcks), syncJobStatus(deviceID, frame.jobs)]);
             const command = await nextPendingCommand(deviceID);
             socket.send(JSON.stringify({ version: 1, type: "heartbeat-accepted", sequence: frame.sequence, serverTime: new Date().toISOString(), acknowledgedCommandAcks: frame.commandAcks, command: command ? { id: command.id, kind: command.kind, payload: command.payload } : null }));
-          } catch { socket.send(errorFrame("heartbeat_rejected")); socket.close(4403, "heartbeat-rejected"); }
+          } catch { console.error("cloud_realtime_failure", { stage: "heartbeat" }); socket.send(errorFrame("heartbeat_rejected")); socket.close(4403, "heartbeat-rejected"); }
         })();
       });
     }, { maxPayload: MAX_HEARTBEAT_FRAME_BYTES });
