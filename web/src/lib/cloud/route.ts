@@ -4,7 +4,7 @@ export function jsonError(error: unknown) {
   if (error instanceof Error && error.message === "unauthenticated") return Response.json({ error: { code: "unauthenticated", message: "Sign in to manage Lustre devices." } }, { status: 401 });
   if (error instanceof Error && error.message === "email_unverified") return Response.json({ error: { code: "email_unverified", message: "Verify your email before creating a pairing code." } }, { status: 403 });
   const payload = deviceError(error); const code = payload.error.code;
-  const status = code === "rate_limited" ? 429 : code === "device_not_found" ? 404 : code === "internal_error" ? 500 : 400;
+  const status = code === "rate_limited" ? 429 : code === "device_not_found" ? 404 : code === "already_enrolled" ? 409 : code === "internal_error" ? 500 : 400;
   return Response.json(payload, { status });
 }
 export async function requestBody(request: Request): Promise<Record<string, unknown>> {

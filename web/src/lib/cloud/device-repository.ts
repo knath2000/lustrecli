@@ -29,6 +29,10 @@ export async function enrollmentForCompletion(id: string) {
   return enrollment;
 }
 
+export async function deviceForThumbprint(keyThumbprint: string) {
+  return (await db.select({ revokedAt: lustreDevices.revokedAt }).from(lustreDevices).where(eq(lustreDevices.keyThumbprint, keyThumbprint)).limit(1))[0];
+}
+
 export async function completeEnrollment(id: string) {
   const deviceID = randomUUID();
   const eventID = randomUUID();

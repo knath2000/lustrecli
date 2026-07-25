@@ -3,11 +3,13 @@ import { randomUUID } from "node:crypto";
 import { MAX_HEARTBEAT_FRAME_BYTES, parseHeartbeatFrame } from "@/lib/cloud/device-contract";
 import { acceptHeartbeat, establishPresence } from "@/lib/cloud/device-repository";
 import { verifyDeviceToken } from "@/lib/cloud/device-token";
+import { presenceConnectionLeaseSeconds } from "@/lib/cloud/presence-lease";
 
 export const runtime = "nodejs";
 const tokenPrefix = "lustre.";
 function tokenFrom(request: Request) { return request.headers.get("sec-websocket-protocol")?.split(",").map((value) => value.trim()).find((value) => value.startsWith(tokenPrefix))?.slice(tokenPrefix.length); }
 function errorFrame(code: string) { return JSON.stringify({ version: 1, type: "error", code }); }
+function reconnectRequestedFrame() { return JSON.stringify({ version: 1, type: "reconnect-requested", reason: "lease_expired" }); }
 
 export async function GET(request: Request) {
   const token = tokenFrom(request);
@@ -17,6 +19,8 @@ export async function GET(request: Request) {
     return experimental_upgradeWebSocket(async (socket) => {
       try { await establishPresence(deviceID, connectionID, "unknown"); }
       catch { socket.close(4403, "revoked"); return; }
+      const leaseTimer = setTimeout(() => socket.send(reconnectRequestedFrame()), presenceConnectionLeaseSeconds() * 1_000);
+      socket.on("close", () => clearTimeout(leaseTimer));
       socket.on("message", (data: WebSocketData) => {
         void (async () => {
           const text = typeof data === "string" ? data : Buffer.isBuffer(data) ? data.toString("utf8") : Array.isArray(data) ? Buffer.concat(data).toString("utf8") : Buffer.from(data as ArrayBuffer).toString("utf8");

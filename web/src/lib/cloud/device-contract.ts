@@ -9,7 +9,7 @@ export const MAX_HEARTBEAT_FRAME_BYTES = 512;
 export type DeviceErrorCode =
   | "unauthenticated" | "email_unverified" | "invalid_request" | "invalid_pairing_code"
   | "challenge_expired" | "challenge_consumed" | "device_revoked" | "device_not_found"
-  | "invalid_signature" | "unsupported_protocol" | "rate_limited" | "internal_error";
+  | "invalid_signature" | "unsupported_protocol" | "rate_limited" | "already_enrolled" | "internal_error";
 
 export class DeviceContractError extends Error {
   readonly code: DeviceErrorCode;

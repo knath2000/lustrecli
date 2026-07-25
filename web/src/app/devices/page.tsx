@@ -1,8 +1,3 @@
-import { SignInButton, UserButton } from "@clerk/nextjs";
-import { auth } from "@clerk/nextjs/server";
-import { DevicesView } from "./devices-view";
-
-export default async function DevicesPage() {
-  const { isAuthenticated } = await auth();
-  return <main className="cloud-devices"><header><div><p className="eyebrow">Lustre Cloud</p><h1>Your devices</h1><p>Pair, rename, or revoke the Macs trusted to authenticate with your account.</p></div>{isAuthenticated && <UserButton />}</header>{isAuthenticated ? <DevicesView /> : <section className="cloud-empty"><h2>Sign in to manage your devices</h2><SignInButton><button className="initiate-button">Sign in</button></SignInButton></section>}</main>;
+export default function DevicesPage() {
+  return <main className="cloud-devices"><header><div><p className="eyebrow">Lustre Cloud · Experimental</p><h1>Cloud devices are unavailable</h1><p>Local downloads, queues, WebDAV, feeds, and optional PornHub sign-in remain supported. Cloud pairing and presence are still under hardening and are not available for production use.</p></div></header><section className="cloud-empty"><h2>Experimental feature</h2><p>Do not pair a Mac or rely on cloud presence for remote control.</p></section></main>;
 }
