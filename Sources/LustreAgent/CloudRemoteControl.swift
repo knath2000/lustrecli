@@ -14,6 +14,11 @@ struct CloudRemoteCommand: Decodable {
         let siteID: String?
         let query: String?
         let page: Int?
+        let name: String?
+        let baseURL: URL?
+        let username: String?
+        let remotePath: String?
+        let allowInvalidCertificate: String?
     }
 }
 
@@ -108,6 +113,10 @@ actor CloudRemoteControl {
             guard let rawSite = command.payload.siteID, let site = FeedSiteID(rawValue: rawSite), let page = command.payload.page else { acknowledgement = CloudRemoteCommandAck(id: command.id, status: "failed", jobID: nil, result: nil); break }
             do { acknowledgement = CloudRemoteCommandAck(id: command.id, status: "completed", jobID: nil, result: CloudRemoteResult(kind: "feed_page", sites: nil, page: try await service.feedPage(site: site, query: command.payload.query, page: page))) }
             catch { acknowledgement = CloudRemoteCommandAck(id: command.id, status: "failed", jobID: nil, result: nil) }
+        case "webdav_add":
+            guard let name = command.payload.name, let baseURL = command.payload.baseURL, let username = command.payload.username, let remotePath = command.payload.remotePath, let password = try? Self.promptForWebDAVPassword(name: name) else { acknowledgement = CloudRemoteCommandAck(id: command.id, status: "failed", jobID: nil, result: nil); break }
+            do { _ = try await service.saveWebDAVDestination(WebDAVDestinationRequest(name: name, baseURL: baseURL, username: username, password: password, remotePath: remotePath, allowInvalidCertificate: command.payload.allowInvalidCertificate == "true")); acknowledgement = CloudRemoteCommandAck(id: command.id, status: "completed", jobID: nil, result: nil) }
+            catch { acknowledgement = CloudRemoteCommandAck(id: command.id, status: "failed", jobID: nil, result: nil) }
         default:
             acknowledgement = CloudRemoteCommandAck(id: command.id, status: "failed", jobID: nil, result: nil)
         }
@@ -121,5 +130,12 @@ actor CloudRemoteControl {
     func acknowledgedByCloud(_ acknowledgements: [CloudRemoteCommandAck]) {
         let ids = Set(acknowledgements.map(\.id))
         self.acknowledgements.removeAll { ids.contains($0.id) }
+    }
+
+    private static func promptForWebDAVPassword(name: String) throws -> String {
+        let process = Process(); process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript"); process.arguments = ["-e", "text returned of (display dialog \"Enter the WebDAV password for \\(name)\" default answer \"\" with hidden answer)"]
+        let output = Pipe(); process.standardOutput = output; try process.run(); process.waitUntilExit()
+        guard process.terminationStatus == 0, let password = String(data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines), !password.isEmpty else { throw RemoteDestinationError.missingCredentials }
+        return password
     }
 }

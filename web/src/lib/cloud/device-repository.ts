@@ -126,7 +126,7 @@ async function createCommand(accountID: string, deviceID: string, kind: string, 
   if (!device) throw new DeviceContractError("device_not_found", "Device not found.");
   return (await db.insert(lustreDeviceCommands).values({ accountID, deviceID, kind, payload }).returning())[0];
 }
-export async function feedCommand(accountID: string, deviceID: string, kind: "feed_sites" | "feed_page", payload: Record<string, string | undefined>) { return createCommand(accountID, deviceID, kind, payload); }
+export async function feedCommand(accountID: string, deviceID: string, kind: "feed_sites" | "feed_page" | "webdav_add", payload: Record<string, string | undefined>) { return createCommand(accountID, deviceID, kind, payload); }
 export async function nextPendingCommand(deviceID: string) { return (await db.select().from(lustreDeviceCommands).where(and(eq(lustreDeviceCommands.deviceID, deviceID), eq(lustreDeviceCommands.status, "pending"))).orderBy(lustreDeviceCommands.createdAt).limit(1))[0] ?? null; }
 export async function acknowledgeCommands(deviceID: string, acknowledgements: Array<{ id: string; status: "completed" | "failed"; jobID?: string; result?: Record<string, unknown> }>) {
   for (const acknowledgement of acknowledgements) await db.update(lustreDeviceCommands).set({ status: acknowledgement.status, result: acknowledgement.result ?? (acknowledgement.jobID ? { jobID: acknowledgement.jobID } : {}), acknowledgedAt: now() }).where(and(eq(lustreDeviceCommands.id, acknowledgement.id), eq(lustreDeviceCommands.deviceID, deviceID), eq(lustreDeviceCommands.status, "pending")));

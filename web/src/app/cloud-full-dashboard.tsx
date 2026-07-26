@@ -59,6 +59,7 @@ async function agentRequest<T>(deviceID: string, path: string, options: RequestI
   else { const match = path.match(/^\/v1\/jobs\/([^/]+)\/action$/); if (match && options.method === "POST") { target = `${base}/commands`; const input = JSON.parse(String(options.body ?? "{}")); body = { kind: "job_action", jobID: match[1], action: input.action }; } }
   if (path === "/v1/feed/sites") { target = `${base}/commands`; body = { kind: "feed_sites" }; }
   else { const feed = path.match(/^\/v1\/feed\/items\?(.+)$/); if (feed) { const query = new URLSearchParams(feed[1]); target = `${base}/commands`; body = { kind: "feed_page", siteID: query.get("site"), page: Number(query.get("page") ?? "1"), query: query.get("q") ?? undefined }; } }
+  if (path === "/v1/destinations/webdav" && options.method === "POST") { const input = JSON.parse(String(options.body ?? "{}")); target = `${base}/commands`; body = { kind: "webdav_add", name: input.name, baseURL: input.baseURL, username: input.username, remotePath: input.remotePath, allowInvalidCertificate: input.allowInvalidCertificate }; }
   if (!target) throw new Error("This dashboard capability is still being moved to the paired-agent transport.");
   const response = await fetch(target, { method: (options.method ?? "GET") === "GET" ? "GET" : "POST", headers: { "Content-Type": "application/json" }, body: body ? JSON.stringify(body) : undefined, cache: "no-store" });
   const payload = await response.json().catch(() => ({}));
@@ -151,5 +152,6 @@ export function CloudFullDashboard() {
 }
 
 export default CloudFullDashboard;
+
 
 
