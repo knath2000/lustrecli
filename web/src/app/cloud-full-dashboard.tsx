@@ -139,11 +139,11 @@ export function CloudFullDashboard() {
   const queueFeedItem = useCallback(async (item: FeedItem, destination: string) => {
     await agentRequest<DownloadJob>(token, "/v1/jobs", { method: "POST", body: JSON.stringify({ sourcePageURL: item.sourcePageURL, preferredQualityLabel: null, destination }) });
   }, [token]);
-  const loadFeedAsset = useCallback(async (url: string, kind: "image" | "video") => {
-    const response = await fetch(`/api/agent/v1/feed/assets?url=${encodeURIComponent(url)}&kind=${kind}`, { headers: { Authorization: `Bearer ${token}` }, cache: "no-store" });
+  const loadFeedAsset = useCallback(async (url: string) => {
+    const response = await fetch(url, { cache: "no-store" });
     if (!response.ok) throw new Error("Unable to load feed media.");
     return response.blob();
-  }, [token]);
+  }, []);
   const refreshAfterFeedQueue = useCallback(async () => { await refresh(token, true); }, [refresh, token]);
   const activeJobs = useMemo(() => jobs.filter((job) => !["completed", "failed", "cancelled"].includes(job.status)), [jobs]);
   const latestLogs = useMemo(() => jobs.flatMap((job) => (job.logs ?? []).map((log) => ({ ...log, job }))).sort((a, b) => agentDateMilliseconds(b.timestamp) - agentDateMilliseconds(a.timestamp)).slice(0, 5), [jobs]);
@@ -151,4 +151,3 @@ export function CloudFullDashboard() {
 }
 
 export default CloudFullDashboard;
-

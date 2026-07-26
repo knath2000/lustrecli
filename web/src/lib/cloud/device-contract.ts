@@ -4,7 +4,7 @@ export const MAX_PUBLIC_KEY_BYTES = 512;
 export const MAX_SIGNATURE_BYTES = 160;
 export const HEARTBEAT_INTERVAL_SECONDS = 30;
 export const PRESENCE_FRESHNESS_SECONDS = 75;
-export const MAX_HEARTBEAT_FRAME_BYTES = 16_384;
+export const MAX_HEARTBEAT_FRAME_BYTES = 131_072;
 
 export type DeviceErrorCode =
   | "unauthenticated" | "email_unverified" | "invalid_request" | "invalid_pairing_code"
