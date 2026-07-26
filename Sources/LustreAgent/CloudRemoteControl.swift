@@ -135,8 +135,8 @@ actor CloudRemoteControl {
         self.acknowledgements.removeAll { ids.contains($0.id) }
     }
 
-    private static func promptForWebDAVPassword(name: String) throws -> String {
-        let process = Process(); process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript"); process.arguments = ["-e", "text returned of (display dialog \"Enter the WebDAV password for \\(name)\" default answer \"\" with hidden answer)"]
+    private static func promptForWebDAVPassword(name _: String) throws -> String {
+        let process = Process(); process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript"); process.arguments = ["-e", "text returned of (display dialog \"Enter the WebDAV password\" default answer \"\" with hidden answer)"]
         let output = Pipe(); process.standardOutput = output; try process.run(); process.waitUntilExit()
         guard process.terminationStatus == 0, let password = String(data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines), !password.isEmpty else { throw RemoteDestinationError.missingCredentials }
         return password
