@@ -1,3 +1,3 @@
-import { CloudHomeView } from "./cloud-home-view";
+import { CloudFullDashboard } from "./cloud-full-dashboard";
 
-export default function Home() { return <CloudHomeView />; }
+export default function Home() { return <CloudFullDashboard />; }
