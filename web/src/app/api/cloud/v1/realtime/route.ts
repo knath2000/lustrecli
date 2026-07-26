@@ -35,6 +35,7 @@ export async function GET(request: Request) {
             let command;
             try { command = await nextPendingCommand(deviceID); }
             catch { console.error("cloud_realtime_failure", { stage: "command_dispatch" }); throw new Error("command_dispatch"); }
+            console.log("cloud_realtime_dispatch", { deviceID, commandID: command?.id ?? null });
             socket.send(JSON.stringify({ version: 1, type: "heartbeat-accepted", sequence: frame.sequence, serverTime: new Date().toISOString(), acknowledgedCommandAcks: frame.commandAcks, command: command ? { id: command.id, kind: command.kind, payload: command.payload } : null }));
           } catch { console.error("cloud_realtime_failure", { stage: "heartbeat" }); socket.send(errorFrame("heartbeat_rejected")); socket.close(4403, "heartbeat-rejected"); }
         })();
