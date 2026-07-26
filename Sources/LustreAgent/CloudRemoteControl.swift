@@ -33,6 +33,7 @@ struct CloudRemoteResult: Codable {
     let kind: String
     let sites: [FeedSite]?
     let page: FeedPage?
+    let destinations: [WebDAVDestinationProfile]?
 }
 
 struct CloudRemoteJobStatus: Codable {
@@ -108,11 +109,13 @@ actor CloudRemoteControl {
                 acknowledgement = CloudRemoteCommandAck(id: command.id, status: "failed", jobID: nil, result: nil)
             }
         case "feed_sites":
-            acknowledgement = CloudRemoteCommandAck(id: command.id, status: "completed", jobID: nil, result: CloudRemoteResult(kind: "feed_sites", sites: await service.feedSites(), page: nil))
+            acknowledgement = CloudRemoteCommandAck(id: command.id, status: "completed", jobID: nil, result: CloudRemoteResult(kind: "feed_sites", sites: await service.feedSites(), page: nil, destinations: nil))
         case "feed_page":
             guard let rawSite = command.payload.siteID, let site = FeedSiteID(rawValue: rawSite), let page = command.payload.page else { acknowledgement = CloudRemoteCommandAck(id: command.id, status: "failed", jobID: nil, result: nil); break }
-            do { acknowledgement = CloudRemoteCommandAck(id: command.id, status: "completed", jobID: nil, result: CloudRemoteResult(kind: "feed_page", sites: nil, page: try await service.feedPage(site: site, query: command.payload.query, page: page))) }
+            do { acknowledgement = CloudRemoteCommandAck(id: command.id, status: "completed", jobID: nil, result: CloudRemoteResult(kind: "feed_page", sites: nil, page: try await service.feedPage(site: site, query: command.payload.query, page: page), destinations: nil)) }
             catch { acknowledgement = CloudRemoteCommandAck(id: command.id, status: "failed", jobID: nil, result: nil) }
+        case "destinations_list":
+            acknowledgement = CloudRemoteCommandAck(id: command.id, status: "completed", jobID: nil, result: CloudRemoteResult(kind: "destinations_list", sites: nil, page: nil, destinations: await service.allRemoteDestinations()))
         case "webdav_add":
             guard let name = command.payload.name, let baseURL = command.payload.baseURL, let username = command.payload.username, let remotePath = command.payload.remotePath, let password = try? Self.promptForWebDAVPassword(name: name) else { acknowledgement = CloudRemoteCommandAck(id: command.id, status: "failed", jobID: nil, result: nil); break }
             do { _ = try await service.saveWebDAVDestination(WebDAVDestinationRequest(name: name, baseURL: baseURL, username: username, password: password, remotePath: remotePath, allowInvalidCertificate: command.payload.allowInvalidCertificate == "true")); acknowledgement = CloudRemoteCommandAck(id: command.id, status: "completed", jobID: nil, result: nil) }
