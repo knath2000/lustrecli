@@ -83,12 +83,15 @@ actor CloudRemoteControl {
     }
 
     func heartbeatPayload() async -> (acks: [CloudRemoteCommandAck], jobs: [CloudRemoteJobStatus]) {
+        fputs("Lustre Cloud presence collecting job status.\n", stderr)
         let jobs = ((try? await service.allJobs()) ?? []).prefix(50).map(CloudRemoteJobStatus.init)
+        fputs("Lustre Cloud presence collected job status: count=\(jobs.count).\n", stderr)
         return (acknowledgements, jobs)
     }
 
     func handle(_ command: CloudRemoteCommand?) async {
         guard let command, !completed.contains(command.id) else { return }
+        fputs("Lustre Cloud presence handling command: kind=\(command.kind).\n", stderr)
         let acknowledgement: CloudRemoteCommandAck
         switch command.kind {
         case "queue_url":
@@ -127,6 +130,7 @@ actor CloudRemoteControl {
         try? AgentPaths.prepare()
         try? JSONEncoder.cloud.encode(Array(completed)).write(to: receiptsURL, options: .atomic)
         acknowledgements.append(acknowledgement)
+        fputs("Lustre Cloud presence completed command: kind=\(command.kind) status=\(acknowledgement.status).\n", stderr)
         if acknowledgements.count > 8 { acknowledgements.removeFirst(acknowledgements.count - 8) }
     }
 

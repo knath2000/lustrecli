@@ -14,7 +14,13 @@ public actor CloudPresenceConnection {
     private var socket: URLSessionWebSocketTask?
     private var reconnectState = CloudPresenceReconnectStateMachine()
 
-    public init(service: AgentService, identity: DeviceIdentity = DeviceIdentity(), session: URLSession = .shared) { self.identity = identity; self.session = session; remoteControl = CloudRemoteControl(service: service) }
+    public init(service: AgentService, identity: DeviceIdentity = DeviceIdentity(), session: URLSession? = nil) { self.identity = identity; self.session = session ?? Self.realtimeSession(); remoteControl = CloudRemoteControl(service: service) }
+
+    private static func realtimeSession() -> URLSession {
+        let configuration = URLSessionConfiguration.default
+        configuration.timeoutIntervalForRequest = 15
+        return URLSession(configuration: configuration)
+    }
 
     public func startIfEnrolled() {
         guard runner == nil, let enrollment = try? DeviceEnrollmentStore.load() else { return }
@@ -76,8 +82,9 @@ public actor CloudPresenceConnection {
             let payload = await remoteControl.heartbeatPayload()
             let frame = CloudHeartbeat(sequence: sequence, sentAt: ISO8601DateFormatter().string(from: .now), agentVersion: "0.1.0", commandAcks: payload.acks, jobs: payload.jobs)
             let data = try JSONEncoder.cloud.encode(frame)
-            try await task.send(.data(data))
-            let response = try await task.receive()
+            fputs("Lustre Cloud presence heartbeat: sequence=\(sequence) sending.\n", stderr)
+            let response = try await sendAndReceive(.data(data), using: task)
+            fputs("Lustre Cloud presence heartbeat: sequence=\(sequence) received.\n", stderr)
             let responseData: Data
             switch response { case let .data(data): responseData = data; case let .string(text): responseData = Data(text.utf8); @unknown default: throw CloudDeviceError.invalidResponse }
             let responseFrame = try JSONDecoder.cloud.decode(CloudHeartbeatResponse.self, from: responseData)
@@ -93,5 +100,16 @@ public actor CloudPresenceConnection {
             sequence += 1
             try await Task.sleep(nanoseconds: UInt64(Self.heartbeatInterval * 1_000_000_000))
         }
+    }
+
+    private func sendAndReceive(_ message: URLSessionWebSocketTask.Message, using task: URLSessionWebSocketTask) async throws -> URLSessionWebSocketTask.Message {
+        let timeout = Task.detached {
+            try? await Task.sleep(nanoseconds: 15_000_000_000)
+            guard !Task.isCancelled else { return }
+            task.cancel(with: .goingAway, reason: nil)
+        }
+        defer { timeout.cancel() }
+        try await task.send(message)
+        return try await task.receive()
     }
 }

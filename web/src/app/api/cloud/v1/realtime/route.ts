@@ -6,6 +6,7 @@ import { verifyDeviceToken } from "@/lib/cloud/device-token";
 import { presenceConnectionLeaseSeconds } from "@/lib/cloud/presence-lease";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 const tokenPrefix = "lustre.";
 function tokenFrom(request: Request) { return request.headers.get("sec-websocket-protocol")?.split(",").map((value) => value.trim()).find((value) => value.startsWith(tokenPrefix))?.slice(tokenPrefix.length); }
 function errorFrame(code: string) { return JSON.stringify({ version: 1, type: "error", code }); }
