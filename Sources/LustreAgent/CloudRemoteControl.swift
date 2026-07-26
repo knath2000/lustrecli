@@ -39,6 +39,7 @@ struct CloudRemoteResult: Codable {
 
 struct CloudRemoteJobStatus: Codable {
     let id: UUID
+    let sourcePageURL: URL
     let displayName: String
     let preferredQualityLabel: String?
     let status: String
@@ -49,7 +50,7 @@ struct CloudRemoteJobStatus: Codable {
     let attempts: Int
 
     init(_ job: DownloadJob) {
-        id = job.id; displayName = job.sourcePageURL.deletingLastPathComponent().lastPathComponent.isEmpty ? "Download" : job.sourcePageURL.lastPathComponent.removingPercentEncoding ?? job.sourcePageURL.lastPathComponent; preferredQualityLabel = job.preferredQualityLabel; status = job.status.rawValue; progress = job.progress; downloadedBytes = job.downloadedBytes; totalBytes = job.totalBytes; phase = job.transferPhase?.rawValue; attempts = job.attempts
+        id = job.id; sourcePageURL = job.sourcePageURL; displayName = job.sourcePageURL.deletingLastPathComponent().lastPathComponent.isEmpty ? "Download" : job.sourcePageURL.lastPathComponent.removingPercentEncoding ?? job.sourcePageURL.lastPathComponent; preferredQualityLabel = job.preferredQualityLabel; status = job.status.rawValue; progress = job.progress; downloadedBytes = job.downloadedBytes; totalBytes = job.totalBytes; phase = job.transferPhase?.rawValue; attempts = job.attempts
     }
 }
 
