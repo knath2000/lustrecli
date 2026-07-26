@@ -10,7 +10,7 @@ Pairing codes contain 100 bits of Crockford Base32 entropy, expire after five mi
 
 Revocation is terminal. It invalidates pending session challenges and fresh device authentication rechecks revocation before and after proof verification. A local `lustre cloud disconnect` removes only local enrollment metadata; it does not revoke the cloud device record.
 
-No pairing code, nonce, public key, signature, access token, loopback token, provider cookie, destination credential, local path, IP history, or media URL is written to audit records or application logs.
+No pairing code, nonce, public key, signature, access token, loopback token, provider cookie, destination credential, local path, or IP history is written to audit records or application logs. Cloud job projections intentionally retain the original source-page URL for the signed-in account's download history; they never retain transient resolved media URLs or provider cookies.
 
 ## Slice 2A: experimental read-only presence
 
@@ -22,11 +22,15 @@ The browser does not subscribe to this socket. It uses a Clerk-authenticated HTT
 
 The Vercel WebSocket adapter is intentionally replaceable. The agent reconnects after any transport close, error, deployment replacement, infrastructure termination, or network transition with bounded jittered backoff, and obtains a new token for every reconnect. It does not assume a fixed connection lifetime.
 
-## Slice 2B: brokered remote queueing
+## Slice 2B: brokered remote control
 
 Cloud never contacts the agent's loopback listener and never receives its bearer token. The only remote-control path is a command returned in the authenticated outbound WebSocket heartbeat response. Commands are account- and device-scoped, idempotently receipted by the agent, and acknowledged in the next heartbeat.
 
-The initial allowlist contains only `queue_url`. It accepts an HTTP(S) source-page URL and an optional preferred quality; the agent chooses its normal local destination and remains authoritative for URL validation, provider resolution, job creation, downloads, and storage. Cloud receives bounded job IDs, status, progress, transfer phase, byte counts, attempt count, and update time. It does not receive local paths, destination configuration, job logs/messages, Keychain content, loopback tokens, provider cookies, raw WebDAV credentials, or arbitrary filesystem access. Future pause, resume, cancel, and retry controls must be separately allowlisted and tested.
+The allowlist contains `queue_url`, `job_action` (pause, resume, cancel, retry), `feed_sites`, `feed_page`, `destinations_list`, and `webdav_add`. `queue_url` accepts an HTTP(S) source-page URL, optional preferred quality, and either `local` or a `webdav:<UUID>` destination reference. The UUID selects an agent-local profile; Cloud never receives the WebDAV password. `webdav_add` sends profile metadata only and prompts for the password locally on macOS before it enters Keychain.
+
+The agent remains authoritative for URL and destination validation, provider resolution, job creation, downloads, storage, and all credentials. Cloud receives bounded job IDs, source-page URLs, display names, status, progress, transfer phase, byte counts, attempt count, update time, and safe destination profile metadata. It does not receive local paths, job logs/messages, Keychain content, loopback tokens, provider cookies, raw WebDAV credentials, transient resolved media URLs, or arbitrary filesystem access.
+
+Command receipts persist complete acknowledgements, not only command IDs, so reconnects replay acknowledgements and cannot strand completed commands at the head of the Cloud queue. Destination-list reads coalesce pending work and may return the last confirmed safe snapshot while the agent is reconnecting.
 
 ## Cloud frontend delivery plan
 

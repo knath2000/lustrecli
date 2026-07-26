@@ -1,5 +1,15 @@
 # Session Log
 
+## 2026-07-25 — Cloud paired-agent dashboard, destinations, and remote WebDAV queueing
+
+- Replaced the temporary Devices-first Cloud surface with the recovered full Lustre dashboard, gated by Clerk and including the Clerk account menu/sign-out. The Cloud dashboard uses paired-device HTTP APIs and never exposes or transmits the agent loopback token.
+- Implemented the account/device-scoped command broker over the existing authenticated outbound agent WebSocket. The allowlist covers job projections, queueing, pause/resume/cancel/retry, feed reads, safe destination listing, and local-confirmation WebDAV creation. Provider cookies, Keychain secrets, raw WebDAV credentials, arbitrary filesystem access, and transient resolved media URLs remain agent-local.
+- Repaired reconnect behavior: outbound WebSocket operations fail/retry cleanly, complete command acknowledgements are persisted and replayed, and stale destination-list requests no longer block the command queue.
+- Added Cloud-safe destination synchronization. The dashboard lists local WebDAV profile metadata, while a Cloud-created profile asks for the password only in a macOS dialog and stores it only in Keychain. The paired Mac successfully saved the `Seedbox` profile alongside `Seedbox3`.
+- Added destination-aware Cloud queueing. Selecting `webdav:<profile UUID>` in the dashboard reaches the agent, which resolves the local profile and credentials before streaming the transfer; Cloud receives no password.
+- Added source-page URL to the Cloud job projection and backfilled the existing 28 job-history rows, replacing the previous synthetic `lustre://job/...` display value. The source page is retained for account-scoped history; ephemeral media URLs are not.
+- Verified production deployment, applied Drizzle migration `0005_lustre_cloud_job_source_url`, rebuilt/restarted the LaunchAgent after confirming no active transfer, and confirmed a live Cloud-initiated download was occurring.
+
 ## 2026-07-24 — MixDrop static resolution and network-route diagnosis
 
 - Added deterministic P.A.C.K.E.R decoding to the Foundation-only static MixDrop resolver, with a realistic packed-player fixture and strict `mxcontent.net` media validation.
