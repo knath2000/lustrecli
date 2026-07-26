@@ -62,7 +62,7 @@ async function agentRequest<T>(deviceID: string, path: string, options: RequestI
   else { const feed = path.match(/^\/v1\/feed\/items\?(.+)$/); if (feed) { const query = new URLSearchParams(feed[1]); target = `${base}/commands`; body = { kind: "feed_page", siteID: query.get("site"), page: Number(query.get("page") ?? "1"), query: query.get("q") ?? undefined }; } }
   if (path === "/v1/destinations/webdav" && options.method === "POST") { const input = JSON.parse(String(options.body ?? "{}")); target = `${base}/commands`; body = { kind: "webdav_add", name: input.name, baseURL: input.baseURL, username: input.username, remotePath: input.remotePath, allowInvalidCertificate: input.allowInvalidCertificate }; }
   if (!target) throw new Error("This dashboard capability is still being moved to the paired-agent transport.");
-  const response = await fetch(target, { method: (options.method ?? "GET") === "GET" ? "GET" : "POST", headers: { "Content-Type": "application/json" }, body: body ? JSON.stringify(body) : undefined, cache: "no-store" });
+  const response = await fetch(target, { method: body ? "POST" : (options.method ?? "GET") === "GET" ? "GET" : "POST", headers: { "Content-Type": "application/json" }, body: body ? JSON.stringify(body) : undefined, cache: "no-store" });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(payload.error?.message ?? "The paired Mac request failed.");
   if (path === "/v1/jobs" && (options.method ?? "GET") === "GET") return payload.jobs.map((job: { id: string; displayName: string; preferredQualityLabel?: string | null; status: string; progress?: number | null; downloadedBytes?: number | null; totalBytes?: number | null; phase?: string | null; updatedAt: string }) => ({ id: job.id, sourcePageURL: `lustre://job/${job.id}`, preferredQualityLabel: job.preferredQualityLabel ?? undefined, destination: "local", status: job.status, message: `${job.displayName} · synced from paired Mac`, progress: job.progress ?? undefined, downloadedBytes: job.downloadedBytes ?? undefined, totalBytes: job.totalBytes ?? undefined, transferPhase: job.phase ?? undefined, logs: [{ timestamp: job.updatedAt, level: ["failed", "verificationRequired"].includes(job.status) ? "error" : "info", message: `${job.status} reported by paired Mac.` }], updatedAt: job.updatedAt })) as T;
@@ -153,5 +153,4 @@ export function CloudFullDashboard() {
 }
 
 export default CloudFullDashboard;
-
 
