@@ -105,10 +105,9 @@ export function CloudFullDashboard() {
       await refreshInFlight.current.promise.catch(() => undefined);
     }
     const sequence = refreshSequence.current;
-    const authSequence = authStatusSequence.current.beginPoll();
-    const promise = Promise.all([agentRequest<DownloadJob[]>(activeToken, "/v1/jobs"), agentRequest<Destination[]>(activeToken, "/v1/destinations"), agentRequest<PornHubAuthStatus>(activeToken, "/v1/auth/pornhub")]).then(([nextJobs, nextDestinations, nextPornHubAuth]) => {
+    const promise = agentRequest<DownloadJob[]>(activeToken, "/v1/jobs").then((nextJobs) => {
       if (sequence !== refreshSequence.current) return;
-      setJobs(nextJobs); setDestinations(nextDestinations); if (authStatusSequence.current.acceptsPoll(authSequence)) setPornHubAuth(nextPornHubAuth); setConnected(true); setError(null);
+      setJobs(nextJobs); setDestinations([]); setPornHubAuth(null); setConnected(true); setError(null);
     });
     refreshInFlight.current = { token: activeToken, promise };
     try {
@@ -151,4 +150,3 @@ export function CloudFullDashboard() {
 }
 
 export default CloudFullDashboard;
-
