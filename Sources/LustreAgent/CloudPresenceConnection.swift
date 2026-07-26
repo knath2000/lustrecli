@@ -82,9 +82,7 @@ public actor CloudPresenceConnection {
             let payload = await remoteControl.heartbeatPayload()
             let frame = CloudHeartbeat(sequence: sequence, sentAt: ISO8601DateFormatter().string(from: .now), agentVersion: "0.1.0", commandAcks: payload.acks, jobs: payload.jobs)
             let data = try JSONEncoder.cloud.encode(frame)
-            fputs("Lustre Cloud presence heartbeat: sequence=\(sequence) sending.\n", stderr)
             let response = try await sendAndReceive(.data(data), using: task)
-            fputs("Lustre Cloud presence heartbeat: sequence=\(sequence) received.\n", stderr)
             let responseData: Data
             switch response { case let .data(data): responseData = data; case let .string(text): responseData = Data(text.utf8); @unknown default: throw CloudDeviceError.invalidResponse }
             let responseFrame = try JSONDecoder.cloud.decode(CloudHeartbeatResponse.self, from: responseData)

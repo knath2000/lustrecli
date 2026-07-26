@@ -74,24 +74,32 @@ struct CloudHeartbeatResponse: Decodable {
 actor CloudRemoteControl {
     private let service: AgentService
     private var acknowledgements: [CloudRemoteCommandAck] = []
-    private var completed: Set<UUID>
+    private var completed: [UUID: CloudRemoteCommandAck]
     private let receiptsURL = AgentPaths.applicationSupport.appending(path: "cloud-command-receipts.json")
 
     init(service: AgentService) {
         self.service = service
-        completed = (try? JSONDecoder.cloud.decode([UUID].self, from: Data(contentsOf: receiptsURL))).map(Set.init) ?? []
+        if let receipts = try? JSONDecoder.cloud.decode([CloudRemoteCommandAck].self, from: Data(contentsOf: receiptsURL)) {
+            completed = Dictionary(uniqueKeysWithValues: receipts.map { ($0.id, $0) })
+        } else if let ids = try? JSONDecoder.cloud.decode([UUID].self, from: Data(contentsOf: receiptsURL)) {
+            completed = Dictionary(uniqueKeysWithValues: ids.map { ($0, CloudRemoteCommandAck(id: $0, status: "completed", jobID: nil, result: nil)) })
+        } else {
+            completed = [:]
+        }
     }
 
     func heartbeatPayload() async -> (acks: [CloudRemoteCommandAck], jobs: [CloudRemoteJobStatus]) {
-        fputs("Lustre Cloud presence collecting job status.\n", stderr)
         let jobs = ((try? await service.allJobs()) ?? []).prefix(50).map(CloudRemoteJobStatus.init)
-        fputs("Lustre Cloud presence collected job status: count=\(jobs.count).\n", stderr)
         return (acknowledgements, jobs)
     }
 
     func handle(_ command: CloudRemoteCommand?) async {
-        guard let command, !completed.contains(command.id) else { return }
-        fputs("Lustre Cloud presence handling command: kind=\(command.kind).\n", stderr)
+        guard let command else { return }
+        if let acknowledgement = completed[command.id] {
+            acknowledgements.append(acknowledgement)
+            if acknowledgements.count > 8 { acknowledgements.removeFirst(acknowledgements.count - 8) }
+            return
+        }
         let acknowledgement: CloudRemoteCommandAck
         switch command.kind {
         case "queue_url":
@@ -126,11 +134,10 @@ actor CloudRemoteControl {
         default:
             acknowledgement = CloudRemoteCommandAck(id: command.id, status: "failed", jobID: nil, result: nil)
         }
-        completed.insert(command.id)
+        completed[command.id] = acknowledgement
         try? AgentPaths.prepare()
-        try? JSONEncoder.cloud.encode(Array(completed)).write(to: receiptsURL, options: .atomic)
+        try? JSONEncoder.cloud.encode(Array(completed.values)).write(to: receiptsURL, options: .atomic)
         acknowledgements.append(acknowledgement)
-        fputs("Lustre Cloud presence completed command: kind=\(command.kind) status=\(acknowledgement.status).\n", stderr)
         if acknowledgements.count > 8 { acknowledgements.removeFirst(acknowledgements.count - 8) }
     }
 
