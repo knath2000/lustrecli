@@ -54,7 +54,7 @@ export function deviceError(error: unknown): { error: { code: DeviceErrorCode; m
   return { error: { code: "internal_error", message: "Unable to process the device request." } };
 }
 
-export type RemoteCommandAck = { id: string; status: "completed" | "failed"; jobID?: string };
+export type RemoteCommandAck = { id: string; status: "completed" | "failed"; jobID?: string; result?: Record<string, unknown> };
 export type RemoteJobStatus = { id: string; displayName?: string; preferredQualityLabel?: string; status: string; progress?: number; downloadedBytes?: number; totalBytes?: number; phase?: string; attempts: number };
 export type HeartbeatFrame = { version: 1; type: "heartbeat"; sequence: number; sentAt: string; agentVersion: string; commandAcks: RemoteCommandAck[]; jobs: RemoteJobStatus[] };
 export function parseHeartbeatFrame(value: unknown): HeartbeatFrame {

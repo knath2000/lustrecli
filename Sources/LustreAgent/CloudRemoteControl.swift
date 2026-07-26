@@ -11,6 +11,9 @@ struct CloudRemoteCommand: Decodable {
         let preferredQualityLabel: String?
         let jobID: UUID?
         let action: JobAction?
+        let siteID: String?
+        let query: String?
+        let page: Int?
     }
 }
 
@@ -18,6 +21,13 @@ struct CloudRemoteCommandAck: Codable {
     let id: UUID
     let status: String
     let jobID: UUID?
+    let result: CloudRemoteResult?
+}
+
+struct CloudRemoteResult: Codable {
+    let kind: String
+    let sites: [FeedSite]?
+    let page: FeedPage?
 }
 
 struct CloudRemoteJobStatus: Codable {
@@ -76,24 +86,30 @@ actor CloudRemoteControl {
         let acknowledgement: CloudRemoteCommandAck
         switch command.kind {
         case "queue_url":
-            guard let url = command.payload.url else { acknowledgement = CloudRemoteCommandAck(id: command.id, status: "failed", jobID: nil); break }
+            guard let url = command.payload.url else { acknowledgement = CloudRemoteCommandAck(id: command.id, status: "failed", jobID: nil, result: nil); break }
             do {
                 let job = try await service.createJob(CreateJobRequest(sourcePageURL: url, preferredQualityLabel: command.payload.preferredQualityLabel))
-                acknowledgement = CloudRemoteCommandAck(id: command.id, status: "completed", jobID: job.id)
+                acknowledgement = CloudRemoteCommandAck(id: command.id, status: "completed", jobID: job.id, result: nil)
             } catch {
-                acknowledgement = CloudRemoteCommandAck(id: command.id, status: "failed", jobID: nil)
+                acknowledgement = CloudRemoteCommandAck(id: command.id, status: "failed", jobID: nil, result: nil)
             }
         case "job_action":
-            guard let jobID = command.payload.jobID, let action = command.payload.action else { acknowledgement = CloudRemoteCommandAck(id: command.id, status: "failed", jobID: nil); break }
-            guard action == .pause || action == .resume || action == .cancel || action == .retry else { acknowledgement = CloudRemoteCommandAck(id: command.id, status: "failed", jobID: nil); break }
+            guard let jobID = command.payload.jobID, let action = command.payload.action else { acknowledgement = CloudRemoteCommandAck(id: command.id, status: "failed", jobID: nil, result: nil); break }
+            guard action == .pause || action == .resume || action == .cancel || action == .retry else { acknowledgement = CloudRemoteCommandAck(id: command.id, status: "failed", jobID: nil, result: nil); break }
             do {
                 _ = try await service.apply(action, to: jobID)
-                acknowledgement = CloudRemoteCommandAck(id: command.id, status: "completed", jobID: jobID)
+                acknowledgement = CloudRemoteCommandAck(id: command.id, status: "completed", jobID: jobID, result: nil)
             } catch {
-                acknowledgement = CloudRemoteCommandAck(id: command.id, status: "failed", jobID: nil)
+                acknowledgement = CloudRemoteCommandAck(id: command.id, status: "failed", jobID: nil, result: nil)
             }
+        case "feed_sites":
+            acknowledgement = CloudRemoteCommandAck(id: command.id, status: "completed", jobID: nil, result: CloudRemoteResult(kind: "feed_sites", sites: await service.feedSites(), page: nil))
+        case "feed_page":
+            guard let rawSite = command.payload.siteID, let site = FeedSiteID(rawValue: rawSite), let page = command.payload.page else { acknowledgement = CloudRemoteCommandAck(id: command.id, status: "failed", jobID: nil, result: nil); break }
+            do { acknowledgement = CloudRemoteCommandAck(id: command.id, status: "completed", jobID: nil, result: CloudRemoteResult(kind: "feed_page", sites: nil, page: try await service.feedPage(site: site, query: command.payload.query, page: page))) }
+            catch { acknowledgement = CloudRemoteCommandAck(id: command.id, status: "failed", jobID: nil, result: nil) }
         default:
-            acknowledgement = CloudRemoteCommandAck(id: command.id, status: "failed", jobID: nil)
+            acknowledgement = CloudRemoteCommandAck(id: command.id, status: "failed", jobID: nil, result: nil)
         }
         completed.insert(command.id)
         try? AgentPaths.prepare()

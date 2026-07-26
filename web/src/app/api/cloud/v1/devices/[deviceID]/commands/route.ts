@@ -1,6 +1,6 @@
 import { requireCurrentAccount } from "@/lib/auth/current-account";
 import { DeviceContractError } from "@/lib/cloud/device-contract";
-import { jobActionCommand, queueURLCommand } from "@/lib/cloud/device-repository";
+import { feedCommand, jobActionCommand, queueURLCommand } from "@/lib/cloud/device-repository";
 import { jsonError, requestBody } from "@/lib/cloud/route";
 
 type RouteContext = { params: Promise<{ deviceID: string }> };
@@ -20,7 +20,7 @@ function jobAction(body: Record<string, unknown>) {
 export async function POST(request: Request, context: RouteContext) {
   try {
     const account = await requireCurrentAccount(); const { deviceID } = await context.params; const body = await requestBody(request);
-    const created = body.kind === "queue_url" ? await queueURLCommand(account.id, deviceID, queueURL(body).url, queueURL(body).preferredQualityLabel) : await jobActionCommand(account.id, deviceID, jobAction(body).jobID, jobAction(body).action);
+    const created = body.kind === "queue_url" ? await queueURLCommand(account.id, deviceID, queueURL(body).url, queueURL(body).preferredQualityLabel) : body.kind === "job_action" ? await jobActionCommand(account.id, deviceID, jobAction(body).jobID, jobAction(body).action) : body.kind === "feed_sites" ? await feedCommand(account.id, deviceID, "feed_sites", {}) : body.kind === "feed_page" && typeof body.siteID === "string" && typeof body.page === "number" ? await feedCommand(account.id, deviceID, "feed_page", { siteID: body.siteID, page: String(body.page), query: typeof body.query === "string" ? body.query : undefined }) : (() => { throw new DeviceContractError("invalid_request", "Unsupported Cloud command."); })();
     return Response.json({ command: { id: created.id, status: created.status, createdAt: created.createdAt.toISOString() } }, { status: 201 });
   } catch (error) { return jsonError(error); }
 }
