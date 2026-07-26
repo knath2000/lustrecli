@@ -55,7 +55,7 @@ async function agentRequest<T>(deviceID: string, path: string, options: RequestI
   const base = `/api/cloud/v1/devices/${deviceID}`;
   let target = ""; let body: unknown = undefined;
   if (path === "/v1/jobs" && (options.method ?? "GET") === "GET") target = `${base}/jobs`;
-  else if (path === "/v1/jobs" && options.method === "POST") { target = `${base}/commands`; const input = JSON.parse(String(options.body ?? "{}")); body = { kind: "queue_url", url: input.sourcePageURL, preferredQualityLabel: input.preferredQualityLabel ?? undefined }; }
+  else if (path === "/v1/jobs" && options.method === "POST") { target = `${base}/commands`; const input = JSON.parse(String(options.body ?? "{}")); body = { kind: "queue_url", url: input.sourcePageURL, preferredQualityLabel: input.preferredQualityLabel ?? undefined, destination: input.destination ?? "local" }; }
   else { const match = path.match(/^\/v1\/jobs\/([^/]+)\/action$/); if (match && options.method === "POST") { target = `${base}/commands`; const input = JSON.parse(String(options.body ?? "{}")); body = { kind: "job_action", jobID: match[1], action: input.action }; } }
   if (path === "/v1/feed/sites") { target = `${base}/commands`; body = { kind: "feed_sites" }; }
   if (path === "/v1/destinations") { target = `${base}/commands`; body = { kind: "destinations_list" }; }

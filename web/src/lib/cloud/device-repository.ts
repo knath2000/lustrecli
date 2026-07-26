@@ -115,8 +115,8 @@ export async function presenceForOwnedDevice(accountID: string, deviceID: string
   if (!row) throw new DeviceContractError("device_not_found", "Device not found.");
   return row;
 }
-export async function queueURLCommand(accountID: string, deviceID: string, url: string, preferredQualityLabel?: string) {
-  return createCommand(accountID, deviceID, "queue_url", { url, preferredQualityLabel });
+export async function queueURLCommand(accountID: string, deviceID: string, url: string, preferredQualityLabel?: string, destination?: string) {
+  return createCommand(accountID, deviceID, "queue_url", { url, preferredQualityLabel, destination });
 }
 export async function jobActionCommand(accountID: string, deviceID: string, jobID: string, action: "pause" | "resume" | "cancel" | "retry") {
   return createCommand(accountID, deviceID, "job_action", { jobID, action });
