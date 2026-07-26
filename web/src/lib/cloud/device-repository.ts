@@ -1,5 +1,5 @@
 import "server-only";
-import { and, desc, eq, gt, isNull, sql } from "drizzle-orm";
+import { and, desc, eq, gt, isNotNull, isNull, sql } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { db } from "@/lib/db/client";
 import { lustreDeviceAuditEvents, lustreDeviceCommands, lustreDeviceEnrollments, lustreDeviceJobStatus, lustreDevicePresence, lustreDevices, lustreDeviceSessionChallenges, lustrePairingChallenges } from "@/lib/db/schema";
@@ -130,6 +130,8 @@ export async function feedCommand(accountID: string, deviceID: string, kind: "fe
   if (kind === "destinations_list") {
     const pending = (await db.select().from(lustreDeviceCommands).where(and(eq(lustreDeviceCommands.accountID, accountID), eq(lustreDeviceCommands.deviceID, deviceID), eq(lustreDeviceCommands.kind, kind), eq(lustreDeviceCommands.status, "pending"))).orderBy(lustreDeviceCommands.createdAt).limit(1))[0];
     if (pending) return pending;
+    const completed = (await db.select().from(lustreDeviceCommands).where(and(eq(lustreDeviceCommands.accountID, accountID), eq(lustreDeviceCommands.deviceID, deviceID), eq(lustreDeviceCommands.kind, kind), eq(lustreDeviceCommands.status, "completed"), isNotNull(lustreDeviceCommands.result))).orderBy(desc(lustreDeviceCommands.acknowledgedAt)).limit(1))[0];
+    if (completed) return completed;
   }
   return createCommand(accountID, deviceID, kind, payload);
 }
