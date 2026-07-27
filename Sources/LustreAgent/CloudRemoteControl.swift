@@ -48,9 +48,10 @@ struct CloudRemoteJobStatus: Codable {
     let totalBytes: Int64?
     let phase: String?
     let attempts: Int
+    let updatedAt: Date
 
     init(_ job: DownloadJob) {
-        id = job.id; sourcePageURL = job.sourcePageURL; displayName = job.sourcePageURL.deletingLastPathComponent().lastPathComponent.isEmpty ? "Download" : job.sourcePageURL.lastPathComponent.removingPercentEncoding ?? job.sourcePageURL.lastPathComponent; preferredQualityLabel = job.preferredQualityLabel; status = job.status.rawValue; progress = job.progress; downloadedBytes = job.downloadedBytes; totalBytes = job.totalBytes; phase = job.transferPhase?.rawValue; attempts = job.attempts
+        id = job.id; sourcePageURL = job.sourcePageURL; displayName = job.sourcePageURL.deletingLastPathComponent().lastPathComponent.isEmpty ? "Download" : job.sourcePageURL.lastPathComponent.removingPercentEncoding ?? job.sourcePageURL.lastPathComponent; preferredQualityLabel = job.preferredQualityLabel; status = job.status.rawValue; progress = job.progress; downloadedBytes = job.downloadedBytes; totalBytes = job.totalBytes; phase = job.transferPhase?.rawValue; attempts = job.attempts; updatedAt = job.updatedAt
     }
 }
 
@@ -60,6 +61,7 @@ struct CloudHeartbeat: Encodable {
     let sequence: Int
     let sentAt: String
     let agentVersion: String
+    let correlationID: String
     let commandAcks: [CloudRemoteCommandAck]
     let jobs: [CloudRemoteJobStatus]
 }
@@ -73,7 +75,23 @@ struct CloudHeartbeatResponse: Decodable {
     let acknowledgedCommandAcks: [CloudRemoteCommandAck]?
 }
 
+struct CloudGatewayHelloResponse: Decodable {
+    let version: Int
+    let type: String
+    let capabilities: [String]?
+}
+
+struct CloudCommandDelivery: Decodable {
+    let version: Int
+    let type: String
+    let sequence: Int
+    let correlationID: String
+    let acknowledgedCommandAckIDs: [UUID]
+    let command: CloudRemoteCommand?
+}
+
 actor CloudRemoteControl {
+    static let maximumFeedPageAcknowledgementBytes = 65_536
     private let service: AgentService
     private var acknowledgements: [CloudRemoteCommandAck] = []
     private var completed: [UUID: CloudRemoteCommandAck]
@@ -95,12 +113,11 @@ actor CloudRemoteControl {
         return (acknowledgements, jobs)
     }
 
-    func handle(_ command: CloudRemoteCommand?) async {
-        guard let command else { return }
+    func handle(_ command: CloudRemoteCommand?) async -> Bool {
+        guard let command else { return false }
         if let acknowledgement = completed[command.id] {
-            acknowledgements.append(acknowledgement)
-            if acknowledgements.count > 8 { acknowledgements.removeFirst(acknowledgements.count - 8) }
-            return
+            enqueue(acknowledgement)
+            return true
         }
         let acknowledgement: CloudRemoteCommandAck
         switch command.kind {
@@ -124,8 +141,8 @@ actor CloudRemoteControl {
         case "feed_sites":
             acknowledgement = CloudRemoteCommandAck(id: command.id, status: "completed", jobID: nil, result: CloudRemoteResult(kind: "feed_sites", sites: await service.feedSites(), page: nil, destinations: nil))
         case "feed_page":
-            guard let rawSite = command.payload.siteID, let site = FeedSiteID(rawValue: rawSite), let page = command.payload.page else { acknowledgement = CloudRemoteCommandAck(id: command.id, status: "failed", jobID: nil, result: nil); break }
-            do { acknowledgement = CloudRemoteCommandAck(id: command.id, status: "completed", jobID: nil, result: CloudRemoteResult(kind: "feed_page", sites: nil, page: try await service.feedPage(site: site, query: command.payload.query, page: page), destinations: nil)) }
+            guard let rawSite = command.payload.siteID, let site = FeedSiteID(rawValue: rawSite), let page = command.payload.page, page > 0 else { acknowledgement = CloudRemoteCommandAck(id: command.id, status: "failed", jobID: nil, result: nil); break }
+            do { acknowledgement = Self.boundedFeedPageAcknowledgement(id: command.id, page: try await service.feedPage(site: site, query: command.payload.query, page: page)) }
             catch { acknowledgement = CloudRemoteCommandAck(id: command.id, status: "failed", jobID: nil, result: nil) }
         case "destinations_list":
             acknowledgement = CloudRemoteCommandAck(id: command.id, status: "completed", jobID: nil, result: CloudRemoteResult(kind: "destinations_list", sites: nil, page: nil, destinations: await service.allRemoteDestinations()))
@@ -139,13 +156,36 @@ actor CloudRemoteControl {
         completed[command.id] = acknowledgement
         try? AgentPaths.prepare()
         try? JSONEncoder.cloud.encode(Array(completed.values)).write(to: receiptsURL, options: .atomic)
-        acknowledgements.append(acknowledgement)
-        if acknowledgements.count > 8 { acknowledgements.removeFirst(acknowledgements.count - 8) }
+        enqueue(acknowledgement)
+        return true
     }
 
     func acknowledgedByCloud(_ acknowledgements: [CloudRemoteCommandAck]) {
         let ids = Set(acknowledgements.map(\.id))
         self.acknowledgements.removeAll { ids.contains($0.id) }
+    }
+
+    func acknowledgedByCloud(ids: [UUID]) {
+        let confirmed = Set(ids)
+        acknowledgements.removeAll { confirmed.contains($0.id) }
+    }
+
+    static func boundedFeedPageAcknowledgement(id: UUID, page: FeedPage) -> CloudRemoteCommandAck {
+        let completed = CloudRemoteCommandAck(id: id, status: "completed", jobID: nil, result: CloudRemoteResult(kind: "feed_page", sites: nil, page: page, destinations: nil))
+        guard let encoded = try? JSONEncoder.cloud.encode(completed), encoded.count <= maximumFeedPageAcknowledgementBytes else {
+            return CloudRemoteCommandAck(id: id, status: "failed", jobID: nil, result: nil)
+        }
+        return completed
+    }
+
+    private func enqueue(_ acknowledgement: CloudRemoteCommandAck) {
+        Self.appendAcknowledgement(acknowledgement, to: &acknowledgements)
+    }
+
+    static func appendAcknowledgement(_ acknowledgement: CloudRemoteCommandAck, to acknowledgements: inout [CloudRemoteCommandAck]) {
+        acknowledgements.removeAll { $0.id == acknowledgement.id }
+        acknowledgements.append(acknowledgement)
+        if acknowledgements.count > 8 { acknowledgements.removeFirst(acknowledgements.count - 8) }
     }
 
     private static func promptForWebDAVPassword(name _: String) throws -> String {

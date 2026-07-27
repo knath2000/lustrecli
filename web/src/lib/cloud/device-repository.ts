@@ -1,9 +1,9 @@
 import "server-only";
-import { and, desc, eq, gt, isNotNull, isNull, sql } from "drizzle-orm";
+import { and, desc, eq, gt, gte, isNotNull, isNull, sql } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { db } from "@/lib/db/client";
 import { lustreDeviceAuditEvents, lustreDeviceCommands, lustreDeviceEnrollments, lustreDeviceJobStatus, lustreDevicePresence, lustreDevices, lustreDeviceSessionChallenges, lustrePairingChallenges } from "@/lib/db/schema";
-import { DeviceContractError } from "./device-contract";
+import { DeviceContractError, type HeartbeatFrame } from "./device-contract";
 import { randomNonce } from "./device-crypto";
 
 const now = () => new Date();
@@ -110,6 +110,113 @@ export async function acceptHeartbeat(deviceID: string, connectionID: string, se
   `);
   if (!(result as unknown as { rows: unknown[] }).rows[0]) throw new DeviceContractError("device_revoked", "Heartbeat rejected.");
 }
+export async function persistGatewayHeartbeat(input: { deviceID: string; connectionID: string; connectedAt: Date; frame: HeartbeatFrame }) {
+  const acknowledgements = JSON.stringify(input.frame.commandAcks);
+  const jobs = JSON.stringify(input.frame.jobs);
+  const result = await db.execute(sql`
+    WITH eligible_device AS (
+      SELECT device.id
+      FROM lustre_devices AS device
+      INNER JOIN lustre_accounts AS account ON account.id = device.account_id
+      WHERE device.id = ${input.deviceID}::uuid
+        AND device.revoked_at IS NULL
+        AND account.disabled_at IS NULL
+    ), accepted_presence AS (
+      INSERT INTO lustre_device_presence (
+        device_id, connection_id, connected_at, last_heartbeat_at,
+        agent_version, heartbeat_sequence, updated_at
+      )
+      SELECT id, ${input.connectionID}::uuid, ${input.connectedAt}, now(),
+        ${input.frame.agentVersion}, ${input.frame.sequence}, now()
+      FROM eligible_device
+      ON CONFLICT (device_id) DO UPDATE SET
+        connection_id = EXCLUDED.connection_id,
+        connected_at = EXCLUDED.connected_at,
+        last_heartbeat_at = EXCLUDED.last_heartbeat_at,
+        agent_version = EXCLUDED.agent_version,
+        heartbeat_sequence = EXCLUDED.heartbeat_sequence,
+        updated_at = EXCLUDED.updated_at
+      WHERE (
+        lustre_device_presence.connection_id = EXCLUDED.connection_id
+        AND lustre_device_presence.heartbeat_sequence < EXCLUDED.heartbeat_sequence
+      ) OR (
+        lustre_device_presence.connection_id <> EXCLUDED.connection_id
+        AND lustre_device_presence.connected_at < EXCLUDED.connected_at
+      )
+      RETURNING device_id
+    ), acknowledgement_input AS (
+      SELECT *
+      FROM jsonb_to_recordset(${acknowledgements}::jsonb)
+        AS acknowledgement(id uuid, status text, "jobID" uuid, result jsonb)
+    ), persisted_acknowledgements AS (
+      UPDATE lustre_device_commands AS command SET
+        status = acknowledgement.status,
+        result = COALESCE(
+          acknowledgement.result,
+          CASE WHEN acknowledgement."jobID" IS NULL THEN '{}'::jsonb ELSE jsonb_build_object('jobID', acknowledgement."jobID") END
+        ),
+        acknowledged_at = now()
+      FROM acknowledgement_input AS acknowledgement, accepted_presence
+      WHERE command.id = acknowledgement.id
+        AND command.device_id = accepted_presence.device_id
+        AND command.status IN ('pending', 'running')
+      RETURNING command.id
+    ), confirmed_acknowledgements AS (
+      SELECT id FROM persisted_acknowledgements
+      UNION
+      SELECT command.id
+      FROM lustre_device_commands AS command
+      INNER JOIN acknowledgement_input AS acknowledgement
+        ON acknowledgement.id = command.id
+        AND acknowledgement.status = command.status
+      INNER JOIN accepted_presence ON accepted_presence.device_id = command.device_id
+    ), job_input AS (
+      SELECT *
+      FROM jsonb_to_recordset(${jobs}::jsonb)
+        AS job(
+          id uuid, "sourcePageURL" text, "displayName" text,
+          "preferredQualityLabel" text, status text, progress double precision,
+          "downloadedBytes" bigint, "totalBytes" bigint, phase text,
+          attempts integer, "updatedAt" timestamptz
+        )
+    ), persisted_jobs AS (
+      INSERT INTO lustre_device_job_status (
+        device_id, job_id, source_page_url, display_name,
+        preferred_quality_label, status, progress, downloaded_bytes,
+        total_bytes, phase, attempts, updated_at
+      )
+      SELECT accepted_presence.device_id, job.id, job."sourcePageURL",
+        COALESCE(job."displayName", 'Download'), job."preferredQualityLabel",
+        job.status,
+        CASE WHEN job.progress IS NULL THEN NULL ELSE round(job.progress * 10000)::integer END,
+        job."downloadedBytes", job."totalBytes", job.phase, job.attempts,
+        COALESCE(job."updatedAt", now())
+      FROM job_input AS job, accepted_presence
+      ON CONFLICT (device_id, job_id) DO UPDATE SET
+        source_page_url = EXCLUDED.source_page_url,
+        display_name = EXCLUDED.display_name,
+        preferred_quality_label = EXCLUDED.preferred_quality_label,
+        status = EXCLUDED.status,
+        progress = EXCLUDED.progress,
+        downloaded_bytes = EXCLUDED.downloaded_bytes,
+        total_bytes = EXCLUDED.total_bytes,
+        phase = EXCLUDED.phase,
+        attempts = EXCLUDED.attempts,
+        updated_at = EXCLUDED.updated_at
+      WHERE lustre_device_job_status.updated_at < EXCLUDED.updated_at
+      RETURNING job_id
+    )
+    SELECT accepted_presence.device_id,
+      COALESCE(
+        (SELECT array_agg(id::text ORDER BY id::text) FROM confirmed_acknowledgements),
+        ARRAY[]::text[]
+      ) AS acknowledged_command_ack_ids
+    FROM accepted_presence
+  `);
+  const row = (result as unknown as { rows: Array<{ acknowledged_command_ack_ids: string[] }> }).rows[0];
+  if (!row) throw new DeviceContractError("device_revoked", "Heartbeat rejected.");
+  return row.acknowledged_command_ack_ids;
+}
 export async function presenceForOwnedDevice(accountID: string, deviceID: string) {
   const row = (await db.select({ revokedAt: lustreDevices.revokedAt, lastHeartbeatAt: lustreDevicePresence.lastHeartbeatAt, agentVersion: lustreDevicePresence.agentVersion }).from(lustreDevices).leftJoin(lustreDevicePresence, eq(lustreDevicePresence.deviceID, lustreDevices.id)).where(and(eq(lustreDevices.accountID, accountID), eq(lustreDevices.id, deviceID))).limit(1))[0];
   if (!row) throw new DeviceContractError("device_not_found", "Device not found.");
@@ -128,20 +235,72 @@ async function createCommand(accountID: string, deviceID: string, kind: string, 
 }
 export async function feedCommand(accountID: string, deviceID: string, kind: "feed_sites" | "feed_page" | "webdav_add" | "destinations_list", payload: Record<string, string | undefined>) {
   if (kind === "destinations_list") {
-    const pending = (await db.select().from(lustreDeviceCommands).where(and(eq(lustreDeviceCommands.accountID, accountID), eq(lustreDeviceCommands.deviceID, deviceID), eq(lustreDeviceCommands.kind, kind), eq(lustreDeviceCommands.status, "pending"))).orderBy(lustreDeviceCommands.createdAt).limit(1))[0];
+    const pending = (await db.select().from(lustreDeviceCommands).where(and(eq(lustreDeviceCommands.accountID, accountID), eq(lustreDeviceCommands.deviceID, deviceID), eq(lustreDeviceCommands.kind, kind), sql`${lustreDeviceCommands.status} in ('pending', 'running')`)).orderBy(lustreDeviceCommands.createdAt).limit(1))[0];
     if (pending) return pending;
     const completed = (await db.select().from(lustreDeviceCommands).where(and(eq(lustreDeviceCommands.accountID, accountID), eq(lustreDeviceCommands.deviceID, deviceID), eq(lustreDeviceCommands.kind, kind), eq(lustreDeviceCommands.status, "completed"), isNotNull(lustreDeviceCommands.result))).orderBy(desc(lustreDeviceCommands.acknowledgedAt)).limit(1))[0];
     if (completed) return completed;
   }
-  return createCommand(accountID, deviceID, kind, payload);
+  return createCommand(accountID, deviceID, kind, kind === "feed_sites" || kind === "feed_page" ? { ...payload, deliveryProtocol: "gateway-v1" } : payload);
 }
-export async function nextPendingCommand(deviceID: string) { return (await db.select().from(lustreDeviceCommands).where(and(eq(lustreDeviceCommands.deviceID, deviceID), eq(lustreDeviceCommands.status, "pending"))).orderBy(lustreDeviceCommands.createdAt).limit(1))[0] ?? null; }
+export async function nextGatewayCommand(input: { deviceID: string; connectionID: string; sequence: number; allowFeedPage: boolean }) {
+  const result = await db.execute(sql`
+    WITH current_presence AS (
+      SELECT device_id
+      FROM lustre_device_presence
+      WHERE device_id = ${input.deviceID}::uuid
+        AND connection_id = ${input.connectionID}::uuid
+        AND heartbeat_sequence = ${input.sequence}
+    ), candidate AS (
+      SELECT command.id
+      FROM lustre_device_commands AS command
+      INNER JOIN current_presence ON current_presence.device_id = command.device_id
+      WHERE (
+          command.kind = 'feed_sites'
+          OR (${input.allowFeedPage} AND command.kind = 'feed_page')
+        )
+        AND command.status IN ('pending', 'running')
+        AND command.payload ->> 'deliveryProtocol' = 'gateway-v1'
+      ORDER BY command.created_at
+      LIMIT 1
+      FOR UPDATE OF command SKIP LOCKED
+    )
+    UPDATE lustre_device_commands AS command
+    SET status = 'running'
+    FROM candidate
+    WHERE command.id = candidate.id
+    RETURNING command.id, command.kind, command.payload
+  `);
+  const row = (result as unknown as { rows: Array<{ id: string; kind: "feed_sites" | "feed_page"; payload: Record<string, string> }> }).rows[0];
+  if (!row) return null;
+  return row.kind === "feed_sites"
+    ? { id: row.id, kind: "feed_sites" as const, payload: {} }
+    : { id: row.id, kind: "feed_page" as const, payload: { siteID: row.payload.siteID, page: Number(row.payload.page), ...(row.payload.query ? { query: row.payload.query } : {}) } };
+}
+export async function nextPendingCommand(deviceID: string) {
+  return (await db.select().from(lustreDeviceCommands).where(and(eq(lustreDeviceCommands.deviceID, deviceID), sql`${lustreDeviceCommands.status} in ('pending', 'running')`)).orderBy(lustreDeviceCommands.createdAt).limit(1))[0] ?? null;
+}
 export async function acknowledgeCommands(deviceID: string, acknowledgements: Array<{ id: string; status: "completed" | "failed"; jobID?: string; result?: Record<string, unknown> }>) {
-  for (const acknowledgement of acknowledgements) await db.update(lustreDeviceCommands).set({ status: acknowledgement.status, result: acknowledgement.result ?? (acknowledgement.jobID ? { jobID: acknowledgement.jobID } : {}), acknowledgedAt: now() }).where(and(eq(lustreDeviceCommands.id, acknowledgement.id), eq(lustreDeviceCommands.deviceID, deviceID), eq(lustreDeviceCommands.status, "pending")));
+  for (const acknowledgement of acknowledgements) await db.update(lustreDeviceCommands).set({ status: acknowledgement.status, result: acknowledgement.result ?? (acknowledgement.jobID ? { jobID: acknowledgement.jobID } : {}), acknowledgedAt: now() }).where(and(eq(lustreDeviceCommands.id, acknowledgement.id), eq(lustreDeviceCommands.deviceID, deviceID), sql`${lustreDeviceCommands.status} in ('pending', 'running')`));
 }
 export async function commandForOwnedDevice(accountID: string, deviceID: string, commandID: string) { const row = (await db.select().from(lustreDeviceCommands).where(and(eq(lustreDeviceCommands.accountID, accountID), eq(lustreDeviceCommands.deviceID, deviceID), eq(lustreDeviceCommands.id, commandID))).limit(1))[0]; if (!row) throw new DeviceContractError("device_not_found", "Command not found."); return row; }
-export async function syncJobStatus(deviceID: string, jobs: Array<{ id: string; sourcePageURL?: string; displayName?: string; preferredQualityLabel?: string; status: string; progress?: number; downloadedBytes?: number; totalBytes?: number; phase?: string; attempts: number }>) {
-  for (const job of jobs) await db.insert(lustreDeviceJobStatus).values({ deviceID, jobID: job.id, sourcePageURL: job.sourcePageURL ?? null, displayName: job.displayName ?? "Download", preferredQualityLabel: job.preferredQualityLabel ?? null, status: job.status, progress: job.progress === undefined ? null : Math.round(job.progress * 10_000), downloadedBytes: job.downloadedBytes ?? null, totalBytes: job.totalBytes ?? null, phase: job.phase ?? null, attempts: job.attempts, updatedAt: now() }).onConflictDoUpdate({ target: [lustreDeviceJobStatus.deviceID, lustreDeviceJobStatus.jobID], set: { sourcePageURL: job.sourcePageURL ?? null, displayName: job.displayName ?? "Download", preferredQualityLabel: job.preferredQualityLabel ?? null, status: job.status, progress: job.progress === undefined ? null : Math.round(job.progress * 10_000), downloadedBytes: job.downloadedBytes ?? null, totalBytes: job.totalBytes ?? null, phase: job.phase ?? null, attempts: job.attempts, updatedAt: now() } });
+export async function recentCompletedFeedPageResults(accountID: string, deviceID: string, since: Date) {
+  const device = (await db.select({ id: lustreDevices.id }).from(lustreDevices).where(and(eq(lustreDevices.id, deviceID), eq(lustreDevices.accountID, accountID), isNull(lustreDevices.revokedAt))).limit(1))[0];
+  if (!device) throw new DeviceContractError("device_not_found", "Device not found.");
+  return db.select({ result: lustreDeviceCommands.result }).from(lustreDeviceCommands).where(and(
+    eq(lustreDeviceCommands.accountID, accountID),
+    eq(lustreDeviceCommands.deviceID, deviceID),
+    eq(lustreDeviceCommands.kind, "feed_page"),
+    eq(lustreDeviceCommands.status, "completed"),
+    isNotNull(lustreDeviceCommands.result),
+    isNotNull(lustreDeviceCommands.acknowledgedAt),
+    gte(lustreDeviceCommands.acknowledgedAt, since),
+  )).orderBy(desc(lustreDeviceCommands.acknowledgedAt));
+}
+export async function syncJobStatus(deviceID: string, jobs: Array<{ id: string; sourcePageURL?: string; displayName?: string; preferredQualityLabel?: string; status: string; progress?: number; downloadedBytes?: number; totalBytes?: number; phase?: string; attempts: number; updatedAt?: string }>) {
+  for (const job of jobs) {
+    const updatedAt = job.updatedAt ? new Date(job.updatedAt) : now();
+    await db.insert(lustreDeviceJobStatus).values({ deviceID, jobID: job.id, sourcePageURL: job.sourcePageURL ?? null, displayName: job.displayName ?? "Download", preferredQualityLabel: job.preferredQualityLabel ?? null, status: job.status, progress: job.progress === undefined ? null : Math.round(job.progress * 10_000), downloadedBytes: job.downloadedBytes ?? null, totalBytes: job.totalBytes ?? null, phase: job.phase ?? null, attempts: job.attempts, updatedAt }).onConflictDoUpdate({ target: [lustreDeviceJobStatus.deviceID, lustreDeviceJobStatus.jobID], set: { sourcePageURL: job.sourcePageURL ?? null, displayName: job.displayName ?? "Download", preferredQualityLabel: job.preferredQualityLabel ?? null, status: job.status, progress: job.progress === undefined ? null : Math.round(job.progress * 10_000), downloadedBytes: job.downloadedBytes ?? null, totalBytes: job.totalBytes ?? null, phase: job.phase ?? null, attempts: job.attempts, updatedAt } });
+  }
 }
 export async function jobStatusForOwnedDevice(accountID: string, deviceID: string) {
   const device = (await db.select({ id: lustreDevices.id }).from(lustreDevices).where(and(eq(lustreDevices.id, deviceID), eq(lustreDevices.accountID, accountID))).limit(1))[0]; if (!device) throw new DeviceContractError("device_not_found", "Device not found.");

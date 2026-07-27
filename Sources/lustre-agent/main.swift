@@ -15,7 +15,6 @@ struct LustreAgentMain {
             try AgentPaths.prepare()
             let service = try AgentService()
             let cloudPresence = CloudPresenceConnection(service: service)
-            await cloudPresence.startIfEnrolled()
             if let token = try? KeychainTokenStore.token() {
                 let server = try LoopbackServer(service: service, token: token)
                 let port = try await server.start()
@@ -27,6 +26,7 @@ struct LustreAgentMain {
             } else {
                 fputs("Lustre Agent loopback listener is unavailable until Keychain access is authorized.\n", stderr)
             }
+            Task { await cloudPresence.startIfEnrolled() }
             await withUnsafeContinuation { (_: UnsafeContinuation<Void, Never>) in }
         } catch {
             fputs("lustre-agent: \(error.localizedDescription)\n", stderr)

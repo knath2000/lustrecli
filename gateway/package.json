@@ -1,0 +1,13 @@
+{
+  "name": "lustre-gateway",
+  "private": true,
+  "scripts": {
+    "check": "wrangler types && tsc --noEmit",
+    "test": "node --no-warnings --test --experimental-strip-types src/*.test.mjs",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "wrangler": "^4.114.0"
+  }
+}

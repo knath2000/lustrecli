@@ -1,0 +1,13 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "lustre-gateway",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-26",
+  "durable_objects": {
+    "bindings": [{ "name": "DEVICE_CONNECTION", "class_name": "DeviceConnection" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["DeviceConnection"] }],
+  "vars": {
+    "CONTROL_PLANE_ORIGIN": "https://lustrecli.vercel.app"
+  }
+}

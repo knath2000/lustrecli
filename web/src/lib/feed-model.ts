@@ -31,6 +31,10 @@ type FeedJob = { sourcePageURL: string; status: Exclude<FeedTransferState, "avai
 
 const transferPriority: FeedJob["status"][] = ["running", "queued", "paused", "verificationRequired", "failed", "completed", "cancelled"];
 
+export function initialFeedSite(sites: FeedSite[]): FeedSite | undefined {
+  return sites.find((site) => site.id === "hqporner") ?? sites[0];
+}
+
 function normalizedSourceURL(value: string): string {
   try {
     const url = new URL(value);

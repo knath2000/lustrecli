@@ -15,7 +15,9 @@ Lustre Agent is a macOS 14+ local control plane for the LustreStudio download pi
 | `lustre-agent` | Long-running per-user executable; creates the Keychain token, binds the fixed loopback endpoint `127.0.0.1:63406`, and can generate a LaunchAgent plist. |
 | `lustre-auth-helper` | Short-lived visible AppKit/WebKit PornHub sign-in process with a nonpersistent website store and strict HTTPS provider navigation. |
 | `lustre` | Thin CLI client for extraction, queue mutation, status, and job actions. |
-| `web` | Next.js/React/TypeScript development UI for the future hosted product; currently uses a server-side loopback bridge to exercise the real local agent API. |
+| `web` | Next.js/React/TypeScript local panel plus Clerk-authenticated hosted dashboard and Vercel control-plane APIs backed by Neon. |
+| `gateway` | Cloudflare Worker and hibernating Durable Object that authenticate paired agents, acknowledge validated heartbeats locally, and relay accepted state to Vercel. |
+| `feed-assets` | Separate Cloudflare Worker that exchanges short-lived device-bound tickets for bounded protected-provider image/video responses. |
 
 ### Runtime roles and packaging direction
 
@@ -98,10 +100,10 @@ The root loopback page is an authenticated Monitor/Operate surface at `http://12
 
 ## Lustre Cloud web application
 
-`web/` is the first implementation slice of the MyJDownloader-style product direction. It is a Next.js 16 App Router application with React, TypeScript, Tailwind CSS, and a liquid-glass design system derived from the Google Stitch workspace. The current device workspace, Downloads ledger and inspector, Destinations manager, Activity timeline, Settings surface, and Queue Transfer sheet are real operational surfaces rather than static mockups:
+`web/` is the Next.js 16 App Router implementation of the local panel and hosted MyJDownloader-style product direction. It uses React, TypeScript, Tailwind CSS, and a liquid-glass design system derived from the Google Stitch workspace. The local bridge and Cloud control plane are separate trust paths:
 
-- The browser keeps the local agent token in React memory only; it is discarded on disconnect or tab reload.
-- A server-side catch-all route forwards authenticated `/v1/*` calls only to `127.0.0.1:63406`. Path validation prevents traversal or proxying arbitrary hosts.
+- In local mode, the browser keeps the local agent token in React memory only; it is discarded on disconnect or tab reload.
+- The local server-side catch-all route forwards authenticated `/v1/*` calls only to `127.0.0.1:63406`. Path validation prevents traversal or proxying arbitrary hosts.
 - Session-configurable polling displays durable jobs, byte progress, status messages, supported state actions, saved non-secret WebDAV profiles, and bounded worker logs from the Swift agent.
 - The Downloads surface filters and searches the complete live job collection client-side, resolves destination profile names, and exposes a selected job's source, quality, progress, timestamps, valid actions, and complete bounded worker event log.
 - The Destinations surface shows the built-in local target and saved WebDAV profiles, derives real per-target job usage, creates profiles through the authenticated agent, runs the agent's write-and-cleanup connection test, and removes profiles after explicit confirmation. Password fields are never retained after submission or returned by the agent.
@@ -111,7 +113,20 @@ The root loopback page is an authenticated Monitor/Operate surface at `http://12
 - Feed fetches normalized multi-provider cards through the agent, preserves query parameters through the authenticated Next.js proxy, supports pagination, individual or bounded batch queueing, destination selection, and job-derived transfer status. Provider thumbnails and hover images/videos use the bounded `/v1/feed/assets` proxy; object URLs are cached per source, failed sources are remembered, and object URLs are revoked on teardown.
 - Swift's default `JSONEncoder` emits `Date` as Foundation reference-date seconds. The web boundary normalizes those numeric values while also accepting ISO-8601 strings, so sorting and time display remain compatible with a future API encoding change.
 
-This bridge is deliberately development-only. The hosted service must not attempt to call a visitor's loopback address. Production remote control keeps the Swift agent authoritative for downloads, paths, SQLite state, and Keychain secrets. Slice 1 adds Clerk-backed Lustre accounts, pairing, device management, Keychain P-256 identities, and device-session tokens. Slice 2A adds an outbound, experimental Vercel WebSocket gateway for bounded heartbeat presence only: the gateway persists server-received heartbeat state in Neon and the browser reads it through authenticated HTTP. Browser account identity and paired-device identity remain separate trust domains; no remote command or job data crosses the cloud connection.
+The local bridge is development-only; the hosted service never calls a visitor's loopback address. Production keeps the Swift agent authoritative for downloads, provider access, paths, SQLite state, and Keychain secrets. Clerk authenticates browser accounts, while a permanent Keychain P-256 device identity signs enrollment and session challenges. Browser account identity and paired-device identity remain separate trust domains.
+
+The production transport has four boundaries:
+
+1. The agent obtains a signed device session and opens an outbound WebSocket to the thin Cloudflare gateway Worker.
+2. A Durable Object accepts the socket, sends `gateway_hello_ack`, serializes versioned per-socket attachment metadata, and survives hibernation without changing the connection identity.
+3. The Durable Object validates strict UTF-8, JSON, the heartbeat envelope and schema, attachment state, payload bounds, and monotonically increasing sequence. It sends the local acknowledgement before asynchronously relaying the accepted heartbeat to Vercel.
+4. Authenticated Vercel routes persist presence, job projections, command acknowledgements, and durable Feed results in Neon, then return at most one allowlisted command for delivery on the next heartbeat.
+
+Relay failure is isolated from the live socket: local acknowledgements continue and persistence resumes without forcing an agent reconnect. Heartbeats are limited to 131,072 bytes; Feed result acknowledgements are limited to 65,536 bytes. Current command selection allows only `feed_sites` and explicitly gated `feed_page`; all queue, destination, and download-mutation delivery remains disabled.
+
+Cloud Feed is compiled into the dashboard but hidden unless `LUSTRE_CLOUD_FEED_ENABLED` is exactly `true`. The acceptance route adds a second exact Clerk-subject and kill-switch gate and otherwise returns `404`. Metadata requests are canonicalized, coalesced, and sequence-protected. Pagination, search, and refresh can browse results, but destination, selection, and queue controls remain unavailable until their command path is separately accepted.
+
+Protected Feed media is a second trust path. The Clerk-authenticated Vercel ticket route verifies device ownership and requires the exact asset URL and kind to appear in a recent completed `feed_page` result. It signs a short-lived device-bound ticket. `lustre-feed-assets` validates that ticket, exact production CORS origin, HTTPS provider allowlists, redirects, content type, timeout, and byte limits before streaming the response with `no-store` and `nosniff`. It does not forward browser cookies, authorization, or arbitrary headers, and the browser never contacts protected provider hosts directly.
 
 ## PornHub visible authentication
 
@@ -138,15 +153,16 @@ Feed search is an agent-owned extension of the structured feed contract rather t
 ## Deliberate next seams
 
 1. Resolve the intermittent aggregate runner-fixture hang, then renew full-suite/release acceptance counts.
-2. Measure the experimental Vercel WebSocket adapter through deployment replacement, sleep/wake, network loss, revocation, and sustained presence tests; replace it with a dedicated gateway if its lifecycle or cost is unsuitable.
-3. Add an authenticated remote command protocol only after a separate command authorization and audit design review.
-4. Add device enrollment/selection and server-backed pagination as job histories grow.
-5. Make the current single-transfer scheduler limit configurable and add per-destination limits.
-6. Add resumable `.part` transfers and bounded automatic re-resolution for expired media responses.
+2. Add Cloud-safe destination listing and accept it across hibernation, replay, stale-result, and secret-boundary tests.
+3. Add narrowly authorized queue delivery only after destination selection is green, including idempotency, duplicate-delivery, acknowledgement-size, and zero-unintended-transfer checks.
+4. Enable public Cloud Feed only after the destination and queue controls pass production end-to-end acceptance and the kill switch is proven.
+5. Add server-backed pagination as job histories grow.
+6. Make the current single-transfer scheduler limit configurable and add per-destination limits.
+7. Add resumable `.part` transfers and bounded automatic re-resolution for expired media responses.
 
 ## Validation
 
-`swift test` verifies SQLite persistence, Force Start isolation, serialized scheduling, multi-provider feeds, provider pairing and diagnostics, HLS handling, mydaddy parsing, yt-dlp format/process safety, authenticated cookie sanitization/routing, helper lifecycle, private cookie-file cleanup, WebDAV staging, cancellation, transfer-time re-resolution, feed asset proxy boundaries, auth sequencing, and the progress parser/decoder/buffer/channel/runner pipeline. `web/` tests plus lint and production build validate the proxy, feed identities/previews, auth sequencing, Force Start, live operational views, TypeScript, and the production bundle. Exact accepted counts are recorded in `CURRENT_STATUS.md` and `SESSION_LOG.md` after each release verification.
+`swift test` verifies SQLite persistence, Force Start isolation, serialized scheduling, multi-provider feeds, provider pairing and diagnostics, HLS handling, mydaddy parsing, yt-dlp format/process safety, authenticated cookie sanitization/routing, helper lifecycle, private cookie-file cleanup, WebDAV staging, cancellation, transfer-time re-resolution, Feed command encoding, auth sequencing, and the progress parser/decoder/buffer/channel/runner pipeline. `web/` tests and production builds validate the local proxy, Cloud contracts, gateway persistence/command selection, Feed metadata state, ticket issuance, protected asset URLs, TypeScript, and the production bundle. `gateway/` tests cover Worker/DO routing and delivery boundaries. `feed-assets/` tests cover ticket, origin, redirect, content-type, timeout, and exact byte limits. Exact accepted counts and any known non-green checks are recorded in `CURRENT_STATUS.md` and `SESSION_LOG.md`.
 ## PornHub authentication and authenticated feeds
 
 `LustreCore` contains only the public `PornHubAuthStatus` model and feed contract. `LustreAgent` owns the private cookie store, helper process launch, redirect-safe request handling, and yt-dlp cookie-file lifecycle. `lustre-auth-helper` is a dedicated AppKit/WebKit executable with its own visible NSApplication event loop. It restricts the main frame to HTTPS PornHub, allows HTTPS subframes only under a trusted PornHub top level, rejects popups/downloads, and emits one fixed status token. It persists Codable cookie records directly to the fixed `com.pmvdl.lustre-agent` Keychain service/account only after bounded canonical-page semantic validation.

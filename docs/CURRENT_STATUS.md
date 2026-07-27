@@ -1,6 +1,6 @@
 # Current implementation status
 
-Last updated: 2026-07-25
+Last updated: 2026-07-26
 
 This document records the accepted behavior in the current `main` working tree, including the pieces that are intentionally still incomplete. `ARCHITECTURE.md` remains the component-level design reference; `SESSION_LOG.md` records the delivery chronology.
 
@@ -40,13 +40,17 @@ This document records the accepted behavior in the current `main` working tree, 
 ### Lustre Cloud
 
 - Slice 1 is implemented and deployed: Clerk authenticates browser users; Lustre-owned accounts, devices, pairing challenges, enrollment/session challenges, audits, and revocation live in Neon through Drizzle migrations. Device signatures use one permanent macOS Keychain P-256 key and deterministic, domain-separated envelopes. Local `lustre cloud disconnect` only removes local enrollment metadata.
-- Slice 2A is deployed and manually accepted at `https://lustrecli.vercel.app`: an enrolled `lustre-agent` obtains a fresh session token, connects through the native experimental Vercel WebSocket adapter using a token-bearing subprotocol rather than a URL, sends bounded heartbeats, and appears Online in the browser only after Neon accepts a server-timestamped heartbeat.
-- Presence has a dedicated `lustre_device_presence` record. Browser state is truthful (`online`, `offline`, `neverConnected`, or `revoked`) and is read through Clerk-authenticated HTTP. It does not imply job synchronization, remote control, storage state, latency, or transfer availability.
-- The Vercel WebSocket adapter is an experimental, replaceable Slice 2A implementation. It has no Redis, job payloads, destinations, provider state, commands, or browser socket broadcast. The agent reconnects with a fresh token after interruptions and does not assume a fixed socket lifetime.
-- The deployed Cloud dashboard is Clerk-gated and controls paired agents only through the authenticated outbound WebSocket. It never calls `127.0.0.1:63406` and never sees the loopback token.
-- Cloud Downloads and Activity show the agent-projected original source-page URL rather than a synthetic `lustre://` identifier. The projection is backfilled by normal heartbeat sync and never includes transient resolved media URLs.
-- Cloud queueing supports `local` and paired-agent WebDAV destinations. Cloud sends only the selected profile UUID; the agent validates the profile, obtains its password from Keychain, and performs the transfer locally. Safe destination metadata is listed in Cloud; password entry for Cloud-created profiles is prompted locally on macOS.
-- Broker commands persist and replay full acknowledgements after reconnects. Destination-list reads coalesce and use the latest confirmed Cloud-safe result to avoid an empty dashboard during agent reconnection.
+- The durable transport is a dedicated Cloudflare Worker plus Durable Object gateway. The enrolled agent obtains a fresh signed session, opens the outbound WebSocket, receives `gateway_hello_ack`, and then sends bounded sequenced heartbeats. The Durable Object accepts the socket before parsing application data, restores per-socket attachment metadata after hibernation, rejects malformed or stale messages with stable `4400` close reasons, and sends a local heartbeat acknowledgement before any Vercel request.
+- Heartbeats are capped at 131,072 bytes and require strict UTF-8, a valid JSON envelope, a monotonic per-connection sequence, and the complete versioned heartbeat schema. Feed result acknowledgements are separately capped at 65,536 bytes. Rejected messages are neither acknowledged nor serialized.
+- The gateway relays accepted heartbeats asynchronously to authenticated Vercel control-plane routes with a bounded timeout. Relay failure does not disconnect the agent or delay the local acknowledgement. Vercel persists truthful presence, all 29 durable job projections, and command receipts in Neon at wire timestamp precision.
+- Outbound command selection is intentionally allowlisted to `feed_sites` and gated `feed_page` commands. Durable receipt replay survives hibernation and transient command-row or relay failures. Destination listing, queueing, download mutation, and every other command type remain disabled on this transport until they receive equivalent end-to-end acceptance.
+- The production Cloud dashboard at `https://lustrecli.vercel.app` is Clerk-gated, reads paired-agent state through authenticated Vercel HTTP, and never calls `127.0.0.1:63406` or sees the loopback token, provider cookies, Keychain secrets, raw WebDAV credentials, or transient media URLs.
+- Cloud Downloads and Activity show agent-projected original source-page URLs. Presence is truthful (`online`, `offline`, `neverConnected`, or `revoked`) and does not overstate storage, latency, or transfer availability.
+- Cloud Feed metadata browsing is implemented behind the exact `LUSTRE_CLOUD_FEED_ENABLED=true` flag. Requests are coalesced by canonical source/query/page keys, stale results cannot replace newer ones, pagination and normalized search preserve existing cards, and destination/selection/queue controls remain gated. Public Production currently has no Feed navigation or rendering.
+- The temporary `/feed-acceptance` canary requires an exact Clerk subject plus an explicit kill switch. It is disabled in the final production deployment and returns `404`, including for the previously allowlisted account.
+- Protected Feed media uses short-lived, device-bound Vercel tickets and the separate `lustre-feed-assets` Cloudflare Worker. Tickets bind the exact URL and media kind; the Worker enforces HTTPS provider-host allowlists, exact production CORS, safe redirects, expected content types, 6 MiB image and 16 MiB video limits, a 20-second upstream timeout, no credential forwarding, and `no-store` responses. The browser makes no direct protected-provider request.
+- K2 production acceptance rendered 50 protected HQPorner thumbnails, advanced a four-scene hover preview, and rendered 42 protected PornHub thumbnails. Blocking the asset Worker preserved metadata, agent connectivity, 29 unchanged jobs, and zero active transfers.
+- Current accepted production artifacts are Vercel deployment `dpl_GaC7aNcM1cfu6UtMQRdHt1K8VBgg` and asset Worker version `b9df82c1-f26c-42e2-841d-88229016ff19` at `lustre-feed-assets.knath2000.workers.dev`. The Cloudflare gateway and macOS agent were not redeployed for K2.
 
 - The Next.js UI is backed by the live loopback agent rather than fabricated telemetry.
 - Downloads, Activity, Destinations, Settings, Queue Transfer, Feed, Force Start, and PornHub auth controls call the real API.
@@ -79,9 +83,12 @@ Known follow-up risk: an earlier aggregate strict-concurrency run intermittently
 
 Latest recorded verification:
 
-- Full `swift test`: 168 tests passed with zero failures, including all 8 `StreamingProcessRunnerTests` and 14 `PornHubYtDlpTests`.
-- `swift build -c release`: passed.
-- Frontend: 33 tests passed; ESLint passed; Next.js production build and TypeScript passed.
+- The last Cloud command-delivery acceptance passed 183 Swift tests. K1 later encountered an intermittent process-fixture aggregate flake; all 8 affected tests passed on immediate rerun. K2 did not change or restart the agent.
+- Frontend: 66 tests passed; TypeScript and the Next.js production build passed.
+- Asset Worker: 5 tests, typecheck, Wrangler dry run, production deployment, and unauthenticated `401` probe passed.
+- Gateway tests, static checks, and Wrangler dry run passed before the K1/K1.1 canaries; the gateway was unchanged in K2.
+- K2 browser acceptance verified 50 HQPorner and 42 PornHub protected thumbnails, a four-scene hover preview, zero direct protected-provider requests, and graceful metadata-only degradation when the asset Worker was blocked.
+- The unrelated pre-existing lint errors in `cloud-dashboard-view.tsx` and `cloud-home-view.tsx` remain unchanged; do not record the repository-wide lint command as green until those are repaired.
 - `git diff --check`: passed.
 
 Run before release:

@@ -2,3 +2,6 @@
 .DS_Store
 .vercel
 .env*
+gateway/.dev.vars
+gateway/.wrangler/
+gateway/node_modules/

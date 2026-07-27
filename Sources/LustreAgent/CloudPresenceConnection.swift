@@ -3,10 +3,38 @@ import LustreCore
 
 private enum CloudPresenceConnectionError: Error {
     case serverRequestedReconnect
+    case timedOut
+    case invalidHeartbeatResponse(Int)
+    case httpStatus(Int)
+}
+
+private enum CloudPresenceFailureStage: String {
+    case enrollment = "enrollment"
+    case sessionChallenge = "session_challenge"
+    case signing = "signing"
+    case sessionCompletion = "session_completion"
+    case gatewayProbe = "gateway_probe"
+    case firstHeartbeat = "first_heartbeat"
+
+    func code(for error: Error) -> String {
+        if case CloudPresenceConnectionError.timedOut = error { return "timeout" }
+        if case let CloudPresenceConnectionError.invalidHeartbeatResponse(count) = error { return "invalid_response_\(count)" }
+        if case let CloudPresenceConnectionError.httpStatus(status) = error { return "http_\(status)" }
+        if case CloudDeviceError.keychainFailure = error { return "keychain_unavailable" }
+        if case CloudDeviceError.deviceRevoked = error { return "device_revoked" }
+        if case CloudDeviceError.server = error { return "server_rejected" }
+        if let error = error as? URLError { return "url_\(error.code.rawValue)" }
+        let error = error as NSError
+        if error.code != 0 { return "error_\(error.domain)_\(error.code)" }
+        return "failed"
+    }
 }
 
 public actor CloudPresenceConnection {
     public static let heartbeatInterval: TimeInterval = 30
+    private static let maximumHeartbeatFrameBytes = 131_072
+    private static let commandDeliveryCapability = "command-delivery-v1"
+    private static let feedPageCapability = "feed-page-v1"
     private let identity: DeviceIdentity
     private let session: URLSession
     private let remoteControl: CloudRemoteControl
@@ -33,14 +61,26 @@ public actor CloudPresenceConnection {
         while !Task.isCancelled {
             guard let generation = reconnectState.beginConnection() else { return }
             var reconnectReason = CloudPresenceReconnectReason.sessionAuthenticationFailed
+            var stage = CloudPresenceFailureStage.enrollment
             do {
                 guard reconnectState.requiresFreshSessionToken(for: generation) else { return }
                 let client = try CloudEnrollmentClient(origin: URL(string: enrollment.cloudOrigin)!)
-                let challenge = try await client.deviceSessionChallenge(deviceID: enrollment.deviceID)
-                let envelope = try CloudDeviceProtocol.envelope(purpose: "session", audience: enrollment.cloudOrigin, subjectID: enrollment.deviceID.uuidString.lowercased(), nonce: challenge.nonce, thumbprint: try identity.thumbprint(), expiresAt: challenge.expiresAt)
-                let completed = try await client.completeDeviceSession(deviceID: enrollment.deviceID, challengeID: challenge.challengeID, signature: try identity.sign(envelope))
+                stage = .sessionChallenge
+                let challenge = try await timed(after: 15) { try await client.deviceSessionChallenge(deviceID: enrollment.deviceID) }
+                stage = .signing
+                let envelope = try await timed(after: 10) { try CloudDeviceProtocol.envelope(purpose: "session", audience: enrollment.cloudOrigin, subjectID: enrollment.deviceID.uuidString.lowercased(), nonce: challenge.nonce, thumbprint: try self.identity.thumbprint(), expiresAt: challenge.expiresAt) }
+                let signature = try await timed(after: 10) { try self.identity.sign(envelope) }
+                stage = .sessionCompletion
+                let completed = try await timed(after: 15) { try await client.completeDeviceSession(deviceID: enrollment.deviceID, challengeID: challenge.challengeID, signature: signature) }
                 reconnectReason = .transportClosed
-                try await connect(origin: enrollment.cloudOrigin, token: completed.accessToken, generation: generation)
+                if let gatewayOrigin = completed.gatewayOrigin {
+                    stage = .gatewayProbe
+                    try await timed(after: 10) { try await self.probeGateway(origin: gatewayOrigin, token: completed.accessToken) }
+                    try await timed(after: 10) { try await self.smokeGateway(origin: gatewayOrigin, token: completed.accessToken, target: "_ws-smoke-worker") }
+                    try await timed(after: 45) { try await self.smokeGateway(origin: gatewayOrigin, token: completed.accessToken, target: "_ws-smoke-do") }
+                }
+                stage = .firstHeartbeat
+                try await self.connect(origin: completed.gatewayOrigin ?? enrollment.cloudOrigin, token: completed.accessToken, generation: generation, usesGateway: completed.gatewayOrigin != nil)
             } catch CloudPresenceConnectionError.serverRequestedReconnect {
                 guard let delay = reconnectState.connectionFailed(generation) else { return }
                 fputs(CloudPresenceReconnectReason.serverRequestedReconnect.logMessage(generation: generation, retryDelay: delay) + "\n", stderr)
@@ -57,35 +97,70 @@ public actor CloudPresenceConnection {
             }
             catch {
                 guard let delay = reconnectState.connectionFailed(generation) else { return }
+                fputs("Lustre Cloud presence failure: stage=\(stage.rawValue) code=\(stage.code(for: error)) generation=\(generation).\n", stderr)
                 fputs(reconnectReason.logMessage(generation: generation, retryDelay: delay) + "\n", stderr)
                 try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             }
         }
     }
 
-    private func connect(origin: String, token: String, generation: CloudPresenceReconnectStateMachine.Generation) async throws {
+    private func connect(origin: String, token: String, generation: CloudPresenceReconnectStateMachine.Generation, usesGateway: Bool) async throws {
         guard reconnectState.requiresFreshSessionToken(for: generation) else { return }
         guard var components = URLComponents(string: origin) else { throw CloudDeviceError.invalidOrigin }
-        components.scheme = components.scheme == "https" ? "wss" : "ws"
-        components.path = "/api/cloud/v1/realtime"
+        switch components.scheme?.lowercased() {
+        case "https", "wss": components.scheme = "wss"
+        case "http", "ws": components.scheme = "ws"
+        default: throw CloudDeviceError.invalidOrigin
+        }
+        components.path = usesGateway ? "/realtime" : "/api/cloud/v1/realtime"
         components.query = nil
         guard let url = components.url else { throw CloudDeviceError.invalidOrigin }
         let task = session.webSocketTask(with: url, protocols: ["lustre-v1", "lustre.\(token)"])
         fputs("Lustre Cloud presence connecting: generation=\(generation).\n", stderr)
         socket = task; task.resume()
+        if usesGateway {
+            let hello: URLSessionWebSocketTask.Message
+            do {
+                fputs("Lustre Cloud gateway: event=realtime_hello_send_started.\n", stderr)
+                hello = try await sendAndReceive(.string("{\"version\":1,\"type\":\"gateway_hello\",\"capabilities\":[\"\(Self.commandDeliveryCapability)\",\"\(Self.feedPageCapability)\"]}"), using: task)
+                fputs("Lustre Cloud gateway: event=realtime_hello_reply_received.\n", stderr)
+            } catch {
+                if let response = task.response as? HTTPURLResponse { throw CloudPresenceConnectionError.httpStatus(response.statusCode) }
+                throw error
+            }
+            guard case let .string(helloText) = hello,
+                  let helloData = helloText.data(using: .utf8),
+                  let helloFrame = try? JSONDecoder.cloud.decode(CloudGatewayHelloResponse.self, from: helloData),
+                  helloFrame.version == 1,
+                  helloFrame.type == "gateway_hello_ack"
+            else { throw CloudDeviceError.invalidResponse }
+            let commandDeliveryV1 = helloFrame.capabilities?.contains(Self.commandDeliveryCapability) == true
+            let feedPageV1 = commandDeliveryV1 && helloFrame.capabilities?.contains(Self.feedPageCapability) == true
+            fputs("Lustre Cloud gateway: event=realtime_hello_accepted commandDelivery=\(commandDeliveryV1) feedPage=\(feedPageV1).\n", stderr)
+            try await heartbeatLoop(task: task, generation: generation, commandDeliveryV1: commandDeliveryV1, feedPageV1: feedPageV1)
+            return
+        }
+        try await heartbeatLoop(task: task, generation: generation, commandDeliveryV1: false, feedPageV1: false)
+    }
+
+    private func heartbeatLoop(task: URLSessionWebSocketTask, generation: CloudPresenceReconnectStateMachine.Generation, commandDeliveryV1: Bool, feedPageV1: Bool) async throws {
         var sequence = 1
+        let correlationID = UUID().uuidString.lowercased()
         while !Task.isCancelled {
             guard reconnectState.maySendHeartbeat(for: generation) else {
                 task.cancel(with: .goingAway, reason: nil)
                 return
             }
             let payload = await remoteControl.heartbeatPayload()
-            let frame = CloudHeartbeat(sequence: sequence, sentAt: ISO8601DateFormatter().string(from: .now), agentVersion: "0.1.0", commandAcks: payload.acks, jobs: payload.jobs)
-            let data = try JSONEncoder.cloud.encode(frame)
+            let data = try heartbeatData(sequence: sequence, correlationID: correlationID, acknowledgements: payload.acks, jobs: payload.jobs)
+            fputs("Lustre Cloud gateway: event=realtime_heartbeat_send_started sequence=\(sequence) bytes=\(data.count).\n", stderr)
             let response = try await sendAndReceive(.data(data), using: task)
+            fputs("Lustre Cloud gateway: event=realtime_heartbeat_reply_received sequence=\(sequence).\n", stderr)
             let responseData: Data
             switch response { case let .data(data): responseData = data; case let .string(text): responseData = Data(text.utf8); @unknown default: throw CloudDeviceError.invalidResponse }
-            let responseFrame = try JSONDecoder.cloud.decode(CloudHeartbeatResponse.self, from: responseData)
+            let responseFrame: CloudHeartbeatResponse
+            do { responseFrame = try JSONDecoder.cloud.decode(CloudHeartbeatResponse.self, from: responseData) }
+            catch { throw CloudPresenceConnectionError.invalidHeartbeatResponse(responseData.count) }
             guard responseFrame.version == 1 else { throw CloudDeviceError.invalidResponse }
             if responseFrame.type == "reconnect-requested", responseFrame.reason == "lease_expired" {
                 task.cancel(with: .goingAway, reason: nil)
@@ -94,10 +169,93 @@ public actor CloudPresenceConnection {
             }
             guard responseFrame.type == "heartbeat-accepted", responseFrame.sequence == sequence else { throw CloudDeviceError.invalidResponse }
             await remoteControl.acknowledgedByCloud(responseFrame.acknowledgedCommandAcks ?? [])
-            await remoteControl.handle(responseFrame.command)
+            let command: CloudRemoteCommand?
+            if commandDeliveryV1 {
+                let deliveryMessage = try await receive(using: task)
+                fputs("Lustre Cloud gateway: event=realtime_delivery_received sequence=\(sequence).\n", stderr)
+                let deliveryData: Data
+                switch deliveryMessage { case let .data(data): deliveryData = data; case let .string(text): deliveryData = Data(text.utf8); @unknown default: throw CloudDeviceError.invalidResponse }
+                guard let delivery = try? JSONDecoder.cloud.decode(CloudCommandDelivery.self, from: deliveryData),
+                      delivery.version == 1,
+                      delivery.type == "command-delivery",
+                      delivery.sequence == sequence,
+                      delivery.correlationID == correlationID,
+                      delivery.command == nil || delivery.command?.kind == "feed_sites" || (feedPageV1 && delivery.command?.kind == "feed_page")
+                else { throw CloudDeviceError.invalidResponse }
+                await remoteControl.acknowledgedByCloud(ids: delivery.acknowledgedCommandAckIDs)
+                command = delivery.command
+            } else {
+                command = responseFrame.command
+            }
+            let handledCommand = await remoteControl.handle(command)
             sequence += 1
+            if handledCommand { continue }
             try await Task.sleep(nanoseconds: UInt64(Self.heartbeatInterval * 1_000_000_000))
         }
+    }
+
+    private func probeGateway(origin: String, token: String) async throws {
+        guard var components = URLComponents(string: origin) else { throw CloudDeviceError.invalidOrigin }
+        components.scheme = components.scheme == "wss" ? "https" : components.scheme == "ws" ? "http" : components.scheme
+        components.path = "/probe"
+        components.query = nil
+        guard let url = components.url else { throw CloudDeviceError.invalidOrigin }
+        var request = URLRequest(url: url)
+        request.setValue("lustre-v1, lustre.\(token)", forHTTPHeaderField: "Sec-WebSocket-Protocol")
+        let (_, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else { throw CloudDeviceError.invalidResponse }
+        guard http.statusCode == 200 else { throw CloudPresenceConnectionError.httpStatus(http.statusCode) }
+    }
+
+    private func heartbeatData(sequence: Int, correlationID: String, acknowledgements: [CloudRemoteCommandAck], jobs: [CloudRemoteJobStatus]) throws -> Data {
+        let sentAt = ISO8601DateFormatter().string(from: .now)
+        var included: [CloudRemoteJobStatus] = []
+        var encoded = try JSONEncoder.cloud.encode(CloudHeartbeat(sequence: sequence, sentAt: sentAt, agentVersion: "0.1.0", correlationID: correlationID, commandAcks: acknowledgements, jobs: included))
+        guard encoded.count <= Self.maximumHeartbeatFrameBytes else { throw CloudDeviceError.invalidResponse }
+        for job in jobs {
+            let candidate = included + [job]
+            let candidateData = try JSONEncoder.cloud.encode(CloudHeartbeat(sequence: sequence, sentAt: sentAt, agentVersion: "0.1.0", correlationID: correlationID, commandAcks: acknowledgements, jobs: candidate))
+            guard candidateData.count <= Self.maximumHeartbeatFrameBytes else { break }
+            included = candidate
+            encoded = candidateData
+        }
+        return encoded
+    }
+
+    private func smokeGateway(origin: String, token: String, target: String) async throws {
+        guard var components = URLComponents(string: origin) else { throw CloudDeviceError.invalidOrigin }
+        components.scheme = components.scheme == "https" ? "wss" : components.scheme == "http" ? "ws" : components.scheme
+        components.path = "/\(target)"
+        components.query = nil
+        guard let url = components.url else { throw CloudDeviceError.invalidOrigin }
+        fputs("Lustre Cloud gateway smoke: target=\(target) event=connecting.\n", stderr)
+        let configuration = URLSessionConfiguration.default
+        configuration.timeoutIntervalForRequest = target == "_ws-smoke-do" ? 45 : 15
+        let smokeSession = URLSession(configuration: configuration)
+        let task = smokeSession.webSocketTask(with: url, protocols: ["lustre-v1", "lustre.\(token)"])
+        task.resume()
+        do {
+            let reply = try await sendAndReceive(.string("{\"version\":1,\"type\":\"gateway_hello\"}"), using: task)
+            guard case let .string(text) = reply, text.contains("gateway_hello_ack") else { throw CloudDeviceError.invalidResponse }
+            fputs("Lustre Cloud gateway smoke: target=\(target) event=hello_ack.\n", stderr)
+            if target == "_ws-smoke-do" {
+                try await Task.sleep(nanoseconds: 20_000_000_000)
+                let heartbeat = Data("{\"version\":1,\"type\":\"heartbeat\",\"sequence\":1,\"sentAt\":\"2026-01-01T00:00:00Z\",\"agentVersion\":\"smoke\",\"correlationID\":\"smoke\",\"commandAcks\":[],\"jobs\":[]}".utf8)
+                fputs("Lustre Cloud gateway smoke: target=\(target) event=heartbeat_data_send_started.\n", stderr)
+                try await task.send(.data(heartbeat))
+                fputs("Lustre Cloud gateway smoke: target=\(target) event=heartbeat_data_send_completed.\n", stderr)
+                let heartbeatReply = try await task.receive()
+                guard case let .string(heartbeatText) = heartbeatReply,
+                      heartbeatText.contains("\"type\":\"heartbeat-accepted\""),
+                      heartbeatText.contains("\"sequence\":1")
+                else { throw CloudDeviceError.invalidResponse }
+                fputs("Lustre Cloud gateway smoke: target=\(target) event=heartbeat_reply_received.\n", stderr)
+            }
+        } catch {
+            if let response = task.response as? HTTPURLResponse { throw CloudPresenceConnectionError.httpStatus(response.statusCode) }
+            throw error
+        }
+        task.cancel(with: .goingAway, reason: nil)
     }
 
     private func sendAndReceive(_ message: URLSessionWebSocketTask.Message, using task: URLSessionWebSocketTask) async throws -> URLSessionWebSocketTask.Message {
@@ -109,5 +267,25 @@ public actor CloudPresenceConnection {
         defer { timeout.cancel() }
         try await task.send(message)
         return try await task.receive()
+    }
+
+    private func receive(using task: URLSessionWebSocketTask) async throws -> URLSessionWebSocketTask.Message {
+        let timeout = Task.detached {
+            try? await Task.sleep(nanoseconds: 10_000_000_000)
+            guard !Task.isCancelled else { return }
+            task.cancel(with: .goingAway, reason: nil)
+        }
+        defer { timeout.cancel() }
+        return try await task.receive()
+    }
+
+    private func timed<T: Sendable>(after seconds: TimeInterval, operation: @escaping @Sendable () async throws -> T) async throws -> T {
+        try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask(operation: operation)
+            group.addTask { try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000)); throw CloudPresenceConnectionError.timedOut }
+            defer { group.cancelAll() }
+            guard let result = try await group.next() else { throw CloudPresenceConnectionError.timedOut }
+            return result
+        }
     }
 }

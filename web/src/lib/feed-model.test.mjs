@@ -1,10 +1,20 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { feedPreviewDelay, feedPreviewFrames, feedPreviewMediaKind, feedTransferState, feedUsesAuthenticatedAssetProxy, queueFeedItems, toggleFeedSelection } from "./feed-model.ts";
+import { feedPreviewDelay, feedPreviewFrames, feedPreviewMediaKind, feedTransferState, feedUsesAuthenticatedAssetProxy, initialFeedSite, queueFeedItems, toggleFeedSelection } from "./feed-model.ts";
 
 const alpha = { id: "alpha", sourcePageURL: "https://allpornstream.com/post/alpha" };
 const beta = { id: "beta", sourcePageURL: "https://allpornstream.com/post/beta" };
+
+test("initialFeedSite prefers the stable HQPorner metadata source", () => {
+  const sites = [
+    { id: "allpornstream", displayName: "AllPornStream", homeURL: "https://allpornstream.com", supportsSearch: true },
+    { id: "hqporner", displayName: "HQPorner", homeURL: "https://hqporner.com", supportsSearch: true },
+  ];
+  assert.equal(initialFeedSite(sites)?.id, "hqporner");
+  assert.equal(initialFeedSite(sites.slice(0, 1))?.id, "allpornstream");
+  assert.equal(initialFeedSite([]), undefined);
+});
 
 test("toggleFeedSelection adds and removes stable item ids", () => {
   assert.deepEqual([...toggleFeedSelection(new Set(), alpha.id)], ["alpha"]);
