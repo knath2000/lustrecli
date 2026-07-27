@@ -69,7 +69,7 @@ Creating a job durably acknowledges it as `queued` immediately. The scheduler st
 
 ## API
 
-Feed discovery accepts a typed `FeedQuery` with site, optional text, and page. The agent constructs provider-native search URLs only from fixed trusted origins and parameters: PornHub `/video/search?search=`, HQPorner `?q=` with `p=` pagination, and AllPornStream `?search=` with `page=` pagination. The API never accepts an arbitrary provider URL.
+Feed discovery accepts a typed `FeedQuery` with site, optional text, and page. The agent constructs provider-native search URLs only from fixed trusted origins and parameters: PornHub `/video/search?search=`, HQPorner `?q=` with `p=` pagination, and AllPornStream `?s=` with `page=` pagination. The API never accepts an arbitrary provider URL.
 
 `GET /health` is unauthenticated. All other API endpoints require `Authorization: Bearer <token>`.
 
@@ -128,7 +128,11 @@ Feed command creation first looks for the exact account/device/kind/site/normali
 
 Realtime connections may negotiate `command-wake-v1`. The command route signs the exact `{ version, deviceID, commandID }` body with a dedicated secret and millisecond timestamp after the database commit. The gateway accepts only bounded, current, strictly shaped, correctly signed requests, then asks the device Durable Object to enumerate hibernation-managed sockets and send a payload-free availability frame. One agent receive pump owns the socket and feeds a bounded mailbox; wake signals are latched/coalesced and trigger the normal heartbeat without changing acknowledgement or delivery ordering. When notification fails or is disabled, the periodic heartbeat remains the fallback.
 
-AllPornStream browser verification is entirely local. A nonpersistent restricted WebKit helper permits only credential-free HTTPS AllPornStream top-level navigation, blocks popups/downloads/foreign navigation, and stores only bounded `cf_clearance`/`__cf_bm` cookies under the agent Keychain service. Noninteractive Feed rendering rehydrates only those cookies and returns bounded HTML to the agent. Neither cookies nor rendered provider content enter the Cloud command plane.
+AllPornStream browser verification is entirely local and Chrome-assisted. An exact-host Manifest V3 extension recognizes only a Lustre-owned request marker in the URL fragment, waits for the human-completed challenge and valid structured metadata, then sends at most 50 normalized cards—not cookies or HTML—through Chrome Native Messaging. Its fixed ID is the sole origin in the per-user native-host manifest.
+
+`lustre-browser-bridge` implements Chrome's native-endian 32-bit length-prefixed JSON protocol with a smaller 256 KiB internal cap. It connects to a mode-0600 Unix socket beneath the agent Application Support directory. The agent checks the peer UID and revalidates the pending request ID, five-minute age, expected page/search URL, exact source host, HTTPS assets, field/count/uniqueness bounds, and final Cloud acknowledgement size. Replays, unknown requests, foreign hosts, invalid metadata, and oversized messages are rejected. The extension reads AllPornStream's per-card `data-images` JSON as the authoritative ordered frame list, canonicalizes provider image-proxy URLs before deduplication, and uses mounted thumbnail media only as a fallback.
+
+The Cloud command remains the existing `feed_page` contract. The agent owns one deduplicated capture task per running AllPornStream command, so re-delivery cannot open another tab and the WebSocket heartbeat actor stays responsive while the user verifies. Accepted local completion injects a local-only availability wake into the single-reader mailbox and causes an immediate ordinary heartbeat. Feed acknowledgements may consume at most 118,000 bytes inside the existing 131,072-byte heartbeat ceiling; optional preview depth is reduced without dropping cards when necessary. The 30-second remote wake fallback and all queue-provenance checks remain unchanged.
 
 Cloud Feed is compiled into the dashboard but hidden unless `LUSTRE_CLOUD_FEED_ENABLED` is exactly `true`. The acceptance route adds a second exact Clerk-subject and kill-switch gate and otherwise returns `404`. Metadata requests are canonicalized, coalesced, and sequence-protected. Destination listing requires its own exact feature flag and a recent safe agent snapshot. Individual-card queueing requires `LUSTRE_CLOUD_FEED_QUEUE_ENABLED=true`, a negotiated `feed-queue-v1` agent, a recent completed Feed result from the same account/device containing the exact item/site/source URL, and a recent destination result from that same account/device containing the selected destination. Batch selection is not part of the Cloud queue contract.
 
@@ -161,7 +165,7 @@ Feed search is an agent-owned extension of the structured feed contract rather t
 ## Deliberate next seams
 
 1. Resolve the intermittent aggregate runner-fixture hang, then renew full-suite/release acceptance counts.
-2. Keep destination listing and Feed queue delivery gated while manual product-flow testing continues; expand production exposure only through the exact flags.
+2. Keep destination and Feed queue controls tied to a successful matching live refresh even while their Production feature flags remain enabled.
 3. Add download mutation commands only after independent authorization, replay, and production acceptance.
 4. Enable public Cloud Feed only after the remaining product-flow checks are accepted and the kill switch is proven.
 5. Add server-backed pagination as job histories grow.

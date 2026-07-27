@@ -21,11 +21,12 @@ test("toggleFeedSelection adds and removes stable item ids", () => {
   assert.deepEqual([...toggleFeedSelection(new Set(["alpha", "beta"]), alpha.id)], ["beta"]);
 });
 
-test("feedPreviewFrames prefers unique scene thumbnails and falls back to the card thumbnail", () => {
+test("feedPreviewFrames rotates the card thumbnail with distinct scene thumbnails", () => {
   assert.deepEqual(
     feedPreviewFrames({ thumbnailURL: "thumb.jpg", previewURLs: ["scene-1.jpg", "scene-2.jpg", "scene-1.jpg", "scene-3.jpg", "scene-4.jpg", "scene-5.jpg", ""] }),
-    ["scene-1.jpg", "scene-2.jpg", "scene-3.jpg", "scene-4.jpg"],
+    ["thumb.jpg", "scene-1.jpg", "scene-2.jpg", "scene-3.jpg"],
   );
+  assert.deepEqual(feedPreviewFrames({ thumbnailURL: "thumb.jpg", previewURLs: ["thumb.jpg", "scene-1.jpg"] }), ["thumb.jpg", "scene-1.jpg"]);
   assert.deepEqual(feedPreviewFrames({ thumbnailURL: "thumb.jpg", previewURLs: [] }), ["thumb.jpg"]);
   assert.deepEqual(feedPreviewFrames({ previewURLs: [] }), []);
 });
@@ -41,11 +42,11 @@ test("feedPreviewMediaKind keeps video previews out of image elements", () => {
   assert.equal(feedPreviewMediaKind("https://img.hqporner.com/scene-1.jpg"), "image");
 });
 
-test("feedUsesAuthenticatedAssetProxy keeps non-PornHub feeds in the browser", () => {
+test("feedUsesAuthenticatedAssetProxy covers feeds that require protected media delivery", () => {
   assert.equal(feedUsesAuthenticatedAssetProxy("pornhub"), true);
   assert.equal(feedUsesAuthenticatedAssetProxy("pornhub-liked"), true);
   assert.equal(feedUsesAuthenticatedAssetProxy("hqporner"), true);
-  assert.equal(feedUsesAuthenticatedAssetProxy("allpornstream"), false);
+  assert.equal(feedUsesAuthenticatedAssetProxy("allpornstream"), true);
   assert.equal(feedUsesAuthenticatedAssetProxy("onlyfan420"), false);
 });
 

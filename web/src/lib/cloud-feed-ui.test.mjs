@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { cloudDashboardRefreshPaths, cloudFeedAcceptanceAllowed, cloudFeedCacheFreshness, cloudFeedCapabilities, cloudFeedDestinationsEnabled, cloudFeedEnabled, cloudFeedMediaEnabled, cloudFeedQueueEnabled, cloudFeedRequestKey, coalesceCloudFeedRequest } from "./cloud-feed-ui.ts";
+import { cloudDashboardRefreshPaths, cloudDestinationViewNeedsRefresh, cloudFeedAcceptanceAllowed, cloudFeedCacheFreshness, cloudFeedCapabilities, cloudFeedDestinationsEnabled, cloudFeedEnabled, cloudFeedMediaEnabled, cloudFeedQueueEnabled, cloudFeedRequestKey, coalesceCloudFeedRequest } from "./cloud-feed-ui.ts";
 
 test("Cloud Feed requires the exact server flag value true", () => {
   assert.equal(cloudFeedEnabled("true"), true);
@@ -26,6 +26,13 @@ test("Cloud Feed acceptance requires the exact flag and Clerk subject", () => {
 test("suppressed dashboard refreshes never request destinations", () => {
   assert.deepEqual(cloudDashboardRefreshPaths(true), ["/v1/jobs"]);
   assert.deepEqual(cloudDashboardRefreshPaths(false), ["/v1/jobs", "/v1/destinations"]);
+});
+
+test("destination snapshots load on the Destinations view and enabled Feed", () => {
+  assert.equal(cloudDestinationViewNeedsRefresh("Destinations", false), true);
+  assert.equal(cloudDestinationViewNeedsRefresh("Feed", true), true);
+  assert.equal(cloudDestinationViewNeedsRefresh("Feed", false), false);
+  assert.equal(cloudDestinationViewNeedsRefresh("Dashboard", true), false);
 });
 
 test("Cloud Feed request keys normalize query whitespace and include device and page", () => {

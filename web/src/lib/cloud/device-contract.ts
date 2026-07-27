@@ -5,7 +5,7 @@ export const MAX_SIGNATURE_BYTES = 160;
 export const HEARTBEAT_INTERVAL_SECONDS = 30;
 export const PRESENCE_FRESHNESS_SECONDS = 75;
 export const MAX_HEARTBEAT_FRAME_BYTES = 131_072;
-export const MAX_FEED_PAGE_ACK_BYTES = 65_536;
+export const MAX_FEED_PAGE_ACK_BYTES = 118_000;
 export const MAX_DESTINATIONS_ACK_BYTES = 32_768;
 export const MAX_DESTINATIONS = 64;
 export const FEED_SITE_IDS = ["allpornstream", "hqporner", "onlyfan420", "pornhub", "pornhub-subscriptions", "pornhub-liked", "pornhub-favorites"] as const;
@@ -63,7 +63,7 @@ const JOB_STATUSES = new Set(["queued", "running", "paused", "completed", "faile
 const JOB_PHASES = new Set(["resolving", "downloading", "materializing", "postProcessing", "uploading", "verifying"]);
 const MAX_JOB_STRING_CHARACTERS = 512;
 const MAX_SOURCE_URL_CHARACTERS = 4_096;
-const ACKNOWLEDGEMENT_CODES = new Set(["provider_verification_required", "provider_http_error", "provider_unreachable", "provider_changed", "authentication_required", "result_too_large", "invalid_request"]);
+const ACKNOWLEDGEMENT_CODES = new Set(["provider_verification_required", "provider_http_error", "provider_unreachable", "provider_changed", "authentication_required", "browser_extension_required", "result_too_large", "invalid_request"]);
 
 function record(value: unknown): value is Record<string, unknown> { return !!value && typeof value === "object" && !Array.isArray(value); }
 function uuid(value: unknown): value is string { return typeof value === "string" && UUID_PATTERN.test(value); }

@@ -13,8 +13,11 @@ struct LustreAgentMain {
                 return
             }
             try AgentPaths.prepare()
-            let service = try AgentService()
+            let browserCapture = AllPornStreamCaptureCoordinator()
+            try await browserCapture.start()
+            let service = try AgentService(allPornStreamCapture: browserCapture)
             let cloudPresence = CloudPresenceConnection(service: service)
+            let loopbackServer: LoopbackServer?
             if let token = try? KeychainTokenStore.token() {
                 let server = try LoopbackServer(service: service, token: token)
                 let port = try await server.start()
@@ -23,9 +26,13 @@ struct LustreAgentMain {
                 try endpoint.write(to: AgentPaths.endpoint, options: .atomic)
                 print("Lustre Agent listening at http://127.0.0.1:\(port)")
                 print("Open that address in a browser, then use `lustre token` to authenticate the panel.")
+                loopbackServer = server
             } else {
                 fputs("Lustre Agent loopback listener is unavailable until Keychain access is authorized.\n", stderr)
+                loopbackServer = nil
             }
+            defer { loopbackServer?.cancel() }
+            defer { Task { await browserCapture.stop() } }
             Task { await cloudPresence.startIfEnrolled() }
             await withUnsafeContinuation { (_: UnsafeContinuation<Void, Never>) in }
         } catch {

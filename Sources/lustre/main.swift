@@ -17,6 +17,22 @@ struct LustreCLI {
                 try await cloud(arguments: Array(arguments.dropFirst()))
                 return
             }
+            if command == "browser" {
+                guard arguments.count >= 2 else { throw CLIError.usage }
+                switch arguments[1] {
+                case "install":
+                    guard arguments.dropFirst(2).contains("--chrome") else { throw CLIError.usage }
+                    let status = try BrowserIntegration.installChrome()
+                    BrowserIntegration.openChromeExtensions()
+                    try printJSON(status)
+                    print("Load unpacked extension: \(status.extensionDirectory)")
+                case "status":
+                    try printJSON(BrowserIntegration.status())
+                default:
+                    throw CLIError.usage
+                }
+                return
+            }
             let client = try AgentClient()
             switch command {
             case "status":
@@ -124,6 +140,8 @@ private enum CLIError: Error, LocalizedError {
           lustre cloud reset-identity
           lustre cloud status
           lustre cloud disconnect
+          lustre browser install --chrome
+          lustre browser status
           lustre extract <url>
           lustre feed sites
           lustre feed verify --site allpornstream

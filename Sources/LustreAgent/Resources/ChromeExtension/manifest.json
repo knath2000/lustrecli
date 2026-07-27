@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "Lustre AllPornStream Capture",
+  "version": "1.0.0",
+  "description": "Captures bounded AllPornStream Feed metadata for the local Lustre Agent.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAv+GabguD2u+/kfvzGtN2bvQeBVBmiIiMJykfkGijtF34hqXg6Y1AwrFVgNIKwmWy86UlRzG42aW3qWT3Ux8U6EcQjHB7T0U++Vic0YDvdthHG3IHAcQCLHeycFFt7vP8uB8HhiSAgmHFUvS0I4azNMss4PxGANQzsVwgE0BhhM+6sSk7R8lUcgzoKX+ykyyIsRBwOj2PtgFKbXchag4bNdNHxmwisylrIA75I8nCR13OmusNrCaFmGQgH2GwsbtQjqa+3AFKkLSygs89Os12D4pbKr7NkyWX9vmBxafZwAyXlYWySiO5ednlKzJ7ba80FLTLpefkj5g06H+liw1U1wIDAQAB",
+  "permissions": ["nativeMessaging", "tabs", "storage"],
+  "host_permissions": [
+    "https://allpornstream.com/*",
+    "https://www.allpornstream.com/*"
+  ],
+  "background": {
+    "service_worker": "service.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://allpornstream.com/*",
+        "https://www.allpornstream.com/*"
+      ],
+      "js": ["extractor.js", "capture.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

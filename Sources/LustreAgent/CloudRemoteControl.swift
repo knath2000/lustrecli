@@ -133,12 +133,14 @@ struct CloudCommandDelivery: Decodable {
 }
 
 actor CloudRemoteControl {
-    static let maximumFeedPageAcknowledgementBytes = 65_536
+    static let maximumFeedPageAcknowledgementBytes = 118_000
     static let maximumDestinationsAcknowledgementBytes = 32_768
     static let maximumDestinations = 64
     private let service: AgentService
     private var acknowledgements: [CloudRemoteCommandAck] = []
     private var completed: [UUID: CloudRemoteCommandAck]
+    private var inFlightFeedCommands: [UUID: Task<Void, Never>] = [:]
+    private var completionHandler: (@Sendable () async -> Void)?
     private let receiptsURL = AgentPaths.applicationSupport.appending(path: "cloud-command-receipts.json")
 
     init(service: AgentService) {
@@ -155,6 +157,10 @@ actor CloudRemoteControl {
     func heartbeatPayload() async -> (acks: [CloudRemoteCommandAck], jobs: [CloudRemoteJobStatus]) {
         let jobs = ((try? await service.allJobs()) ?? []).prefix(50).map(CloudRemoteJobStatus.init)
         return (acknowledgements, jobs)
+    }
+
+    func setCompletionHandler(_ handler: (@Sendable () async -> Void)?) {
+        completionHandler = handler
     }
 
     func handle(_ command: CloudRemoteCommand?) async -> Bool {
@@ -175,6 +181,26 @@ actor CloudRemoteControl {
             }
             enqueue(acknowledgement)
             return true
+        }
+        if command.kind == "feed_page", command.payload.siteID == FeedSiteID.allPornStream.rawValue {
+            guard let page = command.payload.page, page > 0 else {
+                let acknowledgement = CloudRemoteCommandAck(id: command.id, status: "failed", jobID: nil, result: nil, code: "invalid_request")
+                complete(commandID: command.id, acknowledgement: acknowledgement)
+                return true
+            }
+            if inFlightFeedCommands[command.id] != nil { return false }
+            let service = self.service
+            inFlightFeedCommands[command.id] = Task { [weak self] in
+                let acknowledgement: CloudRemoteCommandAck
+                do {
+                    let result = try await service.feedPage(site: .allPornStream, query: command.payload.query, page: page)
+                    acknowledgement = Self.boundedFeedPageAcknowledgement(id: command.id, page: result)
+                } catch {
+                    acknowledgement = CloudRemoteCommandAck(id: command.id, status: "failed", jobID: nil, result: nil, code: Self.feedFailureCode(error))
+                }
+                await self?.completeAsync(commandID: command.id, acknowledgement: acknowledgement)
+            }
+            return false
         }
         let acknowledgement: CloudRemoteCommandAck
         switch command.kind {
@@ -222,10 +248,7 @@ actor CloudRemoteControl {
         default:
             acknowledgement = CloudRemoteCommandAck(id: command.id, status: "failed", jobID: nil, result: nil)
         }
-        completed[command.id] = acknowledgement
-        try? AgentPaths.prepare()
-        try? JSONEncoder.cloud.encode(Array(completed.values)).write(to: receiptsURL, options: .atomic)
-        enqueue(acknowledgement)
+        complete(commandID: command.id, acknowledgement: acknowledgement)
         return true
     }
 
@@ -240,11 +263,36 @@ actor CloudRemoteControl {
     }
 
     static func boundedFeedPageAcknowledgement(id: UUID, page: FeedPage) -> CloudRemoteCommandAck {
-        let completed = CloudRemoteCommandAck(id: id, status: "completed", jobID: nil, result: CloudRemoteResult(kind: "feed_page", sites: nil, page: page, destinations: nil))
-        guard let encoded = try? JSONEncoder.cloud.encode(completed), encoded.count <= maximumFeedPageAcknowledgementBytes else {
-            return CloudRemoteCommandAck(id: id, status: "failed", jobID: nil, result: nil, code: "result_too_large")
+        func acknowledgement(_ candidate: FeedPage) -> CloudRemoteCommandAck {
+            CloudRemoteCommandAck(id: id, status: "completed", jobID: nil, result: CloudRemoteResult(kind: "feed_page", sites: nil, page: candidate, destinations: nil))
         }
-        return completed
+        var completed = acknowledgement(page)
+        if let encoded = try? JSONEncoder.cloud.encode(completed), encoded.count <= maximumFeedPageAcknowledgementBytes {
+            return completed
+        }
+        for maximumPreviews in stride(from: 3, through: 0, by: -1) {
+            let items = page.items.map { item in
+                let distinctPreviews = item.previewURLs.filter { $0 != item.thumbnailURL }
+                return FeedItem(
+                    id: item.id,
+                    siteID: item.siteID,
+                    title: item.title,
+                    sourcePageURL: item.sourcePageURL,
+                    thumbnailURL: item.thumbnailURL,
+                    previewURLs: Array(distinctPreviews.prefix(maximumPreviews)),
+                    uploadedAt: item.uploadedAt,
+                    uploadedAtIsApproximate: item.uploadedAtIsApproximate,
+                    viewCount: item.viewCount,
+                    studio: item.studio,
+                    queueCapability: item.queueCapability
+                )
+            }
+            completed = acknowledgement(FeedPage(items: items, page: page.page, hasMore: page.hasMore))
+            if let encoded = try? JSONEncoder.cloud.encode(completed), encoded.count <= maximumFeedPageAcknowledgementBytes {
+                return completed
+            }
+        }
+        return CloudRemoteCommandAck(id: id, status: "failed", jobID: nil, result: nil, code: "result_too_large")
     }
 
     static func boundedDestinationsAcknowledgement(id: UUID, profiles: [WebDAVDestinationProfile]) -> CloudRemoteCommandAck {
@@ -271,6 +319,13 @@ actor CloudRemoteControl {
     }
 
     private static func feedFailureCode(_ error: Error) -> String {
+        if let error = error as? BrowserCaptureError {
+            switch error {
+            case .browserExtensionRequired: return "browser_extension_required"
+            case .timeout, .cancelled, .browserClosed: return "provider_verification_required"
+            case .invalidCapture: return "provider_changed"
+            }
+        }
         if let feedError = error as? FeedError {
             switch feedError {
             case .challengeRequired: return "provider_verification_required"
@@ -288,6 +343,19 @@ actor CloudRemoteControl {
         acknowledgements.removeAll { $0.id == acknowledgement.id }
         acknowledgements.append(acknowledgement)
         if acknowledgements.count > 8 { acknowledgements.removeFirst(acknowledgements.count - 8) }
+    }
+
+    private func complete(commandID: UUID, acknowledgement: CloudRemoteCommandAck) {
+        completed[commandID] = acknowledgement
+        try? AgentPaths.prepare()
+        try? JSONEncoder.cloud.encode(Array(completed.values)).write(to: receiptsURL, options: .atomic)
+        enqueue(acknowledgement)
+    }
+
+    private func completeAsync(commandID: UUID, acknowledgement: CloudRemoteCommandAck) async {
+        inFlightFeedCommands[commandID] = nil
+        complete(commandID: commandID, acknowledgement: acknowledgement)
+        await completionHandler?()
     }
 
     private static func promptForWebDAVPassword(name _: String) throws -> String {

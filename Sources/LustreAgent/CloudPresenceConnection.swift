@@ -122,6 +122,9 @@ public actor CloudPresenceConnection {
         fputs("Lustre Cloud presence connecting: generation=\(generation).\n", stderr)
         socket = task; task.resume()
         let mailbox = CloudWebSocketMailbox()
+        await remoteControl.setCompletionHandler {
+            await mailbox.offer(.localCommandCompletion)
+        }
         let receivePump = Task {
             do {
                 while !Task.isCancelled {
@@ -135,7 +138,10 @@ public actor CloudPresenceConnection {
                 await mailbox.finish(error)
             }
         }
-        defer { receivePump.cancel() }
+        defer {
+            receivePump.cancel()
+            Task { await self.remoteControl.setCompletionHandler(nil) }
+        }
         if usesGateway {
             let hello: CloudWebSocketMessage
             do {
@@ -167,9 +173,7 @@ public actor CloudPresenceConnection {
         var sequence = 1
         let correlationID = UUID().uuidString.lowercased()
         while !Task.isCancelled {
-            if commandWakeV1 {
-                _ = await mailbox.consumeWake()
-            }
+            _ = await mailbox.consumeWake(allowRemote: commandWakeV1)
             guard reconnectState.maySendHeartbeat(for: generation) else {
                 task.cancel(with: .goingAway, reason: nil)
                 return
@@ -214,11 +218,11 @@ public actor CloudPresenceConnection {
             let handledCommand = await remoteControl.handle(command)
             sequence += 1
             if handledCommand { continue }
-            if commandWakeV1, await mailbox.consumeWake() { continue }
+            if await mailbox.consumeWake(allowRemote: commandWakeV1) { continue }
             do {
                 let message = try await timedMessage(from: mailbox, after: Self.heartbeatInterval)
-                guard commandWakeV1, frameType(message) == "command-available" else { throw CloudDeviceError.invalidResponse }
-                _ = await mailbox.consumeWake()
+                guard (message.isLocalCommandCompletion || commandWakeV1), frameType(message) == "command-available" else { throw CloudDeviceError.invalidResponse }
+                _ = await mailbox.consumeWake(allowRemote: commandWakeV1)
             } catch CloudPresenceConnectionError.timedOut {
                 continue
             }
@@ -230,7 +234,7 @@ public actor CloudPresenceConnection {
             let message = try await timedMessage(from: mailbox, after: timeout)
             let receivedType = frameType(message)
             if receivedType == type { return message }
-            if commandWakeV1, receivedType == "command-available" { continue }
+            if receivedType == "command-available", message.isLocalCommandCompletion || commandWakeV1 { continue }
             throw CloudDeviceError.invalidResponse
         }
     }

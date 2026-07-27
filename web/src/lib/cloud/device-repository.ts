@@ -158,7 +158,8 @@ export async function persistGatewayHeartbeat(input: { deviceID: string; connect
             CASE WHEN acknowledgement.code IN (
               'provider_verification_required', 'provider_http_error',
               'provider_unreachable', 'provider_changed',
-              'authentication_required', 'result_too_large', 'invalid_request'
+              'authentication_required', 'browser_extension_required',
+              'result_too_large', 'invalid_request'
             ) THEN acknowledgement.code ELSE 'unknown' END
           )
           ELSE COALESCE(

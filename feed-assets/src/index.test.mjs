@@ -70,6 +70,23 @@ test("asset worker accepts the exact video limit and rejects a declared byte ove
   assert.equal((await oversizedHandler(request(ticket({ kind: "video", url: "https://cdn.hqporner.com/preview.mp4" })), env)).status, 413);
 });
 
+test("asset worker proxies only the exact AllPornStream image endpoint with its provider referer", async () => {
+  let upstreamRequest;
+  const handler = createHandler(async (next) => {
+    upstreamRequest = next;
+    return new Response(new Uint8Array([1, 2, 3]), { headers: { "Content-Type": "image/webp" } });
+  }, () => now);
+
+  const imageURL = "https://allpornstream.com/api/images?src=https%3A%2F%2Fcdn.example%2Fthumb.jpg";
+  const response = await handler(request(ticket({ url: imageURL })), env);
+
+  assert.equal(response.status, 200);
+  assert.equal(upstreamRequest.headers.get("referer"), "https://allpornstream.com/");
+  assert.equal((await response.arrayBuffer()).byteLength, 3);
+  assert.equal((await handler(request(ticket({ url: "https://allpornstream.com/post/not-an-asset" })), env)).status, 502);
+  assert.equal((await handler(request(ticket({ url: "https://images.allpornstream.com/api/images" })), env)).status, 502);
+});
+
 test("asset worker validates tickets, origin, redirects, and kind", async () => {
   const handler = createHandler(async () => new Response("ok", { headers: { "Content-Type": "image/jpeg" } }), () => now);
   assert.equal((await handler(request(`${ticket().slice(0, -1)}x`), env)).status, 401);

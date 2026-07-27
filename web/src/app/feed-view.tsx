@@ -598,6 +598,11 @@ export function FeedView({
           </button>
         </div>
       )}
+      {!liveReady && siteID === "allpornstream" && !error && (
+        <p className="feed-notice" role="status">
+          Complete verification in Chrome on the paired Mac. Cached cards remain visible while Lustre waits.
+        </p>
+      )}
       {notice && (
         <p className="feed-notice" role="status">
           {notice}

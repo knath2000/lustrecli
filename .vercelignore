@@ -1,0 +1,8 @@
+.build
+.hermes
+.playwright-mcp
+gateway/.wrangler
+gateway/node_modules
+feed-assets/node_modules
+web/.next
+web/node_modules

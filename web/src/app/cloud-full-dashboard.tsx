@@ -26,6 +26,7 @@ import {
 import type { FeedItem, FeedPage, FeedQuery, FeedSite } from "@/lib/feed-model";
 import {
   cloudDashboardRefreshPaths,
+  cloudDestinationViewNeedsRefresh,
   cloudFeedRequestKey,
   coalesceCloudFeedRequest,
   normalizeCloudFeedQuery,
@@ -198,7 +199,7 @@ function destinationName(job: DownloadJob, destinations: Destination[]) {
   );
 }
 async function waitForCloudCommand(base: string, id: string) {
-  for (let attempt = 0; attempt < 24; attempt += 1) {
+  for (let attempt = 0; attempt < 150; attempt += 1) {
     if (attempt)
       await new Promise((resolve) => window.setTimeout(resolve, 2_000));
     let response: Response;
@@ -219,13 +220,14 @@ async function waitForCloudCommand(base: string, id: string) {
       throw new Error(feedCommandFailureMessage(payload.command.result?.code));
   }
   throw new Error(
-    "The paired Mac did not respond within 46 seconds. Check that Lustre Agent is online, then try again.",
+    "The paired Mac did not respond within five minutes. Complete verification in Chrome on the paired Mac, then try again.",
   );
 }
 
 function feedCommandFailureMessage(code: unknown) {
   switch (code) {
-    case "provider_verification_required": return "This source needs local verification on the paired Mac. Run `lustre feed verify --site allpornstream`, then refresh.";
+    case "provider_verification_required": return "Complete verification in Chrome on the paired Mac, then retry. Cached cards remain available where possible.";
+    case "browser_extension_required": return "Install and enable the Lustre Chrome extension on the paired Mac with `lustre browser install --chrome`, then retry.";
     case "provider_http_error": return "The source returned an HTTP error. Cached cards remain available where possible.";
     case "provider_unreachable": return "The paired Mac could not reach this source. Check its network route, then refresh.";
     case "provider_changed": return "The source page changed and could not be parsed. Cached cards remain available where possible.";
@@ -957,7 +959,11 @@ export function CloudFullDashboard({
     );
   }, [token]);
   useEffect(() => {
-    if (!feedEnabled || !feedDestinationsEnabled || activeNav !== "Feed" || !token)
+    const needsDestinations = cloudDestinationViewNeedsRefresh(
+      activeNav,
+      feedEnabled,
+    );
+    if (!feedDestinationsEnabled || !needsDestinations || !token)
       return;
     let active = true;
     void loadFeedDestinations()

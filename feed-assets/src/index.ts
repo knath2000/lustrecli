@@ -7,6 +7,7 @@ const IMAGE_MAX_BYTES = 6 * 1_024 * 1_024;
 const VIDEO_MAX_BYTES = 16 * 1_024 * 1_024;
 const USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0";
 const ALLOWED_HOSTS = ["phncdn.com", "hqporner.com", "fastporndelivery.com"];
+const ALLPORNSTREAM_HOSTS = new Set(["allpornstream.com", "www.allpornstream.com"]);
 
 type AssetKind = "image" | "video";
 type TicketClaims = {
@@ -60,7 +61,8 @@ function allowedURL(value: unknown): URL {
   if (typeof value !== "string" || value.length > 4_096) throw new Error("invalid-url");
   const url = new URL(value);
   const host = url.hostname.toLowerCase();
-  if (url.protocol !== "https:" || url.username || url.password || !ALLOWED_HOSTS.some((allowed) => host === allowed || host.endsWith(`.${allowed}`))) {
+  const allPornStreamImage = ALLPORNSTREAM_HOSTS.has(host) && url.pathname === "/api/images";
+  if (url.protocol !== "https:" || url.username || url.password || (!allPornStreamImage && !ALLOWED_HOSTS.some((allowed) => host === allowed || host.endsWith(`.${allowed}`)))) {
     throw new Error("invalid-url");
   }
   return url;
@@ -114,9 +116,10 @@ async function boundedJSON(request: Request): Promise<unknown> {
 
 function providerHeaders(url: URL, kind: AssetKind) {
   const phncdn = url.hostname === "phncdn.com" || url.hostname.endsWith(".phncdn.com");
+  const allPornStream = ALLPORNSTREAM_HOSTS.has(url.hostname);
   return new Headers({
     "User-Agent": USER_AGENT,
-    "Referer": phncdn ? "https://www.pornhub.com/" : "https://hqporner.com/",
+    "Referer": phncdn ? "https://www.pornhub.com/" : allPornStream ? "https://allpornstream.com/" : "https://hqporner.com/",
     "Accept": kind === "image" ? "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8" : "video/webm,video/mp4,video/*;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
   });

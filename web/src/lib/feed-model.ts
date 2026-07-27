@@ -46,10 +46,7 @@ function normalizedSourceURL(value: string): string {
 }
 
 export function feedPreviewFrames(item: Pick<FeedItem, "thumbnailURL" | "previewURLs">): string[] {
-  const previews = [...new Set(item.previewURLs.map((url) => url.trim()).filter(Boolean))].slice(0, 4);
-  if (previews.length) return previews;
-  const thumbnail = item.thumbnailURL?.trim();
-  return thumbnail ? [thumbnail] : [];
+  return [...new Set([item.thumbnailURL, ...item.previewURLs].map((url) => url?.trim()).filter((url): url is string => !!url))].slice(0, 4);
 }
 
 export function feedPreviewMediaKind(url: string): "image" | "video" {
@@ -57,7 +54,7 @@ export function feedPreviewMediaKind(url: string): "image" | "video" {
 }
 
 export function feedUsesAuthenticatedAssetProxy(siteID: FeedSiteID): boolean {
-  return siteID === "hqporner" || siteID.startsWith("pornhub");
+  return siteID === "allpornstream" || siteID === "hqporner" || siteID.startsWith("pornhub");
 }
 
 export function feedPreviewDelay(hovered: boolean, frameCount: number): number | null {

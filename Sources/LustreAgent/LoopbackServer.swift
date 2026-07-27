@@ -8,6 +8,7 @@ public final class LoopbackServer: @unchecked Sendable {
     private let token: String
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
+    private var selfRetain: LoopbackServer?
 
     public init(service: AgentService, token: String) throws {
         let parameters = NWParameters.tcp
@@ -18,26 +19,33 @@ public final class LoopbackServer: @unchecked Sendable {
     }
 
     public func start() async throws -> UInt16 {
-        try await withCheckedThrowingContinuation { continuation in
-            listener.stateUpdateHandler = { [weak self] state in
-                switch state {
-                case .ready:
-                    continuation.resume(returning: self?.listener.port?.rawValue ?? 0)
-                case .failed(let error):
-                    continuation.resume(throwing: error)
-                default:
-                    break
+        selfRetain = self
+        do {
+            return try await withCheckedThrowingContinuation { continuation in
+                listener.stateUpdateHandler = { [weak self] state in
+                    switch state {
+                    case .ready:
+                        continuation.resume(returning: self?.listener.port?.rawValue ?? 0)
+                    case .failed(let error):
+                        continuation.resume(throwing: error)
+                    default:
+                        break
+                    }
                 }
+                listener.newConnectionHandler = { [weak self] connection in
+                    self?.serve(connection)
+                }
+                listener.start(queue: .global(qos: .userInitiated))
             }
-            listener.newConnectionHandler = { [weak self] connection in
-                self?.serve(connection)
-            }
-            listener.start(queue: .global(qos: .userInitiated))
+        } catch {
+            selfRetain = nil
+            throw error
         }
     }
 
     public func cancel() {
         listener.cancel()
+        selfRetain = nil
     }
 
     private func serve(_ connection: NWConnection) {

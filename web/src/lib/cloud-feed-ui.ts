@@ -28,6 +28,10 @@ export function cloudDashboardRefreshPaths(suppressDestinationPolling: boolean):
   return suppressDestinationPolling ? ["/v1/jobs"] : ["/v1/jobs", "/v1/destinations"];
 }
 
+export function cloudDestinationViewNeedsRefresh(activeNav: string, feedEnabled: boolean): boolean {
+  return activeNav === "Destinations" || (feedEnabled && activeNav === "Feed");
+}
+
 export function normalizeCloudFeedQuery(value: string | undefined): string {
   return value?.trim().replace(/\s+/g, " ") ?? "";
 }

@@ -3,12 +3,19 @@ import Foundation
 enum CloudWebSocketMessage: Sendable {
     case data(Data)
     case text(String)
+    case localCommandCompletion
 
     var data: Data {
         switch self {
         case let .data(data): data
         case let .text(text): Data(text.utf8)
+        case .localCommandCompletion: Data(#"{"version":1,"type":"command-available"}"#.utf8)
         }
+    }
+
+    var isLocalCommandCompletion: Bool {
+        if case .localCommandCompletion = self { return true }
+        return false
     }
 
     var isCommandAvailable: Bool {
@@ -26,7 +33,8 @@ actor CloudWebSocketMailbox {
     private var buffered: [CloudWebSocketMessage] = []
     private var waiter: (id: UUID, continuation: CheckedContinuation<CloudWebSocketMessage, Error>)?
     private var terminalError: Error?
-    private var wakePending = false
+    private var remoteWakePending = false
+    private var localWakePending = false
 
     init(capacity: Int = 8) {
         self.capacity = capacity
@@ -34,8 +42,13 @@ actor CloudWebSocketMailbox {
 
     func offer(_ message: CloudWebSocketMessage) {
         if message.isCommandAvailable {
-            guard !wakePending else { return }
-            wakePending = true
+            if message.isLocalCommandCompletion {
+                guard !localWakePending else { return }
+                localWakePending = true
+            } else {
+                guard !remoteWakePending else { return }
+                remoteWakePending = true
+            }
         }
         if let waiter {
             self.waiter = nil
@@ -47,11 +60,17 @@ actor CloudWebSocketMailbox {
         buffered.append(message)
     }
 
-    func consumeWake() -> Bool {
-        guard wakePending else { return false }
-        wakePending = false
-        buffered.removeAll(where: \.isCommandAvailable)
-        return true
+    func consumeWake(allowRemote: Bool = true) -> Bool {
+        let consumed = localWakePending || (allowRemote && remoteWakePending)
+        if localWakePending {
+            localWakePending = false
+            buffered.removeAll(where: \.isLocalCommandCompletion)
+        }
+        if allowRemote, remoteWakePending {
+            remoteWakePending = false
+            buffered.removeAll { $0.isCommandAvailable && !$0.isLocalCommandCompletion }
+        }
+        return consumed
     }
 
     func next() async throws -> CloudWebSocketMessage {

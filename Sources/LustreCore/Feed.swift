@@ -255,7 +255,7 @@ public struct FeedService: Sendable {
         let baseURL = FeedSite.allPornStream.homeURL
         var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)
         var items: [URLQueryItem] = []
-        if let text = query.text { items.append(URLQueryItem(name: "search", value: text)) }
+        if let text = query.text { items.append(URLQueryItem(name: "s", value: text)) }
         if page > 1 { items.append(URLQueryItem(name: "page", value: String(page))) }
         components?.queryItems = items.isEmpty ? nil : items
         guard let url = components?.url else { throw FeedError.invalidPage }

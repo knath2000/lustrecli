@@ -28,4 +28,11 @@ final class CloudWebSocketMailboxTests: XCTestCase {
         XCTAssertTrue(String(decoding: first.data, as: UTF8.self).contains("two"))
         XCTAssertTrue(String(decoding: second.data, as: UTF8.self).contains("three"))
     }
+
+    func testLocalCompletionWakesWithoutNegotiatedRemoteWake() async {
+        let mailbox = CloudWebSocketMailbox()
+        await mailbox.offer(.localCommandCompletion)
+        let consumed = await mailbox.consumeWake(allowRemote: false)
+        XCTAssertTrue(consumed)
+    }
 }

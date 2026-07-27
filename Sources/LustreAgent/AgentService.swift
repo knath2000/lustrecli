@@ -44,6 +44,7 @@ public actor AgentService {
     private let feed: FeedService
     private let feedAssetProxy: FeedAssetProxy
     private let pornHubAuth: PornHubAuthService
+    private let allPornStreamCapture: AllPornStreamCaptureCoordinator?
     private let maximumConcurrentDownloads: Int
     private var activeDownloadTasks: [UUID: ActiveDownload] = [:]
     private var lastProgressUpdates: [UUID: LastProgressUpdate] = [:]
@@ -67,6 +68,7 @@ public actor AgentService {
         feed: FeedService? = nil,
         feedAssetProxy: FeedAssetProxy = FeedAssetProxy(),
         pornHubAuth: PornHubAuthService = PornHubAuthService(),
+        allPornStreamCapture: AllPornStreamCaptureCoordinator? = nil,
         maximumConcurrentDownloads: Int = 1
     ) throws {
         self.jobs = try JobStore(databaseURL: databaseURL)
@@ -87,6 +89,7 @@ public actor AgentService {
         self.remoteDownloader = remoteDownloader ?? AgentService.uploadToWebDAV
         self.hlsMaterializer = hlsMaterializer ?? FFmpegHLSMaterializer.materialize
         self.pornHubAuth = pornHubAuth
+        self.allPornStreamCapture = allPornStreamCapture
         self.pornHubResolver = pornHubResolver ?? { source in
             let cookies = (try? await pornHubAuth.cookiesForYtDlp()) ?? []
             do { return try await PornHubYtDlp.resolve(source: source, cookies: cookies) }
@@ -117,10 +120,6 @@ public actor AgentService {
                 } catch {
                     throw FeedError.authenticationUnavailable
                 }
-            },
-            allPornStreamHTML: { url in
-                do { return try await AllPornStreamWebKitHelper().render(url: url) }
-                catch AllPornStreamVerificationError.verificationRequired { throw FeedError.challengeRequired }
             }
         )
         self.feedAssetProxy = feedAssetProxy
@@ -144,11 +143,22 @@ public actor AgentService {
     }
 
     public func feedPage(site: FeedSiteID, query: String? = nil, page: Int) async throws -> FeedPage {
-        try await feed.page(FeedQuery(site: site, text: query, page: page))
+        if site == .allPornStream {
+            guard let allPornStreamCapture else { throw BrowserCaptureError.browserExtensionRequired }
+            let feedQuery = try FeedQuery(site: site, text: query, page: page)
+            guard var components = URLComponents(url: FeedSite.allPornStream.homeURL, resolvingAgainstBaseURL: false) else { throw FeedError.invalidPage }
+            var items: [URLQueryItem] = []
+            if let text = feedQuery.text { items.append(URLQueryItem(name: "s", value: text)) }
+            if page > 1 { items.append(URLQueryItem(name: "page", value: String(page))) }
+            components.queryItems = items.isEmpty ? nil : items
+            guard let url = components.url else { throw FeedError.invalidPage }
+            return try await allPornStreamCapture.capture(url: url, page: page)
+        }
+        return try await feed.page(FeedQuery(site: site, text: query, page: page))
     }
 
     public func verifyAllPornStream() async throws {
-        try await AllPornStreamWebKitHelper().verify()
+        _ = try await feedPage(site: .allPornStream, page: 1)
     }
 
     public func feedAsset(url: URL, kind: FeedAssetKind) async throws -> FeedAssetResponse {

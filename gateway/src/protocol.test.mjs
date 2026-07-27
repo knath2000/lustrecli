@@ -37,7 +37,7 @@ test("destination acknowledgements enforce safe fields and the 32768-byte bounda
   assert.equal(validDestinationsAcknowledgement({ ...acknowledgement, result: { ...acknowledgement.result, destinations: [{ ...destination, name: "x".repeat(33_000) }] } }), false);
 });
 
-test("feed_page acknowledgements enforce schema and the 65536-byte boundary", () => {
+test("feed_page acknowledgements enforce schema and the 118000-byte boundary", () => {
   const item = { id: "item", siteID: "hqporner", title: "Example", sourcePageURL: "https://example.com/video", thumbnailURL: null, previewURLs: [], uploadedAt: "2026-07-26T10:00:00Z", uploadedAtIsApproximate: false, viewCount: 0, studio: null, queueCapability: "supported" };
   const ack = { id: "a", status: "completed", result: { kind: "feed_page", page: { items: [item], page: 1, hasMore: false } } };
   assert.equal(validFeedPageAcknowledgement(ack), true);
