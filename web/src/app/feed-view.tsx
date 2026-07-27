@@ -454,9 +454,13 @@ export function FeedView({
       </header>
 
       <p className="feed-gate-notice" role="note">
-        {mediaEnabled
-          ? "Protected media preview; destination and queueing remain gated."
-          : "Browsing preview; media and queueing remain gated."}
+        {destinationsEnabled && queueEnabled
+          ? `${mediaEnabled ? "Protected media preview" : "Browsing preview"}, destination selection, and individual queueing are enabled.`
+          : destinationsEnabled
+            ? `${mediaEnabled ? "Protected media preview" : "Browsing preview"} and destination selection are enabled; queueing remains gated.`
+            : mediaEnabled
+              ? "Protected media preview; destination and queueing remain gated."
+              : "Browsing preview; media, destination, and queueing remain gated."}
       </p>
 
       <section className="feed-toolbar glass-panel" aria-label="Feed controls">
