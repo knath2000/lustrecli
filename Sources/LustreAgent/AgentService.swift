@@ -264,6 +264,7 @@ public actor AgentService {
         let preferredQualityLabel = request.preferredQualityLabel?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         var job = DownloadJob(
+            id: request.id ?? UUID(),
             sourcePageURL: request.sourcePageURL,
             preferredQualityLabel: preferredQualityLabel?.isEmpty == false ? preferredQualityLabel : nil,
             destination: destination
@@ -272,6 +273,14 @@ public actor AgentService {
         try await jobs.create(job)
         if automaticallyStartsDownloads { await enqueueDownload(job.id) }
         return job
+    }
+
+    public func job(id: UUID) async throws -> DownloadJob? {
+        try await jobs.job(id: id)
+    }
+
+    func normalizedCloudDestination(_ destination: String?) async throws -> String {
+        try await normalizedDestination(destination)
     }
 
     public func selectDownloadFolder() async throws -> String {

@@ -32,11 +32,41 @@ test("command selection gates and validates feed_page", async () => {
   const legacy = await handler(request({ deviceID, connectionID, sequence: 7, correlationID: "legacy" }));
   assert.equal(legacy.status, 200);
   assert.equal(calls[0].allowFeedPage, false);
+  assert.equal(calls[0].allowDestinationsList, false);
   const response = await handler(request({ deviceID, connectionID, sequence: 8, correlationID: "j2", allowFeedPage: true }));
   assert.equal(response.status, 200);
   assert.deepEqual((await response.json()).command.payload, { siteID: "hqporner", page: 1, query: "newest clips" });
   const invalid = gatewayCommandHandler(async () => ({ id: deviceID, kind: "feed_page", payload: { siteID: "unknown", page: 1 } }));
   assert.equal((await invalid(request({ deviceID, connectionID, sequence: 9, correlationID: "j2", allowFeedPage: true }))).status, 400);
+});
+
+test("command selection gates destinations_list and requires an empty payload", async () => {
+  process.env.LUSTRE_GATEWAY_RELAY_SECRET = secret;
+  const calls = [];
+  const handler = gatewayCommandHandler(async (input) => {
+    calls.push(input);
+    return input.allowDestinationsList ? { id: deviceID, kind: "destinations_list", payload: {} } : null;
+  });
+  const legacy = await handler(request({ deviceID, connectionID, sequence: 10, correlationID: "legacy" }));
+  assert.equal((await legacy.json()).command, null);
+  const enabled = await handler(request({ deviceID, connectionID, sequence: 11, correlationID: "k3", allowDestinationsList: true }));
+  assert.deepEqual((await enabled.json()).command, { id: deviceID, kind: "destinations_list", payload: {} });
+  assert.equal(calls[1].allowDestinationsList, true);
+  const invalid = gatewayCommandHandler(async () => ({ id: deviceID, kind: "destinations_list", payload: { unexpected: "value" } }));
+  assert.equal((await invalid(request({ deviceID, connectionID, sequence: 12, correlationID: "k3", allowDestinationsList: true }))).status, 400);
+});
+
+test("command selection carries only a negotiated canonical Feed queue payload", async () => {
+  process.env.LUSTRE_GATEWAY_RELAY_SECRET = secret;
+  const command = { id: deviceID, kind: "queue_url", payload: { url: "https://hqporner.com/hdporn/example.html", destination: "local", deliveryProtocol: "gateway-v1" } };
+  const calls = [];
+  const handler = gatewayCommandHandler(async (input) => { calls.push(input); return input.allowFeedQueue ? command : null; });
+  assert.equal((await (await handler(request({ deviceID, connectionID, sequence: 13, correlationID: "legacy" }))).json()).command, null);
+  const response = await handler(request({ deviceID, connectionID, sequence: 14, correlationID: "k4", allowFeedQueue: true }));
+  assert.deepEqual((await response.json()).command, command);
+  assert.equal(calls[1].allowFeedQueue, true);
+  const invalid = gatewayCommandHandler(async () => ({ ...command, payload: { ...command.payload, preferredQualityLabel: "1080p" } }));
+  assert.equal((await invalid(request({ deviceID, connectionID, sequence: 15, correlationID: "k4", allowFeedQueue: true }))).status, 400);
 });
 
 test("command selection supports null delivery and requires exact boundary fields", async () => {

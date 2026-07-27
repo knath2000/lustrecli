@@ -253,6 +253,11 @@ async function agentRequest<T>(
     target = `${base}/commands`;
     body = { kind: "feed_sites" };
   }
+  if (path === "/v1/feed/queue" && options.method === "POST") {
+    const input = JSON.parse(String(options.body ?? "{}"));
+    target = `${base}/commands`;
+    body = { kind: "feed_queue", ...input };
+  }
   if (path === "/v1/destinations") {
     target = `${base}/commands`;
     body = { kind: "destinations_list" };
@@ -336,6 +341,18 @@ async function agentRequest<T>(
     ) as T;
   if (target === `${base}/commands`) {
     const result = await waitForCloudCommand(base, payload.command.id);
+    if (path === "/v1/feed/queue") {
+      if (result.jobID !== payload.command.id) throw new Error("The paired Mac returned an invalid Feed queue acknowledgement.");
+      for (let attempt = 0; attempt < 24; attempt += 1) {
+        const jobsResponse = await fetch(`${base}/jobs`, { cache: "no-store" });
+        const jobsPayload = await jobsResponse.json().catch(() => ({}));
+        if (!jobsResponse.ok) throw new Error(jobsPayload.error?.message ?? "The queued transfer status is unavailable.");
+        const job = jobsPayload.jobs?.find((candidate: { id: string }) => candidate.id === payload.command.id);
+        if (job) return job as T;
+        await new Promise((resolve) => window.setTimeout(resolve, 2_000));
+      }
+      throw new Error("The queued transfer was acknowledged but has not appeared in projected job status.");
+    }
     if (path.startsWith("/v1/feed/") || path === "/v1/destinations")
       return (result.sites ?? result.page ?? result.destinations ?? []) as T;
     return result as T;
@@ -605,10 +622,14 @@ function TransferCard({
 export function CloudFullDashboard({
   feedEnabled,
   feedMediaEnabled = false,
+  feedDestinationsEnabled = false,
+  feedQueueEnabled = false,
   suppressDestinationPolling = false,
 }: {
   feedEnabled: boolean;
   feedMediaEnabled?: boolean;
+  feedDestinationsEnabled?: boolean;
+  feedQueueEnabled?: boolean;
   suppressDestinationPolling?: boolean;
 }) {
   const [activeNav, setActiveNav] = useState("Dashboard");
@@ -689,7 +710,8 @@ export function CloudFullDashboard({
       ]).then(([nextJobs, nextDestinations]) => {
         if (sequence !== refreshSequence.current) return;
         setJobs(nextJobs);
-        setDestinations(nextDestinations);
+        if (refreshPaths.includes("/v1/destinations"))
+          setDestinations(nextDestinations);
         setPornHubAuth(null);
         setConnected(true);
         setError(null);
@@ -878,13 +900,47 @@ export function CloudFullDashboard({
     },
     [token],
   );
+  const loadFeedDestinations = useCallback(() => {
+    if (!token)
+      return Promise.reject(new Error("Pair a Mac before loading destinations."));
+    const key = cloudFeedRequestKey({
+      deviceID: token,
+      kind: "destinations_list",
+    });
+    return coalesceCloudFeedRequest(feedRequests.current, key, () =>
+      agentRequest<Destination[]>(token, "/v1/destinations"),
+    );
+  }, [token]);
+  useEffect(() => {
+    if (!feedEnabled || !feedDestinationsEnabled || activeNav !== "Feed" || !token)
+      return;
+    let active = true;
+    void loadFeedDestinations()
+      .then((nextDestinations) => {
+        if (!active) return;
+        setDestinations(nextDestinations);
+      })
+      .catch((reason) => {
+        if (!active) return;
+        setError(
+          reason instanceof Error
+            ? reason.message
+            : "Unable to load destinations from the paired Mac.",
+        );
+      });
+    return () => {
+      active = false;
+    };
+  }, [activeNav, feedDestinationsEnabled, feedEnabled, loadFeedDestinations, token]);
   const queueFeedItem = useCallback(
-    async (item: FeedItem, destination: string) => {
-      await agentRequest<DownloadJob>(token, "/v1/jobs", {
+    async (item: FeedItem, destination: string, requestID: string) => {
+      await agentRequest<DownloadJob>(token, "/v1/feed/queue", {
         method: "POST",
         body: JSON.stringify({
+          requestID,
+          itemID: item.id,
+          siteID: item.siteID,
           sourcePageURL: item.sourcePageURL,
-          preferredQualityLabel: null,
           destination,
         }),
       });
@@ -1054,7 +1110,8 @@ export function CloudFullDashboard({
             loadAsset={loadFeedAsset}
             onQueued={refreshAfterFeedQueue}
             mediaEnabled={feedMediaEnabled}
-            queueEnabled={false}
+            destinationsEnabled={feedDestinationsEnabled}
+            queueEnabled={feedQueueEnabled}
           />
         ) : activeNav === "Downloads" ? (
           <DownloadsView

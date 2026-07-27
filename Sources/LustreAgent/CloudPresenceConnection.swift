@@ -35,6 +35,8 @@ public actor CloudPresenceConnection {
     private static let maximumHeartbeatFrameBytes = 131_072
     private static let commandDeliveryCapability = "command-delivery-v1"
     private static let feedPageCapability = "feed-page-v1"
+    private static let destinationsListCapability = "destinations-list-v1"
+    private static let feedQueueCapability = "feed-queue-v1"
     private let identity: DeviceIdentity
     private let session: URLSession
     private let remoteControl: CloudRemoteControl
@@ -122,7 +124,7 @@ public actor CloudPresenceConnection {
             let hello: URLSessionWebSocketTask.Message
             do {
                 fputs("Lustre Cloud gateway: event=realtime_hello_send_started.\n", stderr)
-                hello = try await sendAndReceive(.string("{\"version\":1,\"type\":\"gateway_hello\",\"capabilities\":[\"\(Self.commandDeliveryCapability)\",\"\(Self.feedPageCapability)\"]}"), using: task)
+                hello = try await sendAndReceive(.string("{\"version\":1,\"type\":\"gateway_hello\",\"capabilities\":[\"\(Self.commandDeliveryCapability)\",\"\(Self.feedPageCapability)\",\"\(Self.destinationsListCapability)\",\"\(Self.feedQueueCapability)\"]}"), using: task)
                 fputs("Lustre Cloud gateway: event=realtime_hello_reply_received.\n", stderr)
             } catch {
                 if let response = task.response as? HTTPURLResponse { throw CloudPresenceConnectionError.httpStatus(response.statusCode) }
@@ -136,14 +138,16 @@ public actor CloudPresenceConnection {
             else { throw CloudDeviceError.invalidResponse }
             let commandDeliveryV1 = helloFrame.capabilities?.contains(Self.commandDeliveryCapability) == true
             let feedPageV1 = commandDeliveryV1 && helloFrame.capabilities?.contains(Self.feedPageCapability) == true
-            fputs("Lustre Cloud gateway: event=realtime_hello_accepted commandDelivery=\(commandDeliveryV1) feedPage=\(feedPageV1).\n", stderr)
-            try await heartbeatLoop(task: task, generation: generation, commandDeliveryV1: commandDeliveryV1, feedPageV1: feedPageV1)
+            let destinationsListV1 = commandDeliveryV1 && helloFrame.capabilities?.contains(Self.destinationsListCapability) == true
+            let feedQueueV1 = commandDeliveryV1 && helloFrame.capabilities?.contains(Self.feedQueueCapability) == true
+            fputs("Lustre Cloud gateway: event=realtime_hello_accepted commandDelivery=\(commandDeliveryV1) feedPage=\(feedPageV1) destinationsList=\(destinationsListV1) feedQueue=\(feedQueueV1).\n", stderr)
+            try await heartbeatLoop(task: task, generation: generation, commandDeliveryV1: commandDeliveryV1, feedPageV1: feedPageV1, destinationsListV1: destinationsListV1, feedQueueV1: feedQueueV1)
             return
         }
-        try await heartbeatLoop(task: task, generation: generation, commandDeliveryV1: false, feedPageV1: false)
+        try await heartbeatLoop(task: task, generation: generation, commandDeliveryV1: false, feedPageV1: false, destinationsListV1: false, feedQueueV1: false)
     }
 
-    private func heartbeatLoop(task: URLSessionWebSocketTask, generation: CloudPresenceReconnectStateMachine.Generation, commandDeliveryV1: Bool, feedPageV1: Bool) async throws {
+    private func heartbeatLoop(task: URLSessionWebSocketTask, generation: CloudPresenceReconnectStateMachine.Generation, commandDeliveryV1: Bool, feedPageV1: Bool, destinationsListV1: Bool, feedQueueV1: Bool) async throws {
         var sequence = 1
         let correlationID = UUID().uuidString.lowercased()
         while !Task.isCancelled {
@@ -180,7 +184,7 @@ public actor CloudPresenceConnection {
                       delivery.type == "command-delivery",
                       delivery.sequence == sequence,
                       delivery.correlationID == correlationID,
-                      delivery.command == nil || delivery.command?.kind == "feed_sites" || (feedPageV1 && delivery.command?.kind == "feed_page")
+                      delivery.command == nil || delivery.command?.kind == "feed_sites" || (feedPageV1 && delivery.command?.kind == "feed_page") || (destinationsListV1 && delivery.command?.kind == "destinations_list") || (feedQueueV1 && delivery.command?.kind == "queue_url")
                 else { throw CloudDeviceError.invalidResponse }
                 await remoteControl.acknowledgedByCloud(ids: delivery.acknowledgedCommandAckIDs)
                 command = delivery.command

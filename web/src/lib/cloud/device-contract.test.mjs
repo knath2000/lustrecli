@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { normalizeFeedPageCommand, normalizePairingCode, parseHeartbeatFrame, validFeedPageResult, validateDisplayName } from "./device-contract.ts";
+import { normalizeFeedPageCommand, normalizePairingCode, parseHeartbeatFrame, validDestinationsResult, validFeedPageResult, validateDisplayName } from "./device-contract.ts";
 
 test("pairing codes normalize grouped Crockford Base32", () => {
   assert.equal(normalizePairingCode("abcde-fghjk-mnpqr-stvwz"), "ABCDEFGHJKMNPQRSTVWZ");
@@ -42,4 +42,13 @@ test("feed_page results enforce the canonical bounded schema", () => {
   assert.equal(validFeedPageResult({ ...result, page: { ...result.page, items: Array(51).fill(result.page.items[0]) } }), false);
   assert.equal(validFeedPageResult({ ...result, page: { ...result.page, items: [{ ...result.page.items[0], previewURLs: Array(5).fill("https://example.com/p.jpg") }] } }), false);
   assert.throws(() => parseHeartbeatFrame({ version: 1, type: "heartbeat", sequence: 1, sentAt: "2026-07-26T10:00:00Z", agentVersion: "0.1.0", correlationID: "j2", commandAcks: [{ id: "f8ca8705-69c4-4c73-81fb-7bb1dc5c1853", status: "completed", result: { ...result, page: { ...result.page, page: 0 } } }], jobs: [] }));
+});
+
+test("destination results contain only bounded credential-free fields", () => {
+  const destination = { id: "f8ca8705-69c4-4c73-81fb-7bb1dc5c1853", name: "Seedbox", baseURL: "https://dav.example.com", username: "user", remotePath: "/downloads", allowInvalidCertificate: false };
+  assert.equal(validDestinationsResult({ kind: "destinations_list", destinations: [destination] }), true);
+  assert.equal(validDestinationsResult({ kind: "destinations_list", destinations: [{ ...destination, password: "secret" }] }), false);
+  assert.equal(validDestinationsResult({ kind: "destinations_list", destinations: [{ ...destination, baseURL: "https://user:secret@dav.example.com" }] }), false);
+  assert.equal(validDestinationsResult({ kind: "destinations_list", destinations: [{ ...destination, remotePath: "/safe/../secret" }] }), false);
+  assert.equal(validDestinationsResult({ kind: "destinations_list", destinations: Array(65).fill(destination) }), false);
 });

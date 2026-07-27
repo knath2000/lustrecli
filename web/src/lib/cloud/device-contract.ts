@@ -6,12 +6,14 @@ export const HEARTBEAT_INTERVAL_SECONDS = 30;
 export const PRESENCE_FRESHNESS_SECONDS = 75;
 export const MAX_HEARTBEAT_FRAME_BYTES = 131_072;
 export const MAX_FEED_PAGE_ACK_BYTES = 65_536;
+export const MAX_DESTINATIONS_ACK_BYTES = 32_768;
+export const MAX_DESTINATIONS = 64;
 export const FEED_SITE_IDS = ["allpornstream", "hqporner", "onlyfan420", "pornhub", "pornhub-subscriptions", "pornhub-liked", "pornhub-favorites"] as const;
 
 export type DeviceErrorCode =
   | "unauthenticated" | "email_unverified" | "invalid_request" | "invalid_pairing_code"
   | "challenge_expired" | "challenge_consumed" | "device_revoked" | "device_not_found"
-  | "invalid_signature" | "unsupported_protocol" | "rate_limited" | "already_enrolled" | "internal_error";
+  | "invalid_signature" | "unsupported_protocol" | "rate_limited" | "already_enrolled" | "conflict" | "internal_error";
 
 export class DeviceContractError extends Error {
   readonly code: DeviceErrorCode;
@@ -94,6 +96,22 @@ export function validFeedPageResult(value: unknown): value is Record<string, unk
   return true;
 }
 
+function normalizedRemotePath(value: unknown): value is string {
+  if (typeof value !== "string" || value.length > 1_024 || !value.startsWith("/")) return false;
+  const components = value.split("/").filter(Boolean);
+  return !components.some((component) => component === "." || component === "..") && (components.length ? `/${components.join("/")}` : "/") === value;
+}
+
+export function validDestinationsResult(value: unknown): value is Record<string, unknown> {
+  if (!record(value) || value.kind !== "destinations_list" || !Array.isArray(value.destinations) || value.destinations.length > MAX_DESTINATIONS || Object.keys(value).some((key) => !["kind", "destinations"].includes(key))) return false;
+  return value.destinations.every((destination) => {
+    if (!record(destination) || Object.keys(destination).some((key) => !["id", "name", "baseURL", "username", "remotePath", "allowInvalidCertificate"].includes(key))) return false;
+    if (!uuid(destination.id) || !boundedString(destination.name, 128) || !httpsURL(destination.baseURL, 2_048) || !boundedString(destination.username, 256) || !normalizedRemotePath(destination.remotePath) || typeof destination.allowInvalidCertificate !== "boolean") return false;
+    const url = new URL(destination.baseURL as string);
+    return !url.search && !url.hash;
+  });
+}
+
 export type RemoteCommandAck = { id: string; status: "completed" | "failed"; jobID?: string; result?: Record<string, unknown> };
 export type RemoteJobStatus = { id: string; sourcePageURL?: string; displayName?: string; preferredQualityLabel?: string; status: "queued" | "running" | "paused" | "completed" | "failed" | "cancelled" | "verificationRequired"; progress?: number; downloadedBytes?: number; totalBytes?: number; phase?: "resolving" | "downloading" | "materializing" | "postProcessing" | "uploading" | "verifying"; attempts: number; updatedAt?: string };
 export type HeartbeatFrame = { version: 1; type: "heartbeat"; sequence: number; sentAt: string; agentVersion: string; correlationID: string; commandAcks: RemoteCommandAck[]; jobs: RemoteJobStatus[] };
@@ -106,6 +124,7 @@ export function parseHeartbeatFrame(value: unknown): HeartbeatFrame {
   for (const ack of commandAcks) {
     if (!record(ack) || !uuid(ack.id) || !["completed", "failed"].includes(ack.status as string) || (ack.jobID !== undefined && !uuid(ack.jobID)) || (ack.result !== undefined && !record(ack.result))) throw new DeviceContractError("invalid_request", "Invalid heartbeat.");
     if (ack.status === "completed" && record(ack.result) && ack.result.kind === "feed_page" && (!validFeedPageResult(ack.result) || new TextEncoder().encode(JSON.stringify(ack)).byteLength > MAX_FEED_PAGE_ACK_BYTES)) throw new DeviceContractError("invalid_request", "Invalid heartbeat.");
+    if (ack.status === "completed" && record(ack.result) && ack.result.kind === "destinations_list" && (!validDestinationsResult(ack.result) || new TextEncoder().encode(JSON.stringify(ack)).byteLength > MAX_DESTINATIONS_ACK_BYTES)) throw new DeviceContractError("invalid_request", "Invalid heartbeat.");
   }
   for (const job of jobs) {
     if (!record(job) || !uuid(job.id) || typeof job.status !== "string" || !JOB_STATUSES.has(job.status) || !nonNegativeInteger(job.attempts)) throw new DeviceContractError("invalid_request", "Invalid heartbeat.");

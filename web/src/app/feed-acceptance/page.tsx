@@ -1,6 +1,6 @@
 import { auth } from "@clerk/nextjs/server";
 import { notFound } from "next/navigation";
-import { cloudFeedAcceptanceAllowed, cloudFeedMediaEnabled } from "@/lib/cloud-feed-ui";
+import { cloudFeedAcceptanceAllowed, cloudFeedDestinationsEnabled, cloudFeedMediaEnabled, cloudFeedQueueEnabled } from "@/lib/cloud-feed-ui";
 import { CloudFullDashboard } from "../cloud-full-dashboard";
 
 export default async function FeedAcceptancePage() {
@@ -14,6 +14,8 @@ export default async function FeedAcceptancePage() {
   return <CloudFullDashboard
     feedEnabled
     feedMediaEnabled={cloudFeedMediaEnabled(process.env.LUSTRE_CLOUD_FEED_MEDIA_ENABLED)}
+    feedDestinationsEnabled={cloudFeedDestinationsEnabled(process.env.LUSTRE_CLOUD_FEED_DESTINATIONS_ENABLED)}
+    feedQueueEnabled={cloudFeedQueueEnabled(process.env.LUSTRE_CLOUD_FEED_QUEUE_ENABLED)}
     suppressDestinationPolling
   />;
 }

@@ -52,3 +52,18 @@ test("persistence rejection returns no successful acknowledgement", async () => 
   assert.equal(response.status, 500);
   assert.deepEqual(await response.json(), { error: { code: "internal_error", message: "Unable to process the device request." } });
 });
+
+test("acceptance failure switch rejects only heartbeats carrying command acknowledgements", async () => {
+  process.env.LUSTRE_GATEWAY_RELAY_SECRET = secret;
+  process.env.LUSTRE_GATEWAY_ACCEPTANCE_FAIL_COMMAND_ACK_PERSISTENCE = "true";
+  let calls = 0;
+  const handler = gatewayHeartbeatHandler(async () => { calls += 1; return []; });
+  const acknowledgementFrame = { ...frame, commandAcks: [{ id: deviceID, status: "completed", result: { kind: "feed_sites", sites: [] } }] };
+  const failed = await handler(request({ deviceID, connectionID, connectedAt, frame: acknowledgementFrame }));
+  assert.equal(failed.status, 503);
+  assert.equal(calls, 0);
+  const ordinary = await handler(request({ deviceID, connectionID, connectedAt, frame }));
+  assert.equal(ordinary.status, 200);
+  assert.equal(calls, 1);
+  delete process.env.LUSTRE_GATEWAY_ACCEPTANCE_FAIL_COMMAND_ACK_PERSISTENCE;
+});

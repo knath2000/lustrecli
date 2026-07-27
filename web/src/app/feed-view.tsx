@@ -9,8 +9,6 @@ import {
   feedTransferState,
   feedUsesAuthenticatedAssetProxy,
   initialFeedSite,
-  queueFeedItems,
-  toggleFeedSelection,
   type FeedItem,
   type FeedPage,
   type FeedQuery,
@@ -35,10 +33,11 @@ type FeedViewProps = {
   jobs: FeedJob[];
   loadSites: () => Promise<FeedSite[]>;
   loadPage: (site: FeedSite["id"], query: FeedQuery) => Promise<FeedPage>;
-  queueItem: (item: FeedItem, destination: string) => Promise<void>;
+  queueItem: (item: FeedItem, destination: string, requestID: string) => Promise<void>;
   loadAsset: (url: string, kind: "image" | "video") => Promise<Blob>;
   onQueued: () => Promise<void>;
   mediaEnabled: boolean;
+  destinationsEnabled?: boolean;
   queueEnabled: boolean;
 };
 
@@ -270,6 +269,7 @@ export function FeedView({
   loadAsset,
   onQueued,
   mediaEnabled,
+  destinationsEnabled = false,
   queueEnabled,
 }: FeedViewProps) {
   const [sites, setSites] = useState<FeedSite[]>([]);
@@ -280,7 +280,8 @@ export function FeedView({
   const [selection, setSelection] = useState<Set<string>>(new Set());
   const [destination, setDestination] = useState("local");
   const [loading, setLoading] = useState(true);
-  const [queueing, setQueueing] = useState(false);
+  const [pendingItems, setPendingItems] = useState<Set<string>>(new Set());
+  const requestIDs = useRef(new Map<string, string>());
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [searchInput, setSearchInput] = useState("");
@@ -405,33 +406,30 @@ export function FeedView({
     await fetchPage(1, true, "");
   };
 
-  const selectedItems = useMemo(
-    () => items.filter((item) => selection.has(item.id)),
-    [items, selection],
-  );
-
   const queueItems = async (targets: FeedItem[]) => {
-    if (!queueEnabled || !targets.length) return;
-    setQueueing(true);
+    if (!queueEnabled || targets.length !== 1) return;
+    const item = targets[0];
+    const requestID = requestIDs.current.get(item.id) ?? crypto.randomUUID();
+    requestIDs.current.set(item.id, requestID);
+    setPendingItems((current) => new Set(current).add(item.id));
     setError(null);
     setNotice(null);
-    const results = await queueFeedItems(
-      targets,
-      (item) => queueItem(item, destination),
-      3,
-    );
-    const failed = results.filter((result) => !result.ok);
-    await onQueued();
-    if (failed.length)
-      setError(
-        `${failed.length} of ${results.length} transfers could not be queued. ${failed[0].error ?? ""}`.trim(),
-      );
-    else
+    try {
+      await queueItem(item, destination, requestID);
+      await onQueued();
       setNotice(
-        `${results.length} transfer${results.length === 1 ? "" : "s"} queued to ${destination === "local" ? "Local Downloads" : "the selected WebDAV destination"}.`,
+        `Transfer queued to ${destination === "local" ? "Local Downloads" : "the selected WebDAV destination"}.`,
       );
+      requestIDs.current.delete(item.id);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "The transfer could not be queued.");
+    }
     setSelection(new Set());
-    setQueueing(false);
+    setPendingItems((current) => {
+      const next = new Set(current);
+      next.delete(item.id);
+      return next;
+    });
   };
 
   return (
@@ -505,7 +503,7 @@ export function FeedView({
             <span>Destination</span>
             <select
               value={destination}
-              disabled={!queueEnabled || loading}
+              disabled={!destinationsEnabled || loading}
               onChange={(event) => setDestination(event.target.value)}
             >
               <option value="local">Local Downloads</option>
@@ -564,24 +562,6 @@ export function FeedView({
         </p>
       )}
 
-      {queueEnabled && selection.size > 0 && (
-        <section
-          className="feed-selection-bar"
-          aria-label="Selected feed items"
-        >
-          <strong>{selection.size} selected</strong>
-          <span>Queue requests run three at a time.</span>
-          <button onClick={() => setSelection(new Set())}>Clear</button>
-          <button
-            className="queue-button"
-            disabled={queueing}
-            onClick={() => void queueItems(selectedItems)}
-          >
-            {queueing ? "Queueing…" : "Queue selected"}
-          </button>
-        </section>
-      )}
-
       <section
         className="feed-grid"
         aria-label={`${selectedSite?.displayName ?? "Video"} feed`}
@@ -611,20 +591,6 @@ export function FeedView({
                     ? "Ready"
                     : state.replace(/([A-Z])/g, " $1")}
                 </span>
-                {queueEnabled && (
-                  <button
-                    className="feed-select"
-                    aria-label={`${selected ? "Deselect" : "Select"} ${item.title}`}
-                    aria-pressed={selected}
-                    onClick={() =>
-                      setSelection((current) =>
-                        toggleFeedSelection(current, item.id),
-                      )
-                    }
-                  >
-                    {selected ? "✓" : "+"}
-                  </button>
-                )}
               </div>
               <div className="feed-card-copy">
                 <p>{item.studio ?? selectedSite?.displayName ?? "Video"}</p>
@@ -655,7 +621,7 @@ export function FeedView({
                 <button
                   disabled={
                     !queueEnabled ||
-                    queueing ||
+                    pendingItems.has(item.id) ||
                     state === "queued" ||
                     state === "running"
                   }
@@ -663,6 +629,8 @@ export function FeedView({
                 >
                   {!queueEnabled
                     ? "Queue gated"
+                    : pendingItems.has(item.id)
+                    ? "Queueing…"
                     : state === "queued" || state === "running"
                     ? "In queue"
                     : "Queue"}

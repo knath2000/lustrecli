@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { commandDeliveryCapability, commandDeliveryFrame, feedPageCapability, negotiatedCommandDelivery, negotiatedFeedPage, selectedGatewayCommand, validFeedPageAcknowledgement, validPersistenceResponse } from "./protocol.ts";
+import { commandDeliveryCapability, commandDeliveryFrame, destinationsListCapability, feedPageCapability, feedQueueCapability, negotiatedCommandDelivery, negotiatedDestinationsList, negotiatedFeedPage, negotiatedFeedQueue, selectedGatewayCommand, validDestinationsAcknowledgement, validFeedPageAcknowledgement, validPersistenceResponse } from "./protocol.ts";
 
 test("capability negotiation is realtime-only and survives attachment serialization", () => {
   assert.equal(negotiatedCommandDelivery({ capabilities: [commandDeliveryCapability] }, true), true);
@@ -8,9 +8,30 @@ test("capability negotiation is realtime-only and survives attachment serializat
   assert.equal(negotiatedCommandDelivery({}, true), false);
   assert.equal(negotiatedFeedPage({ capabilities: [commandDeliveryCapability, feedPageCapability] }, true), true);
   assert.equal(negotiatedFeedPage({ capabilities: [feedPageCapability] }, true), false);
-  const attachment = JSON.parse(JSON.stringify({ connectionKind: "realtime", commandDeliveryV1: true, feedPageV1: true }));
+  assert.equal(negotiatedDestinationsList({ capabilities: [commandDeliveryCapability, destinationsListCapability] }, true), true);
+  assert.equal(negotiatedDestinationsList({ capabilities: [destinationsListCapability] }, true), false);
+  assert.equal(negotiatedFeedQueue({ capabilities: [commandDeliveryCapability, feedQueueCapability] }, true), true);
+  assert.equal(negotiatedFeedQueue({ capabilities: [feedQueueCapability] }, true), false);
+  const attachment = JSON.parse(JSON.stringify({ connectionKind: "realtime", commandDeliveryV1: true, feedPageV1: true, destinationsListV1: true, feedQueueV1: true }));
   assert.equal(attachment.commandDeliveryV1, true);
   assert.equal(attachment.feedPageV1, true);
+  assert.equal(attachment.destinationsListV1, true);
+  assert.equal(attachment.feedQueueV1, true);
+});
+
+test("destination acknowledgements enforce safe fields and the 32768-byte boundary", () => {
+  const destination = { id: "f8ca8705-69c4-4c73-81fb-7bb1dc5c1853", name: "Seedbox", baseURL: "https://dav.example.com", username: "user", remotePath: "/downloads", allowInvalidCertificate: false };
+  const acknowledgement = { id: destination.id, status: "completed", result: { kind: "destinations_list", destinations: [destination] } };
+  assert.equal(validDestinationsAcknowledgement(acknowledgement), true);
+  assert.equal(validDestinationsAcknowledgement({ ...acknowledgement, result: { ...acknowledgement.result, destinations: Array(65).fill(destination) } }), false);
+  for (const invalid of [
+    { ...destination, baseURL: "https://user:secret@dav.example.com" },
+    { ...destination, baseURL: "http://dav.example.com" },
+    { ...destination, remotePath: "/safe/../secret" },
+    { ...destination, remotePath: "/safe//path" },
+    { ...destination, allowInvalidCertificate: "false" },
+  ]) assert.equal(validDestinationsAcknowledgement({ ...acknowledgement, result: { ...acknowledgement.result, destinations: [invalid] } }), false);
+  assert.equal(validDestinationsAcknowledgement({ ...acknowledgement, result: { ...acknowledgement.result, destinations: [{ ...destination, name: "x".repeat(33_000) }] } }), false);
 });
 
 test("feed_page acknowledgements enforce schema and the 65536-byte boundary", () => {
@@ -42,4 +63,17 @@ test("relay responses are strictly validated", () => {
   for (const payload of [{ siteID: "unknown", page: 1 }, { siteID: "hqporner", page: 0 }, { siteID: "hqporner", page: 1, query: "\u0000" }]) {
     assert.equal(selectedGatewayCommand({ ...page, command: { ...page.command, payload } }, 7, "j1", true), undefined);
   }
+  const destinations = { version: 1, type: "gateway-command-selected", sequence: 7, correlationID: "j1", command: { id: "f8ca8705-69c4-4c73-81fb-7bb1dc5c1853", kind: "destinations_list", payload: {} } };
+  assert.equal(selectedGatewayCommand(destinations, 7, "j1", true, false), undefined);
+  assert.deepEqual(selectedGatewayCommand(destinations, 7, "j1", true, true), destinations.command);
+  assert.equal(selectedGatewayCommand({ ...destinations, command: { ...destinations.command, payload: { unexpected: true } } }, 7, "j1", true, true), undefined);
+  const queue = { version: 1, type: "gateway-command-selected", sequence: 7, correlationID: "j1", command: { id: "f8ca8705-69c4-4c73-81fb-7bb1dc5c1853", kind: "queue_url", payload: { url: "https://hqporner.com/hdporn/example.html", destination: "local", deliveryProtocol: "gateway-v1" } } };
+  assert.equal(selectedGatewayCommand(queue, 7, "j1", true, true, false), undefined);
+  assert.deepEqual(selectedGatewayCommand(queue, 7, "j1", true, true, true), queue.command);
+  for (const payload of [
+    { ...queue.command.payload, url: "https://user:secret@hqporner.com/example" },
+    { ...queue.command.payload, url: "http://hqporner.com/example" },
+    { ...queue.command.payload, destination: "Seedbox3" },
+    { ...queue.command.payload, preferredQualityLabel: "1080p" },
+  ]) assert.equal(selectedGatewayCommand({ ...queue, command: { ...queue.command, payload } }, 7, "j1", true, true, true), undefined);
 });

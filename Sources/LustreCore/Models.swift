@@ -272,11 +272,13 @@ public struct ExtractionResult: Codable, Equatable, Sendable {
 }
 
 public struct CreateJobRequest: Codable, Sendable {
+    public let id: UUID?
     public let sourcePageURL: URL
     public let preferredQualityLabel: String?
     public let destination: String?
 
-    public init(sourcePageURL: URL, preferredQualityLabel: String? = nil, destination: String? = nil) {
+    public init(id: UUID? = nil, sourcePageURL: URL, preferredQualityLabel: String? = nil, destination: String? = nil) {
+        self.id = id
         self.sourcePageURL = sourcePageURL
         self.preferredQualityLabel = preferredQualityLabel
         self.destination = destination

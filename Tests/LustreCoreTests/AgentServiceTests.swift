@@ -4,6 +4,27 @@ import LustreCore
 import XCTest
 
 final class AgentServiceTests: XCTestCase {
+    func testCreateJobUsesCallerSuppliedIDAndCannotCreateASecondJobForIt() async throws {
+        let database = FileManager.default.temporaryDirectory.appending(path: "lustre-agent-command-id-\(UUID().uuidString).sqlite3")
+        defer { try? FileManager.default.removeItem(at: database) }
+        let service = try AgentService(databaseURL: database, automaticallyStartsDownloads: false)
+        let id = UUID()
+        let source = URL(string: "https://hqporner.com/hdporn/example.html")!
+
+        let created = try await service.createJob(CreateJobRequest(id: id, sourcePageURL: source))
+        let stored = try await service.job(id: id)
+
+        XCTAssertEqual(created.id, id)
+        XCTAssertEqual(stored, created)
+        do {
+            _ = try await service.createJob(CreateJobRequest(id: id, sourcePageURL: source))
+            XCTFail("Expected the immutable job ID to reject a duplicate insert.")
+        } catch {
+            let jobIDs = try await service.allJobs().map(\.id)
+            XCTAssertEqual(jobIDs, [id])
+        }
+    }
+
     func testExtractSurfacesStaticProviderResolution() async throws {
         let resolver = StaticProviderResolver(
             fetch: { url, _ in

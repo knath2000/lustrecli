@@ -1,13 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { cloudDashboardRefreshPaths, cloudFeedAcceptanceAllowed, cloudFeedCapabilities, cloudFeedEnabled, cloudFeedMediaEnabled, cloudFeedRequestKey, coalesceCloudFeedRequest } from "./cloud-feed-ui.ts";
+import { cloudDashboardRefreshPaths, cloudFeedAcceptanceAllowed, cloudFeedCapabilities, cloudFeedDestinationsEnabled, cloudFeedEnabled, cloudFeedMediaEnabled, cloudFeedQueueEnabled, cloudFeedRequestKey, coalesceCloudFeedRequest } from "./cloud-feed-ui.ts";
 
 test("Cloud Feed requires the exact server flag value true", () => {
   assert.equal(cloudFeedEnabled("true"), true);
   assert.equal(cloudFeedMediaEnabled("true"), true);
+  assert.equal(cloudFeedDestinationsEnabled("true"), true);
+  assert.equal(cloudFeedQueueEnabled("true"), true);
   for (const value of [undefined, "", "TRUE", "1", " true", "true "]) assert.equal(cloudFeedEnabled(value), false);
   for (const value of [undefined, "", "TRUE", "1", " true", "true "]) assert.equal(cloudFeedMediaEnabled(value), false);
+  for (const value of [undefined, "", "TRUE", "1", " true", "true "]) assert.equal(cloudFeedDestinationsEnabled(value), false);
+  for (const value of [undefined, "", "TRUE", "1", " true", "true "]) assert.equal(cloudFeedQueueEnabled(value), false);
 });
 
 test("Cloud Feed acceptance requires the exact flag and Clerk subject", () => {
@@ -53,6 +57,16 @@ test("identical in-flight Feed requests share one promise and clear after settle
 });
 
 test("K1 capabilities prevent media loading and every queue interaction", () => {
-  assert.deepEqual(cloudFeedCapabilities(false, false), { loadMedia: false, chooseDestination: false, selectItems: false, queueItems: false });
-  assert.deepEqual(cloudFeedCapabilities(true, true), { loadMedia: true, chooseDestination: true, selectItems: true, queueItems: true });
+  assert.deepEqual(cloudFeedCapabilities(false, false, false), { loadMedia: false, chooseDestination: false, selectItems: false, queueItems: false });
+  assert.deepEqual(cloudFeedCapabilities(true, true, true), { loadMedia: true, chooseDestination: true, selectItems: false, queueItems: true });
+});
+
+test("K4 enables individual queueing without enabling batch selection", () => {
+  assert.deepEqual(cloudFeedCapabilities(true, true, true), { loadMedia: true, chooseDestination: true, selectItems: false, queueItems: true });
+});
+
+test("K3 enables destination choice without enabling selection or queueing", () => {
+  assert.deepEqual(cloudFeedCapabilities(false, true, false), { loadMedia: false, chooseDestination: true, selectItems: false, queueItems: false });
+  const destinationsKey = cloudFeedRequestKey({ deviceID: "device-a", kind: "destinations_list" });
+  assert.equal(destinationsKey, cloudFeedRequestKey({ deviceID: "device-a", kind: "destinations_list" }));
 });

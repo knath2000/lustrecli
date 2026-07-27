@@ -1,5 +1,16 @@
 # Session Log
 
+## 2026-07-26 — K4 exactly-once Cloud Feed queue delivery
+
+- Added the negotiated `feed-queue-v1` capability across the macOS agent, Cloudflare gateway, Vercel control plane, and Cloud Feed UI. Queue delivery is admitted only when the connected agent negotiated that capability; the gateway enforces an exact credential-free HTTPS source URL, canonical destination syntax, UUID request ID, no quality override, and a 4 KiB payload bound.
+- Bound Cloud queue authorization to proven same-account/same-device state. The requested item must appear with the exact site and source URL in a completed Feed result no more than one hour old, and the selected destination must appear in the newest completed destination result no more than 15 minutes old.
+- Made the browser request UUID the command ID and durable job ID. Individual Feed cards retain that UUID after failure, show card-local pending state, and wait for the matching projected job. Cloud Feed batch queueing is deliberately excluded.
+- Added caller-supplied job IDs to the local create-job contract. Command replay validates the existing job's immutable source and normalized destination before returning it; a conflicting replay fails instead of attaching to or creating a different transfer. Durable command receipt replay remains the final acknowledgement path.
+- Production acceptance forced acknowledgement persistence failure after exactly one HQPorner `queue_url` command to Seedbox3. During the crash window Neon showed no acknowledgement while SQLite already contained exactly one matching job. After restoring persistence, the same command completed with the same job ID and projected exactly one job; no duplicate command or transfer was created.
+- The acceptance transfer completed before it could be cancelled. Its exact 1,112,455,608-byte `Sun-Exposure-13242b58.mp4` path was verified on Seedbox3, deleted with WebDAV `204`, and verified absent with `404`. The agent finished with 30 durable jobs and zero active jobs.
+- Final production gating disabled Feed acceptance, destinations, queueing, and media exposure; `/feed-acceptance` returns `404`. Accepted artifacts are Vercel deployment `dpl_CNxCSPUybxzVHmTJQcuHkwTNawRC` and gateway version `06da3333-b17e-4d78-98a2-6cce2801c251`.
+- Recorded validation before the user requested no further testing: 72 web tests, TypeScript, Next.js production build, 5 gateway tests plus static/type checks, 6 focused Swift tests, and an isolated Swift release build. No additional transfer test was run.
+
 ## 2026-07-26 — Durable Cloud gateway and gated production Feed through K2
 
 - Replaced the non-viable Vercel WebSocket adapter with a dedicated Cloudflare Worker and hibernating Durable Object gateway while retaining Vercel for Clerk authentication, control-plane HTTP, and Neon persistence. The agent now authenticates outbound, receives `gateway_hello_ack`, and keeps the same connection identity through Durable Object sleep/wake.

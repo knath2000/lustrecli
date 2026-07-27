@@ -8,7 +8,9 @@ export type SelectGatewayCommand = (input: {
   connectionID: string;
   sequence: number;
   allowFeedPage: boolean;
-}) => Promise<{ id: string; kind: "feed_sites"; payload: Record<string, never> } | { id: string; kind: "feed_page"; payload: { siteID: string; page: number; query?: string } } | null>;
+  allowDestinationsList: boolean;
+  allowFeedQueue: boolean;
+}) => Promise<{ id: string; kind: "feed_sites"; payload: Record<string, unknown> } | { id: string; kind: "feed_page"; payload: { siteID: string; page: number; query?: string } } | { id: string; kind: "destinations_list"; payload: Record<string, unknown> } | { id: string; kind: "queue_url"; payload: { url: string; destination: string; deliveryProtocol: "gateway-v1" } } | null>;
 
 export function gatewayCommandHandler(select: SelectGatewayCommand) {
   return async (request: Request) => {
@@ -29,10 +31,21 @@ export function gatewayCommandHandler(select: SelectGatewayCommand) {
         typeof values.connectionID !== "string" || !UUID_PATTERN.test(values.connectionID) ||
         !Number.isSafeInteger(values.sequence) || (values.sequence as number) < 1 ||
         typeof values.correlationID !== "string" || values.correlationID.length < 1 || values.correlationID.length > 64 ||
-        (values.allowFeedPage !== undefined && typeof values.allowFeedPage !== "boolean")
+        (values.allowFeedPage !== undefined && typeof values.allowFeedPage !== "boolean") ||
+        (values.allowDestinationsList !== undefined && typeof values.allowDestinationsList !== "boolean")
+        || (values.allowFeedQueue !== undefined && typeof values.allowFeedQueue !== "boolean")
       ) throw new DeviceContractError("invalid_request", "Invalid command request.");
-      const command = await select({ deviceID: values.deviceID, connectionID: values.connectionID, sequence: values.sequence as number, allowFeedPage: values.allowFeedPage === true });
+      const command = await select({
+        deviceID: values.deviceID,
+        connectionID: values.connectionID,
+        sequence: values.sequence as number,
+        allowFeedPage: values.allowFeedPage === true,
+        allowDestinationsList: values.allowDestinationsList === true,
+        allowFeedQueue: values.allowFeedQueue === true,
+      });
       if (command?.kind === "feed_page") command.payload = normalizeFeedPageCommand(command.payload);
+      if (command?.kind === "destinations_list" && Object.keys(command.payload).length !== 0) throw new DeviceContractError("invalid_request", "Invalid destination command.");
+      if (command?.kind === "queue_url" && (Object.keys(command.payload).sort().join(",") !== "deliveryProtocol,destination,url" || command.payload.deliveryProtocol !== "gateway-v1")) throw new DeviceContractError("invalid_request", "Invalid Feed queue command.");
       return Response.json({ version: 1, type: "gateway-command-selected", sequence: values.sequence, correlationID: values.correlationID, command }, { headers: { "Cache-Control": "no-store" } });
     } catch (error) {
       if (error instanceof Error && error.message === "unauthenticated") return Response.json({ error: { code: "unauthenticated", message: "Unauthenticated." } }, { status: 401 });

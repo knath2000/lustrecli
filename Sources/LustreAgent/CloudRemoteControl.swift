@@ -10,6 +10,7 @@ struct CloudRemoteCommand: Decodable {
         let url: URL?
         let preferredQualityLabel: String?
         let destination: String?
+        let deliveryProtocol: String?
         let jobID: UUID?
         let action: JobAction?
         let siteID: String?
@@ -34,7 +35,39 @@ struct CloudRemoteResult: Codable {
     let kind: String
     let sites: [FeedSite]?
     let page: FeedPage?
-    let destinations: [WebDAVDestinationProfile]?
+    let destinations: [CloudRemoteDestination]?
+}
+
+struct CloudRemoteDestination: Codable, Equatable {
+    let id: UUID
+    let name: String
+    let baseURL: URL
+    let username: String
+    let remotePath: String
+    let allowInvalidCertificate: Bool
+
+    init?(_ profile: WebDAVDestinationProfile) {
+        guard profile.name.count <= 128,
+              profile.username.count <= 256,
+              profile.remotePath.count <= 1_024,
+              profile.baseURL.absoluteString.count <= 2_048,
+              profile.baseURL.scheme?.lowercased() == "https",
+              profile.baseURL.host?.isEmpty == false,
+              profile.baseURL.user == nil,
+              profile.baseURL.password == nil,
+              profile.baseURL.query == nil,
+              profile.baseURL.fragment == nil,
+              profile.remotePath.hasPrefix("/"),
+              !profile.remotePath.split(separator: "/", omittingEmptySubsequences: true).contains("."),
+              !profile.remotePath.split(separator: "/", omittingEmptySubsequences: true).contains("..")
+        else { return nil }
+        id = profile.id
+        name = profile.name
+        baseURL = profile.baseURL
+        username = profile.username
+        remotePath = profile.remotePath
+        allowInvalidCertificate = profile.allowInvalidCertificate
+    }
 }
 
 struct CloudRemoteJobStatus: Codable {
@@ -92,6 +125,8 @@ struct CloudCommandDelivery: Decodable {
 
 actor CloudRemoteControl {
     static let maximumFeedPageAcknowledgementBytes = 65_536
+    static let maximumDestinationsAcknowledgementBytes = 32_768
+    static let maximumDestinations = 64
     private let service: AgentService
     private var acknowledgements: [CloudRemoteCommandAck] = []
     private var completed: [UUID: CloudRemoteCommandAck]
@@ -116,15 +151,40 @@ actor CloudRemoteControl {
     func handle(_ command: CloudRemoteCommand?) async -> Bool {
         guard let command else { return false }
         if let acknowledgement = completed[command.id] {
+            if command.kind == "queue_url", acknowledgement.status == "completed" {
+                guard let url = command.payload.url,
+                      command.payload.deliveryProtocol == "gateway-v1",
+                      command.payload.preferredQualityLabel == nil,
+                      let existing = try? await service.job(id: command.id),
+                      let destination = try? await service.normalizedCloudDestination(command.payload.destination),
+                      existing.sourcePageURL == url,
+                      existing.destination == destination
+                else {
+                    enqueue(CloudRemoteCommandAck(id: command.id, status: "failed", jobID: nil, result: nil))
+                    return true
+                }
+            }
             enqueue(acknowledgement)
             return true
         }
         let acknowledgement: CloudRemoteCommandAck
         switch command.kind {
         case "queue_url":
-            guard let url = command.payload.url else { acknowledgement = CloudRemoteCommandAck(id: command.id, status: "failed", jobID: nil, result: nil); break }
+            guard let url = command.payload.url,
+                  command.payload.deliveryProtocol == "gateway-v1",
+                  command.payload.preferredQualityLabel == nil
+            else { acknowledgement = CloudRemoteCommandAck(id: command.id, status: "failed", jobID: nil, result: nil); break }
             do {
-                let job = try await service.createJob(CreateJobRequest(sourcePageURL: url, preferredQualityLabel: command.payload.preferredQualityLabel, destination: command.payload.destination))
+                if let existing = try await service.job(id: command.id) {
+                    let destination = try await service.normalizedCloudDestination(command.payload.destination)
+                    guard existing.sourcePageURL == url, existing.destination == destination else {
+                        acknowledgement = CloudRemoteCommandAck(id: command.id, status: "failed", jobID: nil, result: nil)
+                        break
+                    }
+                    acknowledgement = CloudRemoteCommandAck(id: command.id, status: "completed", jobID: existing.id, result: nil)
+                    break
+                }
+                let job = try await service.createJob(CreateJobRequest(id: command.id, sourcePageURL: url, destination: command.payload.destination))
                 acknowledgement = CloudRemoteCommandAck(id: command.id, status: "completed", jobID: job.id, result: nil)
             } catch {
                 acknowledgement = CloudRemoteCommandAck(id: command.id, status: "failed", jobID: nil, result: nil)
@@ -145,7 +205,7 @@ actor CloudRemoteControl {
             do { acknowledgement = Self.boundedFeedPageAcknowledgement(id: command.id, page: try await service.feedPage(site: site, query: command.payload.query, page: page)) }
             catch { acknowledgement = CloudRemoteCommandAck(id: command.id, status: "failed", jobID: nil, result: nil) }
         case "destinations_list":
-            acknowledgement = CloudRemoteCommandAck(id: command.id, status: "completed", jobID: nil, result: CloudRemoteResult(kind: "destinations_list", sites: nil, page: nil, destinations: await service.allRemoteDestinations()))
+            acknowledgement = Self.boundedDestinationsAcknowledgement(id: command.id, profiles: await service.allRemoteDestinations())
         case "webdav_add":
             guard let name = command.payload.name, let baseURL = command.payload.baseURL, let username = command.payload.username, let remotePath = command.payload.remotePath, let password = try? Self.promptForWebDAVPassword(name: name) else { acknowledgement = CloudRemoteCommandAck(id: command.id, status: "failed", jobID: nil, result: nil); break }
             do { _ = try await service.saveWebDAVDestination(WebDAVDestinationRequest(name: name, baseURL: baseURL, username: username, password: password, remotePath: remotePath, allowInvalidCertificate: command.payload.allowInvalidCertificate == "true")); acknowledgement = CloudRemoteCommandAck(id: command.id, status: "completed", jobID: nil, result: nil) }
@@ -173,6 +233,25 @@ actor CloudRemoteControl {
     static func boundedFeedPageAcknowledgement(id: UUID, page: FeedPage) -> CloudRemoteCommandAck {
         let completed = CloudRemoteCommandAck(id: id, status: "completed", jobID: nil, result: CloudRemoteResult(kind: "feed_page", sites: nil, page: page, destinations: nil))
         guard let encoded = try? JSONEncoder.cloud.encode(completed), encoded.count <= maximumFeedPageAcknowledgementBytes else {
+            return CloudRemoteCommandAck(id: id, status: "failed", jobID: nil, result: nil)
+        }
+        return completed
+    }
+
+    static func boundedDestinationsAcknowledgement(id: UUID, profiles: [WebDAVDestinationProfile]) -> CloudRemoteCommandAck {
+        guard profiles.count <= maximumDestinations else {
+            return CloudRemoteCommandAck(id: id, status: "failed", jobID: nil, result: nil)
+        }
+        let orderedProfiles = profiles.sorted {
+            let comparison = $0.name.localizedCaseInsensitiveCompare($1.name)
+            return comparison == .orderedSame ? $0.id.uuidString < $1.id.uuidString : comparison == .orderedAscending
+        }
+        let destinations = orderedProfiles.compactMap(CloudRemoteDestination.init)
+        guard destinations.count == orderedProfiles.count else {
+            return CloudRemoteCommandAck(id: id, status: "failed", jobID: nil, result: nil)
+        }
+        let completed = CloudRemoteCommandAck(id: id, status: "completed", jobID: nil, result: CloudRemoteResult(kind: "destinations_list", sites: nil, page: nil, destinations: destinations))
+        guard let encoded = try? JSONEncoder.cloud.encode(completed), encoded.count <= maximumDestinationsAcknowledgementBytes else {
             return CloudRemoteCommandAck(id: id, status: "failed", jobID: nil, result: nil)
         }
         return completed

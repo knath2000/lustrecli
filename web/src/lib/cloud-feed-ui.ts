@@ -1,10 +1,18 @@
-export type CloudFeedCommandKind = "feed_sites" | "feed_page";
+export type CloudFeedCommandKind = "feed_sites" | "feed_page" | "destinations_list";
 
 export function cloudFeedEnabled(value: string | undefined): boolean {
   return value === "true";
 }
 
 export function cloudFeedMediaEnabled(value: string | undefined): boolean {
+  return value === "true";
+}
+
+export function cloudFeedDestinationsEnabled(value: string | undefined): boolean {
+  return value === "true";
+}
+
+export function cloudFeedQueueEnabled(value: string | undefined): boolean {
   return value === "true";
 }
 
@@ -49,6 +57,6 @@ export function coalesceCloudFeedRequest<T>(
   return promise;
 }
 
-export function cloudFeedCapabilities(mediaEnabled: boolean, queueEnabled: boolean) {
-  return { loadMedia: mediaEnabled, chooseDestination: queueEnabled, selectItems: queueEnabled, queueItems: queueEnabled };
+export function cloudFeedCapabilities(mediaEnabled: boolean, destinationsEnabled: boolean, queueEnabled: boolean) {
+  return { loadMedia: mediaEnabled, chooseDestination: destinationsEnabled, selectItems: false, queueItems: queueEnabled };
 }

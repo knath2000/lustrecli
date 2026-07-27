@@ -225,6 +225,75 @@ export async function presenceForOwnedDevice(accountID: string, deviceID: string
 export async function queueURLCommand(accountID: string, deviceID: string, url: string, preferredQualityLabel?: string, destination?: string) {
   return createCommand(accountID, deviceID, "queue_url", { url, preferredQualityLabel, destination });
 }
+export async function feedQueueCommand(input: { accountID: string; deviceID: string; requestID: string; itemID: string; siteID: string; sourcePageURL: string; destination: string }) {
+  const existing = (await db.select().from(lustreDeviceCommands).where(eq(lustreDeviceCommands.id, input.requestID)).limit(1))[0];
+  const payload = { itemID: input.itemID, siteID: input.siteID, url: input.sourcePageURL, destination: input.destination, deliveryProtocol: "gateway-v1" };
+  if (existing) {
+    const existingPayload = existing.payload as Record<string, unknown>;
+    if (existing.accountID !== input.accountID || existing.deviceID !== input.deviceID || existing.kind !== "queue_url" || Object.keys(existingPayload).sort().join(",") !== "deliveryProtocol,destination,itemID,siteID,url" || existingPayload.itemID !== input.itemID || existingPayload.siteID !== input.siteID || existingPayload.url !== input.sourcePageURL || existingPayload.destination !== input.destination || existingPayload.deliveryProtocol !== "gateway-v1") {
+      throw new DeviceContractError("conflict", "This request ID was already used with different inputs.");
+    }
+    return existing;
+  }
+  const destinationID = input.destination.startsWith("webdav:") ? input.destination.slice(7) : null;
+  const result = await db.execute(sql`
+    WITH eligible_device AS (
+      SELECT id FROM lustre_devices
+      WHERE id = ${input.deviceID}::uuid
+        AND account_id = ${input.accountID}::uuid
+        AND revoked_at IS NULL
+    ), feed_provenance AS (
+      SELECT command.id
+      FROM lustre_device_commands AS command, eligible_device
+      WHERE command.account_id = ${input.accountID}::uuid
+        AND command.device_id = eligible_device.id
+        AND command.kind = 'feed_page'
+        AND command.status = 'completed'
+        AND command.acknowledged_at >= now() - interval '1 hour'
+        AND EXISTS (
+          SELECT 1
+          FROM jsonb_array_elements(command.result -> 'page' -> 'items') AS item
+          WHERE item ->> 'id' = ${input.itemID}
+            AND item ->> 'siteID' = ${input.siteID}
+            AND item ->> 'sourcePageURL' = ${input.sourcePageURL}
+            AND item ->> 'queueCapability' = 'supported'
+        )
+      ORDER BY command.acknowledged_at DESC
+      LIMIT 1
+    ), newest_destination AS (
+      SELECT command.result
+      FROM lustre_device_commands AS command, eligible_device
+      WHERE command.account_id = ${input.accountID}::uuid
+        AND command.device_id = eligible_device.id
+        AND command.kind = 'destinations_list'
+        AND command.status = 'completed'
+        AND command.acknowledged_at >= now() - interval '15 minutes'
+      ORDER BY command.acknowledged_at DESC
+      LIMIT 1
+    ), destination_provenance AS (
+      SELECT true AS allowed
+      WHERE ${input.destination} = 'local'
+      UNION ALL
+      SELECT true
+      FROM newest_destination
+      WHERE ${destinationID}::text IS NOT NULL
+        AND EXISTS (
+          SELECT 1
+          FROM jsonb_array_elements(newest_destination.result -> 'destinations') AS destination
+          WHERE destination ->> 'id' = ${destinationID}
+        )
+      ORDER BY allowed
+      LIMIT 1
+    )
+    INSERT INTO lustre_device_commands (id, account_id, device_id, kind, payload)
+    SELECT ${input.requestID}::uuid, ${input.accountID}::uuid, ${input.deviceID}::uuid, 'queue_url', ${JSON.stringify(payload)}::jsonb
+    FROM eligible_device, feed_provenance, destination_provenance
+    RETURNING *
+  `);
+  const row = (result as unknown as { rows: typeof lustreDeviceCommands.$inferSelect[] }).rows[0];
+  if (!row) throw new DeviceContractError("invalid_request", "Fresh Feed and destination provenance are required.");
+  return row;
+}
 export async function jobActionCommand(accountID: string, deviceID: string, jobID: string, action: "pause" | "resume" | "cancel" | "retry") {
   return createCommand(accountID, deviceID, "job_action", { jobID, action });
 }
@@ -235,14 +304,12 @@ async function createCommand(accountID: string, deviceID: string, kind: string, 
 }
 export async function feedCommand(accountID: string, deviceID: string, kind: "feed_sites" | "feed_page" | "webdav_add" | "destinations_list", payload: Record<string, string | undefined>) {
   if (kind === "destinations_list") {
-    const pending = (await db.select().from(lustreDeviceCommands).where(and(eq(lustreDeviceCommands.accountID, accountID), eq(lustreDeviceCommands.deviceID, deviceID), eq(lustreDeviceCommands.kind, kind), sql`${lustreDeviceCommands.status} in ('pending', 'running')`)).orderBy(lustreDeviceCommands.createdAt).limit(1))[0];
+    const pending = (await db.select().from(lustreDeviceCommands).where(and(eq(lustreDeviceCommands.accountID, accountID), eq(lustreDeviceCommands.deviceID, deviceID), eq(lustreDeviceCommands.kind, kind), eq(lustreDeviceCommands.status, "pending"), sql`${lustreDeviceCommands.payload} ->> 'deliveryProtocol' = 'gateway-v1'`)).orderBy(lustreDeviceCommands.createdAt).limit(1))[0];
     if (pending) return pending;
-    const completed = (await db.select().from(lustreDeviceCommands).where(and(eq(lustreDeviceCommands.accountID, accountID), eq(lustreDeviceCommands.deviceID, deviceID), eq(lustreDeviceCommands.kind, kind), eq(lustreDeviceCommands.status, "completed"), isNotNull(lustreDeviceCommands.result))).orderBy(desc(lustreDeviceCommands.acknowledgedAt)).limit(1))[0];
-    if (completed) return completed;
   }
-  return createCommand(accountID, deviceID, kind, kind === "feed_sites" || kind === "feed_page" ? { ...payload, deliveryProtocol: "gateway-v1" } : payload);
+  return createCommand(accountID, deviceID, kind, kind === "feed_sites" || kind === "feed_page" || kind === "destinations_list" ? { ...payload, deliveryProtocol: "gateway-v1" } : payload);
 }
-export async function nextGatewayCommand(input: { deviceID: string; connectionID: string; sequence: number; allowFeedPage: boolean }) {
+export async function nextGatewayCommand(input: { deviceID: string; connectionID: string; sequence: number; allowFeedPage: boolean; allowDestinationsList: boolean; allowFeedQueue: boolean }) {
   const result = await db.execute(sql`
     WITH current_presence AS (
       SELECT device_id
@@ -257,6 +324,8 @@ export async function nextGatewayCommand(input: { deviceID: string; connectionID
       WHERE (
           command.kind = 'feed_sites'
           OR (${input.allowFeedPage} AND command.kind = 'feed_page')
+          OR (${input.allowDestinationsList} AND command.kind = 'destinations_list')
+          OR (${input.allowFeedQueue} AND command.kind = 'queue_url')
         )
         AND command.status IN ('pending', 'running')
         AND command.payload ->> 'deliveryProtocol' = 'gateway-v1'
@@ -270,11 +339,12 @@ export async function nextGatewayCommand(input: { deviceID: string; connectionID
     WHERE command.id = candidate.id
     RETURNING command.id, command.kind, command.payload
   `);
-  const row = (result as unknown as { rows: Array<{ id: string; kind: "feed_sites" | "feed_page"; payload: Record<string, string> }> }).rows[0];
+  const row = (result as unknown as { rows: Array<{ id: string; kind: "feed_sites" | "feed_page" | "destinations_list" | "queue_url"; payload: Record<string, string> }> }).rows[0];
   if (!row) return null;
-  return row.kind === "feed_sites"
-    ? { id: row.id, kind: "feed_sites" as const, payload: {} }
-    : { id: row.id, kind: "feed_page" as const, payload: { siteID: row.payload.siteID, page: Number(row.payload.page), ...(row.payload.query ? { query: row.payload.query } : {}) } };
+  if (row.kind === "feed_sites") return { id: row.id, kind: "feed_sites" as const, payload: {} };
+  if (row.kind === "destinations_list") return { id: row.id, kind: "destinations_list" as const, payload: {} };
+  if (row.kind === "queue_url") return { id: row.id, kind: "queue_url" as const, payload: { url: row.payload.url, destination: row.payload.destination, deliveryProtocol: "gateway-v1" as const } };
+  return { id: row.id, kind: "feed_page" as const, payload: { siteID: row.payload.siteID, page: Number(row.payload.page), ...(row.payload.query ? { query: row.payload.query } : {}) } };
 }
 export async function nextPendingCommand(deviceID: string) {
   return (await db.select().from(lustreDeviceCommands).where(and(eq(lustreDeviceCommands.deviceID, deviceID), sql`${lustreDeviceCommands.status} in ('pending', 'running')`)).orderBy(lustreDeviceCommands.createdAt).limit(1))[0] ?? null;

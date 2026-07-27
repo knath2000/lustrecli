@@ -31,6 +31,9 @@ export function gatewayHeartbeatHandler(persist: PersistGatewayHeartbeat) {
       ) throw new DeviceContractError("invalid_request", "Invalid gateway heartbeat.");
       if (new TextEncoder().encode(JSON.stringify(values.frame)).byteLength > MAX_HEARTBEAT_FRAME_BYTES) throw new DeviceContractError("invalid_request", "Heartbeat is too large.");
       const frame = parseHeartbeatFrame(values.frame);
+      if (process.env.LUSTRE_GATEWAY_ACCEPTANCE_FAIL_COMMAND_ACK_PERSISTENCE === "true" && frame.commandAcks.length > 0) {
+        return Response.json({ error: { code: "acceptance_relay_failure", message: "Persistence is temporarily unavailable." } }, { status: 503, headers: { "Cache-Control": "no-store" } });
+      }
       const acknowledgedCommandAckIDs = await persist({ deviceID: values.deviceID, connectionID: values.connectionID, connectedAt: new Date(values.connectedAt), frame });
       return Response.json({ version: 1, type: "gateway-heartbeat-persisted", sequence: frame.sequence, correlationID: frame.correlationID, acknowledgedCommandAckIDs }, { headers: { "Cache-Control": "no-store" } });
     } catch (error) {

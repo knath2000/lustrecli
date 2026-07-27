@@ -22,6 +22,7 @@ function heartbeatSchema(value: Record<string, unknown>): { acknowledgementCount
   for (const acknowledgement of value.commandAcks) {
     if (!isRecord(acknowledgement) || !isUUID(acknowledgement.id) || !["completed", "failed"].includes(acknowledgement.status as string) || (acknowledgement.jobID !== undefined && !isUUID(acknowledgement.jobID)) || (acknowledgement.result !== undefined && !isRecord(acknowledgement.result))) return null;
     if (acknowledgement.status === "completed" && isRecord(acknowledgement.result) && acknowledgement.result.kind === "feed_page" && !validFeedPageAcknowledgement(acknowledgement)) return null;
+    if (acknowledgement.status === "completed" && isRecord(acknowledgement.result) && acknowledgement.result.kind === "destinations_list" && !validDestinationsAcknowledgement(acknowledgement)) return null;
   }
   for (const job of value.jobs) {
     if (!isRecord(job) || !isUUID(job.id) || typeof job.status !== "string" || !JOB_STATUSES.has(job.status) || !isNonNegativeInteger(job.attempts)) return null;
@@ -67,7 +68,7 @@ async function deviceClaims(token: string, env: Env): Promise<DeviceClaims> {
 }
 
 export class DeviceConnection extends DurableObject<Env> {
-  private readonly pendingAttachments = new Map<WebSocket, { deviceID: string; connectionID: string; connectedAt: string; protocolVersion: 1; lastSequence: number; connectionKind: "realtime" | "smoke"; commandDeliveryV1: boolean; feedPageV1: boolean }>();
+  private readonly pendingAttachments = new Map<WebSocket, { deviceID: string; connectionID: string; connectedAt: string; protocolVersion: 1; lastSequence: number; connectionKind: "realtime" | "smoke"; commandDeliveryV1: boolean; feedPageV1: boolean; destinationsListV1: boolean; feedQueueV1: boolean }>();
 
   async fetch(request: Request) {
     if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") return new Response("WebSocket upgrade required.", { status: 426 });
@@ -81,7 +82,7 @@ export class DeviceConnection extends DurableObject<Env> {
     const [client, server] = Object.values(pair);
     this.ctx.acceptWebSocket(server);
     await this.ctx.storage.put("stage", "do_socket_accepted");
-    this.pendingAttachments.set(server, { deviceID, connectionID, connectedAt: new Date().toISOString(), protocolVersion: 1, lastSequence: 0, connectionKind: smoke ? "smoke" : "realtime", commandDeliveryV1: false, feedPageV1: false });
+    this.pendingAttachments.set(server, { deviceID, connectionID, connectedAt: new Date().toISOString(), protocolVersion: 1, lastSequence: 0, connectionKind: smoke ? "smoke" : "realtime", commandDeliveryV1: false, feedPageV1: false, destinationsListV1: false, feedQueueV1: false });
     if (smoke) return new Response(null, { status: 101, headers: { "Sec-WebSocket-Protocol": "lustre-v1" }, webSocket: client });
     return new Response(null, { status: 101, headers: { "Sec-WebSocket-Protocol": "lustre-v1" }, webSocket: client });
   }
@@ -176,6 +177,8 @@ export class DeviceConnection extends DurableObject<Env> {
       }
       const commandDeliveryV1 = connection.commandDeliveryV1 === true;
       const feedPageV1 = connection.feedPageV1 === true;
+      const destinationsListV1 = connection.destinationsListV1 === true;
+      const feedQueueV1 = connection.feedQueueV1 === true;
       const previousSequence = lastSequence === undefined ? 0 : lastSequence as number;
       const attachmentRecord = { stage: "heartbeat_attachment_restored", connectionID: connection.connectionID, protocolVersion: connection.protocolVersion, sequence };
       await this.ctx.storage.put("lastBinarySmoke", attachmentRecord);
@@ -197,6 +200,8 @@ export class DeviceConnection extends DurableObject<Env> {
         ...(connectionKind === undefined ? {} : { connectionKind }),
         commandDeliveryV1,
         feedPageV1,
+        destinationsListV1,
+        feedQueueV1,
       });
       const acceptedRecord = { stage: "heartbeat_sequence_accepted", ...sequenceRecord };
       await this.ctx.storage.put("lastBinarySmoke", acceptedRecord);
@@ -210,6 +215,8 @@ export class DeviceConnection extends DurableObject<Env> {
           envelope,
           commandDeliveryV1,
           feedPageV1,
+          destinationsListV1,
+          feedQueueV1,
         );
         if (commandDeliveryV1) webSocket.send(JSON.stringify(delivery));
       }
@@ -223,8 +230,10 @@ export class DeviceConnection extends DurableObject<Env> {
       const attachment = this.pendingAttachments.get(webSocket);
       const commandDeliveryV1 = negotiatedCommandDelivery(frame as Record<string, unknown>, attachment?.connectionKind === "realtime");
       const feedPageV1 = negotiatedFeedPage(frame as Record<string, unknown>, attachment?.connectionKind === "realtime");
-      webSocket.send(JSON.stringify({ version: 1, type: "gateway_hello_ack", capabilities: [...(commandDeliveryV1 ? [commandDeliveryCapability] : []), ...(feedPageV1 ? [feedPageCapability] : [])] }));
-      if (attachment) { webSocket.serializeAttachment({ ...attachment, commandDeliveryV1, feedPageV1 }); this.pendingAttachments.delete(webSocket); }
+      const destinationsListV1 = negotiatedDestinationsList(frame as Record<string, unknown>, attachment?.connectionKind === "realtime");
+      const feedQueueV1 = negotiatedFeedQueue(frame as Record<string, unknown>, attachment?.connectionKind === "realtime");
+      webSocket.send(JSON.stringify({ version: 1, type: "gateway_hello_ack", capabilities: [...(commandDeliveryV1 ? [commandDeliveryCapability] : []), ...(feedPageV1 ? [feedPageCapability] : []), ...(destinationsListV1 ? [destinationsListCapability] : []), ...(feedQueueV1 ? [feedQueueCapability] : [])] }));
+      if (attachment) { webSocket.serializeAttachment({ ...attachment, commandDeliveryV1, feedPageV1, destinationsListV1, feedQueueV1 }); this.pendingAttachments.delete(webSocket); }
       await this.ctx.storage.put("stage", "do_hello_acked");
       return;
     }
@@ -240,7 +249,7 @@ export class DeviceConnection extends DurableObject<Env> {
     webSocket.send(JSON.stringify({ version: 1, type: "heartbeat-accepted", sequence: frame.sequence, command: null, acknowledgedCommandAcks: [] }));
   }
 
-  private async relayHeartbeat(deviceID: string, connectionID: string, connectedAt: string, frame: Record<string, unknown>, commandDeliveryV1: boolean, feedPageV1: boolean) {
+  private async relayHeartbeat(deviceID: string, connectionID: string, connectedAt: string, frame: Record<string, unknown>, commandDeliveryV1: boolean, feedPageV1: boolean, destinationsListV1: boolean, feedQueueV1: boolean) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 5_000);
     let acknowledgedCommandAckIDs: string[] = [];
@@ -264,12 +273,12 @@ export class DeviceConnection extends DurableObject<Env> {
       const commandResponse = await fetch(new URL("/api/cloud/v1/gateway/commands/next", this.env.CONTROL_PLANE_ORIGIN), {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-Lustre-Gateway-Relay-Secret": this.env.LUSTRE_GATEWAY_RELAY_SECRET },
-        body: JSON.stringify({ deviceID, connectionID, sequence: frame.sequence, correlationID: frame.correlationID, allowFeedPage: feedPageV1 }),
+        body: JSON.stringify({ deviceID, connectionID, sequence: frame.sequence, correlationID: frame.correlationID, allowFeedPage: feedPageV1, allowDestinationsList: destinationsListV1, allowFeedQueue: feedQueueV1 }),
         signal: controller.signal,
       });
       if (!commandResponse.ok) throw new Error(`http_${commandResponse.status}`);
       const selected: unknown = await commandResponse.json();
-      const command = selectedGatewayCommand(selected, frame.sequence as number, frame.correlationID as string, feedPageV1);
+      const command = selectedGatewayCommand(selected, frame.sequence as number, frame.correlationID as string, feedPageV1, destinationsListV1, feedQueueV1);
       if (command === undefined) throw new Error("invalid_response");
       return commandDeliveryFrame({
         sequence: frame.sequence as number,
@@ -319,4 +328,4 @@ export default {
   },
 } satisfies ExportedHandler<Env>;
 import { DurableObject } from "cloudflare:workers";
-import { commandDeliveryCapability, commandDeliveryFrame, feedPageCapability, negotiatedCommandDelivery, negotiatedFeedPage, selectedGatewayCommand, validFeedPageAcknowledgement, validPersistenceResponse } from "./protocol";
+import { commandDeliveryCapability, commandDeliveryFrame, destinationsListCapability, feedPageCapability, feedQueueCapability, negotiatedCommandDelivery, negotiatedDestinationsList, negotiatedFeedPage, negotiatedFeedQueue, selectedGatewayCommand, validDestinationsAcknowledgement, validFeedPageAcknowledgement, validPersistenceResponse } from "./protocol";

@@ -122,9 +122,11 @@ The production transport has four boundaries:
 3. The Durable Object validates strict UTF-8, JSON, the heartbeat envelope and schema, attachment state, payload bounds, and monotonically increasing sequence. It sends the local acknowledgement before asynchronously relaying the accepted heartbeat to Vercel.
 4. Authenticated Vercel routes persist presence, job projections, command acknowledgements, and durable Feed results in Neon, then return at most one allowlisted command for delivery on the next heartbeat.
 
-Relay failure is isolated from the live socket: local acknowledgements continue and persistence resumes without forcing an agent reconnect. Heartbeats are limited to 131,072 bytes; Feed result acknowledgements are limited to 65,536 bytes. Current command selection allows only `feed_sites` and explicitly gated `feed_page`; all queue, destination, and download-mutation delivery remains disabled.
+Relay failure is isolated from the live socket: local acknowledgements continue and persistence resumes without forcing an agent reconnect. Heartbeats are limited to 131,072 bytes; Feed result acknowledgements are limited to 65,536 bytes. Current command selection allows `feed_sites`, explicitly gated `feed_page`, and separately negotiated/gated `destinations_list` and `queue_url`. Feed queue commands require `feed-queue-v1`; download mutations remain disabled.
 
-Cloud Feed is compiled into the dashboard but hidden unless `LUSTRE_CLOUD_FEED_ENABLED` is exactly `true`. The acceptance route adds a second exact Clerk-subject and kill-switch gate and otherwise returns `404`. Metadata requests are canonicalized, coalesced, and sequence-protected. Pagination, search, and refresh can browse results, but destination, selection, and queue controls remain unavailable until their command path is separately accepted.
+Cloud Feed is compiled into the dashboard but hidden unless `LUSTRE_CLOUD_FEED_ENABLED` is exactly `true`. The acceptance route adds a second exact Clerk-subject and kill-switch gate and otherwise returns `404`. Metadata requests are canonicalized, coalesced, and sequence-protected. Destination listing requires its own exact feature flag and a recent safe agent snapshot. Individual-card queueing requires `LUSTRE_CLOUD_FEED_QUEUE_ENABLED=true`, a negotiated `feed-queue-v1` agent, a recent completed Feed result from the same account/device containing the exact item/site/source URL, and a recent destination result from that same account/device containing the selected destination. Batch selection is not part of the Cloud queue contract.
+
+The browser creates one UUID request ID per card action and retains it after failure. Vercel uses that UUID as both the command ID and requested durable job ID, rejects conflicting reuse, and sends only the canonical source URL, destination, and `feed-queue-v1` protocol. The agent validates the command, creates the job with the caller ID, and durably receipts the result. If acknowledgement persistence fails after job creation, replay first validates the existing job's immutable source and normalized destination and then returns that same job. This makes one accepted command converge on one durable job without relying on timing or transient media state.
 
 Protected Feed media is a second trust path. The Clerk-authenticated Vercel ticket route verifies device ownership and requires the exact asset URL and kind to appear in a recent completed `feed_page` result. It signs a short-lived device-bound ticket. `lustre-feed-assets` validates that ticket, exact production CORS origin, HTTPS provider allowlists, redirects, content type, timeout, and byte limits before streaming the response with `no-store` and `nosniff`. It does not forward browser cookies, authorization, or arbitrary headers, and the browser never contacts protected provider hosts directly.
 
@@ -153,9 +155,9 @@ Feed search is an agent-owned extension of the structured feed contract rather t
 ## Deliberate next seams
 
 1. Resolve the intermittent aggregate runner-fixture hang, then renew full-suite/release acceptance counts.
-2. Add Cloud-safe destination listing and accept it across hibernation, replay, stale-result, and secret-boundary tests.
-3. Add narrowly authorized queue delivery only after destination selection is green, including idempotency, duplicate-delivery, acknowledgement-size, and zero-unintended-transfer checks.
-4. Enable public Cloud Feed only after the destination and queue controls pass production end-to-end acceptance and the kill switch is proven.
+2. Keep destination listing and Feed queue delivery gated while manual product-flow testing continues; expand production exposure only through the exact flags.
+3. Add download mutation commands only after independent authorization, replay, and production acceptance.
+4. Enable public Cloud Feed only after the remaining product-flow checks are accepted and the kill switch is proven.
 5. Add server-backed pagination as job histories grow.
 6. Make the current single-transfer scheduler limit configurable and add per-destination limits.
 7. Add resumable `.part` transfers and bounded automatic re-resolution for expired media responses.
