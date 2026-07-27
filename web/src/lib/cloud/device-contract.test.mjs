@@ -21,9 +21,12 @@ test("heartbeat preserves an agent-reported job update timestamp", () => {
 test("heartbeat validates acknowledgements and complete job projections", () => {
   const frame = { version: 1, type: "heartbeat", sequence: 1, sentAt: "2026-07-25T10:00:00Z", agentVersion: "0.1.0", correlationID: "heartbeat-1", commandAcks: [{ id: "f8ca8705-69c4-4c73-81fb-7bb1dc5c1853", status: "completed", result: {} }], jobs: [{ id: "88e5c12c-43a1-4b17-ae2a-4231c3644ff8", sourcePageURL: "https://example.com/video", displayName: "Video", preferredQualityLabel: "1080p", status: "running", progress: 0.5, downloadedBytes: 10, totalBytes: 20, phase: "downloading", attempts: 0, updatedAt: "2026-07-25T10:00:00Z" }] };
   assert.equal(parseHeartbeatFrame({ ...frame, futureField: true }).jobs[0].phase, "downloading");
+  assert.equal(parseHeartbeatFrame({ ...frame, commandAcks: [{ id: frame.commandAcks[0].id, status: "failed", code: "provider_verification_required" }] }).commandAcks[0].code, "provider_verification_required");
   for (const invalid of [
     { ...frame, correlationID: "" },
     { ...frame, commandAcks: [{ ...frame.commandAcks[0], id: "not-a-uuid" }] },
+    { ...frame, commandAcks: [{ id: frame.commandAcks[0].id, status: "failed", code: "raw provider message" }] },
+    { ...frame, commandAcks: [{ id: frame.commandAcks[0].id, status: "failed", code: "provider_changed", result: { raw: "forbidden" } }] },
     { ...frame, jobs: [{ ...frame.jobs[0], status: "unknown" }] },
     { ...frame, jobs: [{ ...frame.jobs[0], progress: 2 }] },
     { ...frame, jobs: [{ ...frame.jobs[0], downloadedBytes: -1 }] },

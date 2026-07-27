@@ -32,6 +32,12 @@ export function normalizeCloudFeedQuery(value: string | undefined): string {
   return value?.trim().replace(/\s+/g, " ") ?? "";
 }
 
+export function cloudFeedCacheFreshness(acknowledgedAt: Date, currentTime = Date.now()): "fresh" | "stale" | null {
+  const age = currentTime - acknowledgedAt.getTime();
+  if (age < 0 || age > 60 * 60_000) return null;
+  return age <= 5 * 60_000 ? "fresh" : "stale";
+}
+
 export function cloudFeedRequestKey(input: {
   deviceID: string;
   kind: CloudFeedCommandKind;

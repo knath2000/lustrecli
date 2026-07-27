@@ -4,10 +4,34 @@ import Foundation
 import WebKit
 import LustreAgent
 
-@main
 struct LustreAuthHelperMain {
+    @MainActor
     static func main() {
         let command = CommandLine.arguments.dropFirst().first
+        if command == "allpornstream-verify" || command == "allpornstream-render" {
+            let mode: AllPornStreamHelperWindow.Mode
+            if command == "allpornstream-verify" {
+                mode = .verify
+            } else {
+                guard let encoded = CommandLine.arguments.dropFirst(2).first,
+                      let data = Data(base64Encoded: encoded.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/").paddingBase64),
+                      let rawURL = String(data: data, encoding: .utf8),
+                      let url = URL(string: rawURL),
+                      AllPornStreamPolicy.isTrusted(url)
+                else { exit(2) }
+                mode = .render(url)
+            }
+            let app = NSApplication.shared
+            if command == "allpornstream-verify" { app.setActivationPolicy(.regular) }
+            else { app.setActivationPolicy(.prohibited) }
+            let controller = AllPornStreamHelperWindow(mode: mode)
+            if command == "allpornstream-verify" {
+                controller.showWindow(nil)
+                app.activate(ignoringOtherApps: true)
+            }
+            withExtendedLifetime(controller) { app.run() }
+            return
+        }
         guard command == "login" || command == "logout" else { exit(2) }
         let app = NSApplication.shared
         if command == "logout" {
@@ -27,6 +51,16 @@ struct LustreAuthHelperMain {
             withExtendedLifetime(controller) { app.run() }
         }
     }
+}
+
+private extension String {
+    var paddingBase64: String {
+        padding(toLength: count + (4 - count % 4) % 4, withPad: "=", startingAt: 0)
+    }
+}
+
+MainActor.assumeIsolated {
+    LustreAuthHelperMain.main()
 }
 
 @MainActor private final class HelperWindow: NSWindowController, WKNavigationDelegate, WKUIDelegate, WKHTTPCookieStoreObserver, NSWindowDelegate {

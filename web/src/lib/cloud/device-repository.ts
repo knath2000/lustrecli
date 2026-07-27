@@ -5,6 +5,7 @@ import { db } from "@/lib/db/client";
 import { lustreDeviceAuditEvents, lustreDeviceCommands, lustreDeviceEnrollments, lustreDeviceJobStatus, lustreDevicePresence, lustreDevices, lustreDeviceSessionChallenges, lustrePairingChallenges } from "@/lib/db/schema";
 import { DeviceContractError, type HeartbeatFrame } from "./device-contract";
 import { randomNonce } from "./device-crypto";
+import { cloudFeedCacheFreshness } from "../cloud-feed-ui";
 
 const now = () => new Date();
 export type EnrollmentInput = { pairingCodeHash: string; publicKey: string; keyThumbprint: string; displayName: string; platform: string; agentVersion: string };
@@ -147,14 +148,24 @@ export async function persistGatewayHeartbeat(input: { deviceID: string; connect
     ), acknowledgement_input AS (
       SELECT *
       FROM jsonb_to_recordset(${acknowledgements}::jsonb)
-        AS acknowledgement(id uuid, status text, "jobID" uuid, result jsonb)
+        AS acknowledgement(id uuid, status text, "jobID" uuid, result jsonb, code text)
     ), persisted_acknowledgements AS (
       UPDATE lustre_device_commands AS command SET
         status = acknowledgement.status,
-        result = COALESCE(
-          acknowledgement.result,
-          CASE WHEN acknowledgement."jobID" IS NULL THEN '{}'::jsonb ELSE jsonb_build_object('jobID', acknowledgement."jobID") END
-        ),
+        result = CASE
+          WHEN acknowledgement.status = 'failed' THEN jsonb_build_object(
+            'code',
+            CASE WHEN acknowledgement.code IN (
+              'provider_verification_required', 'provider_http_error',
+              'provider_unreachable', 'provider_changed',
+              'authentication_required', 'result_too_large', 'invalid_request'
+            ) THEN acknowledgement.code ELSE 'unknown' END
+          )
+          ELSE COALESCE(
+            acknowledgement.result,
+            CASE WHEN acknowledgement."jobID" IS NULL THEN '{}'::jsonb ELSE jsonb_build_object('jobID', acknowledgement."jobID") END
+          )
+        END,
         acknowledged_at = now()
       FROM acknowledgement_input AS acknowledgement, accepted_presence
       WHERE command.id = acknowledgement.id
@@ -303,11 +314,51 @@ async function createCommand(accountID: string, deviceID: string, kind: string, 
   return (await db.insert(lustreDeviceCommands).values({ accountID, deviceID, kind, payload }).returning())[0];
 }
 export async function feedCommand(accountID: string, deviceID: string, kind: "feed_sites" | "feed_page" | "webdav_add" | "destinations_list", payload: Record<string, string | undefined>) {
-  if (kind === "destinations_list") {
-    const pending = (await db.select().from(lustreDeviceCommands).where(and(eq(lustreDeviceCommands.accountID, accountID), eq(lustreDeviceCommands.deviceID, deviceID), eq(lustreDeviceCommands.kind, kind), eq(lustreDeviceCommands.status, "pending"), sql`${lustreDeviceCommands.payload} ->> 'deliveryProtocol' = 'gateway-v1'`)).orderBy(lustreDeviceCommands.createdAt).limit(1))[0];
+  if (kind === "feed_sites" || kind === "feed_page" || kind === "destinations_list") {
+    const pending = (await db.select().from(lustreDeviceCommands).where(and(
+      eq(lustreDeviceCommands.accountID, accountID),
+      eq(lustreDeviceCommands.deviceID, deviceID),
+      eq(lustreDeviceCommands.kind, kind),
+      sql`${lustreDeviceCommands.status} in ('pending', 'running')`,
+      sql`${lustreDeviceCommands.payload} ->> 'deliveryProtocol' = 'gateway-v1'`,
+      kind === "feed_page"
+        ? sql`${lustreDeviceCommands.payload} ->> 'siteID' = ${payload.siteID}
+            AND ${lustreDeviceCommands.payload} ->> 'page' = ${payload.page}
+            AND COALESCE(${lustreDeviceCommands.payload} ->> 'query', '') = ${payload.query ?? ""}`
+        : sql`true`,
+    )).orderBy(lustreDeviceCommands.createdAt).limit(1))[0];
     if (pending) return pending;
   }
   return createCommand(accountID, deviceID, kind, kind === "feed_sites" || kind === "feed_page" || kind === "destinations_list" ? { ...payload, deliveryProtocol: "gateway-v1" } : payload);
+}
+
+export async function cachedFeedResult(accountID: string, deviceID: string, kind: "feed_sites" | "feed_page", payload: Record<string, string | undefined>) {
+  const rows = await db.select({
+    result: lustreDeviceCommands.result,
+    acknowledgedAt: lustreDeviceCommands.acknowledgedAt,
+  }).from(lustreDeviceCommands).where(and(
+    eq(lustreDeviceCommands.accountID, accountID),
+    eq(lustreDeviceCommands.deviceID, deviceID),
+    eq(lustreDeviceCommands.kind, kind),
+    eq(lustreDeviceCommands.status, "completed"),
+    isNotNull(lustreDeviceCommands.result),
+    isNotNull(lustreDeviceCommands.acknowledgedAt),
+    gte(lustreDeviceCommands.acknowledgedAt, new Date(Date.now() - 60 * 60_000)),
+    kind === "feed_page"
+      ? sql`${lustreDeviceCommands.payload} ->> 'siteID' = ${payload.siteID}
+          AND ${lustreDeviceCommands.payload} ->> 'page' = ${payload.page}
+          AND COALESCE(${lustreDeviceCommands.payload} ->> 'query', '') = ${payload.query ?? ""}`
+      : sql`true`,
+  )).orderBy(desc(lustreDeviceCommands.acknowledgedAt)).limit(1);
+  const cached = rows[0];
+  if (!cached?.acknowledgedAt || !cached.result) return null;
+  const freshness = cloudFeedCacheFreshness(cached.acknowledgedAt);
+  if (!freshness) return null;
+  return {
+    result: cached.result,
+    acknowledgedAt: cached.acknowledgedAt,
+    freshness,
+  };
 }
 export async function nextGatewayCommand(input: { deviceID: string; connectionID: string; sequence: number; allowFeedPage: boolean; allowDestinationsList: boolean; allowFeedQueue: boolean }) {
   const result = await db.execute(sql`

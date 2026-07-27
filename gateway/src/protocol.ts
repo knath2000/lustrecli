@@ -2,6 +2,7 @@ export const commandDeliveryCapability = "command-delivery-v1";
 export const feedPageCapability = "feed-page-v1";
 export const destinationsListCapability = "destinations-list-v1";
 export const feedQueueCapability = "feed-queue-v1";
+export const commandWakeCapability = "command-wake-v1";
 export const feedSiteIDs = new Set(["allpornstream", "hqporner", "onlyfan420", "pornhub", "pornhub-subscriptions", "pornhub-liked", "pornhub-favorites"]);
 export const maximumFeedPageAcknowledgementBytes = 65_536;
 export const maximumDestinationsAcknowledgementBytes = 32_768;
@@ -63,6 +64,10 @@ export function negotiatedDestinationsList(frame: Record<string, unknown>, realt
 
 export function negotiatedFeedQueue(frame: Record<string, unknown>, realtime: boolean) {
   return negotiatedCommandDelivery(frame, realtime) && (frame.capabilities as unknown[]).includes(feedQueueCapability);
+}
+
+export function negotiatedCommandWake(frame: Record<string, unknown>, realtime: boolean) {
+  return negotiatedCommandDelivery(frame, realtime) && (frame.capabilities as unknown[]).includes(commandWakeCapability);
 }
 
 export type GatewayCommand =

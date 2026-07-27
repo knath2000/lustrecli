@@ -167,17 +167,20 @@ public struct FeedService: Sendable {
     public typealias Fetch = StaticProviderResolver.Fetch
     public typealias CookieHeader = @Sendable (URL) async throws -> String?
     public typealias HomepageSession = @Sendable (URL) async throws -> PornHubHomepageSession
+    public typealias AllPornStreamHTML = @Sendable (URL) async throws -> String
 
     private let fetch: Fetch
     private let now: @Sendable () -> Date
     private let pornHubCookieHeader: CookieHeader?
     private let pornHubHomepageSession: HomepageSession?
+    private let allPornStreamHTML: AllPornStreamHTML?
 
-    public init(fetch: @escaping Fetch = StaticProviderResolver().pageFetch, now: @escaping @Sendable () -> Date = { .now }, pornHubCookieHeader: CookieHeader? = nil, pornHubHomepageSession: HomepageSession? = nil) {
+    public init(fetch: @escaping Fetch = StaticProviderResolver().pageFetch, now: @escaping @Sendable () -> Date = { .now }, pornHubCookieHeader: CookieHeader? = nil, pornHubHomepageSession: HomepageSession? = nil, allPornStreamHTML: AllPornStreamHTML? = nil) {
         self.fetch = fetch
         self.now = now
         self.pornHubCookieHeader = pornHubCookieHeader
         self.pornHubHomepageSession = pornHubHomepageSession
+        self.allPornStreamHTML = allPornStreamHTML
     }
 
     public func sites() -> [FeedSite] {
@@ -237,7 +240,6 @@ public struct FeedService: Sendable {
             return HQPornerFeedParser.parse(html: response.body, page: page, now: now())
         }
         if site == .onlyFan420 {
-            guard page == 1 else { return FeedPage(items: [], page: page, hasMore: false) }
             let baseURL = FeedSite.onlyFan420.homeURL
             let response = try await fetch(baseURL, [
                 "User-Agent": NetworkConstants.chromeUserAgent,
@@ -247,7 +249,7 @@ public struct FeedService: Sendable {
             ])
             guard URLSafetyPolicy.isAllowed(response.finalURL) else { throw ProviderResolverError.invalidURL }
             guard (200...299).contains(response.statusCode) else { throw FeedError.network(response.statusCode) }
-            return OnlyFan420FeedParser.parse(html: response.body)
+            return OnlyFan420FeedParser.parse(html: response.body, page: page)
         }
         guard site == .allPornStream else { throw FeedError.unsupportedSite }
         let baseURL = FeedSite.allPornStream.homeURL
@@ -257,6 +259,9 @@ public struct FeedService: Sendable {
         if page > 1 { items.append(URLQueryItem(name: "page", value: String(page))) }
         components?.queryItems = items.isEmpty ? nil : items
         guard let url = components?.url else { throw FeedError.invalidPage }
+        if let allPornStreamHTML {
+            return try AllPornStreamFeedParser.parse(html: try await allPornStreamHTML(url), page: page, baseURL: baseURL)
+        }
         let response = try await fetch(url, [
             "User-Agent": NetworkConstants.chromeUserAgent,
             "Referer": baseURL.absoluteString,
@@ -296,11 +301,13 @@ public struct FeedService: Sendable {
 
 public enum OnlyFan420FeedParser {
     private static let hosts = ["luluvid.com", "luluvdo.com", "lulustream.com", "vidara.so", "playmogo.com", "doodstream.com", "dood.wf"]
+    public static let pageSize = 50
 
-    public static func parse(html: String) -> FeedPage {
+    public static func parse(html: String, page: Int = 1) -> FeedPage {
+        guard page > 0 else { return FeedPage(items: [], page: page, hasMore: false) }
         let datePattern = #"<span[^>]*color\s*:\s*yellow[^>]*>(\d{1,2}\s+[A-Za-z]+\s+\d{4})\s*--"#
         guard let dateRegex = try? NSRegularExpression(pattern: datePattern, options: [.caseInsensitive]) else {
-            return FeedPage(items: [], page: 1, hasMore: false)
+            return FeedPage(items: [], page: page, hasMore: false)
         }
         let dateMatches = dateRegex.matches(in: html, range: NSRange(html.startIndex..., in: html))
         var items: [FeedItem] = []
@@ -315,7 +322,10 @@ public enum OnlyFan420FeedParser {
             let section = String(html[matchRange.upperBound..<end])
             items.append(contentsOf: parseLinks(section, date: date, seen: &seen))
         }
-        return FeedPage(items: items, page: 1, hasMore: false)
+        let start = (page - 1) * pageSize
+        guard start < items.count else { return FeedPage(items: [], page: page, hasMore: false) }
+        let end = min(start + pageSize, items.count)
+        return FeedPage(items: Array(items[start..<end]), page: page, hasMore: end < items.count)
     }
 
     private static func parseLinks(_ section: String, date: Date, seen: inout Set<String>) -> [FeedItem] {

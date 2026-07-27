@@ -118,11 +118,11 @@ export default function Home() {
   const manualRefresh = async () => { try { await refresh(token, true); notify("Live agent state refreshed."); } catch (reason) { setError(reason instanceof Error ? reason.message : "Unable to refresh the local agent."); } };
   const signInWithPornHub = async () => { const sequence = authStatusSequence.current.beginAction(); try { const status = await agentRequest<PornHubAuthStatus>(token, "/v1/auth/pornhub/login", { method: "POST" }); if (authStatusSequence.current.acceptsAction(sequence)) { setPornHubAuth(status); notify("PornHub sign-in window opened."); } } catch (reason) { if (authStatusSequence.current.acceptsAction(sequence)) setError(reason instanceof Error ? reason.message : "PornHub sign-in failed."); } };
   const signOutOfPornHub = async () => { const sequence = authStatusSequence.current.beginAction(); try { const signingIn = pornHubAuth?.state === "signingIn"; const status = await agentRequest<PornHubAuthStatus>(token, signingIn ? "/v1/auth/pornhub/login" : "/v1/auth/pornhub", { method: "DELETE" }); if (authStatusSequence.current.acceptsAction(sequence)) { setPornHubAuth(status); notify(pornHubAuthMutationMessage(signingIn, status.state)); } } catch (reason) { if (authStatusSequence.current.acceptsAction(sequence)) setError(reason instanceof Error ? reason.message : "PornHub sign-out failed."); } };
-  const loadFeedSites = useCallback(() => agentRequest<FeedSite[]>(token, "/v1/feed/sites"), [token]);
-  const loadFeedPage = useCallback((site: FeedSite["id"], query: FeedQuery) => {
+  const loadFeedSites = useCallback(async () => ({ cache: null, live: agentRequest<FeedSite[]>(token, "/v1/feed/sites") }), [token]);
+  const loadFeedPage = useCallback(async (site: FeedSite["id"], query: FeedQuery) => {
     const search = new URLSearchParams({ site, page: String(query.page) });
     if (query.text) search.set("q", query.text);
-    return agentRequest<FeedPage>(token, `/v1/feed/items?${search}`);
+    return { cache: null, live: agentRequest<FeedPage>(token, `/v1/feed/items?${search}`) };
   }, [token]);
   const queueFeedItem = useCallback(async (item: FeedItem, destination: string) => {
     await agentRequest<DownloadJob>(token, "/v1/jobs", { method: "POST", body: JSON.stringify({ sourcePageURL: item.sourcePageURL, preferredQualityLabel: null, destination }) });

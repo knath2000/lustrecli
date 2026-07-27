@@ -63,6 +63,7 @@ const JOB_STATUSES = new Set(["queued", "running", "paused", "completed", "faile
 const JOB_PHASES = new Set(["resolving", "downloading", "materializing", "postProcessing", "uploading", "verifying"]);
 const MAX_JOB_STRING_CHARACTERS = 512;
 const MAX_SOURCE_URL_CHARACTERS = 4_096;
+const ACKNOWLEDGEMENT_CODES = new Set(["provider_verification_required", "provider_http_error", "provider_unreachable", "provider_changed", "authentication_required", "result_too_large", "invalid_request"]);
 
 function record(value: unknown): value is Record<string, unknown> { return !!value && typeof value === "object" && !Array.isArray(value); }
 function uuid(value: unknown): value is string { return typeof value === "string" && UUID_PATTERN.test(value); }
@@ -112,7 +113,7 @@ export function validDestinationsResult(value: unknown): value is Record<string,
   });
 }
 
-export type RemoteCommandAck = { id: string; status: "completed" | "failed"; jobID?: string; result?: Record<string, unknown> };
+export type RemoteCommandAck = { id: string; status: "completed" | "failed"; jobID?: string; result?: Record<string, unknown>; code?: string };
 export type RemoteJobStatus = { id: string; sourcePageURL?: string; displayName?: string; preferredQualityLabel?: string; status: "queued" | "running" | "paused" | "completed" | "failed" | "cancelled" | "verificationRequired"; progress?: number; downloadedBytes?: number; totalBytes?: number; phase?: "resolving" | "downloading" | "materializing" | "postProcessing" | "uploading" | "verifying"; attempts: number; updatedAt?: string };
 export type HeartbeatFrame = { version: 1; type: "heartbeat"; sequence: number; sentAt: string; agentVersion: string; correlationID: string; commandAcks: RemoteCommandAck[]; jobs: RemoteJobStatus[] };
 export function parseHeartbeatFrame(value: unknown): HeartbeatFrame {
@@ -122,7 +123,8 @@ export function parseHeartbeatFrame(value: unknown): HeartbeatFrame {
   const commandAcks = frame.commandAcks; const jobs = frame.jobs;
   if (!Array.isArray(commandAcks) || commandAcks.length > 8 || !Array.isArray(jobs) || jobs.length > 50) throw new DeviceContractError("invalid_request", "Invalid heartbeat.");
   for (const ack of commandAcks) {
-    if (!record(ack) || !uuid(ack.id) || !["completed", "failed"].includes(ack.status as string) || (ack.jobID !== undefined && !uuid(ack.jobID)) || (ack.result !== undefined && !record(ack.result))) throw new DeviceContractError("invalid_request", "Invalid heartbeat.");
+    if (!record(ack) || !uuid(ack.id) || !["completed", "failed"].includes(ack.status as string) || (ack.jobID !== undefined && !uuid(ack.jobID)) || (ack.result !== undefined && !record(ack.result)) || (ack.code !== undefined && (typeof ack.code !== "string" || !ACKNOWLEDGEMENT_CODES.has(ack.code)))) throw new DeviceContractError("invalid_request", "Invalid heartbeat.");
+    if (ack.status === "failed" && ack.result !== undefined) throw new DeviceContractError("invalid_request", "Invalid heartbeat.");
     if (ack.status === "completed" && record(ack.result) && ack.result.kind === "feed_page" && (!validFeedPageResult(ack.result) || new TextEncoder().encode(JSON.stringify(ack)).byteLength > MAX_FEED_PAGE_ACK_BYTES)) throw new DeviceContractError("invalid_request", "Invalid heartbeat.");
     if (ack.status === "completed" && record(ack.result) && ack.result.kind === "destinations_list" && (!validDestinationsResult(ack.result) || new TextEncoder().encode(JSON.stringify(ack)).byteLength > MAX_DESTINATIONS_ACK_BYTES)) throw new DeviceContractError("invalid_request", "Invalid heartbeat.");
   }

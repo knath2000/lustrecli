@@ -43,6 +43,13 @@
       "when": 1785029400000,
       "tag": "0005_lustre_cloud_job_source_url",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1785118398000,
+      "tag": "0006_lustre_feed_command_cache",
+      "breakpoints": true
     }
   ]
 }

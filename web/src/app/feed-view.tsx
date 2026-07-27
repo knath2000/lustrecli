@@ -31,14 +31,19 @@ export type FeedJob = {
 type FeedViewProps = {
   destinations: DestinationProfile[];
   jobs: FeedJob[];
-  loadSites: () => Promise<FeedSite[]>;
-  loadPage: (site: FeedSite["id"], query: FeedQuery) => Promise<FeedPage>;
+  loadSites: () => Promise<FeedRefresh<FeedSite[]>>;
+  loadPage: (site: FeedSite["id"], query: FeedQuery) => Promise<FeedRefresh<FeedPage>>;
   queueItem: (item: FeedItem, destination: string, requestID: string) => Promise<void>;
   loadAsset: (url: string, kind: "image" | "video") => Promise<Blob>;
   onQueued: () => Promise<void>;
   mediaEnabled: boolean;
   destinationsEnabled?: boolean;
   queueEnabled: boolean;
+};
+
+export type FeedRefresh<T> = {
+  cache: { result: T; acknowledgedAt: string; freshness: "fresh" | "stale" } | null;
+  live: Promise<T>;
 };
 
 function compactNumber(value: number) {
@@ -287,6 +292,7 @@ export function FeedView({
   const [searchInput, setSearchInput] = useState("");
   const [activeQuery, setActiveQuery] = useState("");
   const [retryNonce, setRetryNonce] = useState(0);
+  const [liveReady, setLiveReady] = useState(false);
   const requestSequence = useRef(0);
   const selectedSite = sites.find((site) => site.id === siteID);
 
@@ -294,12 +300,21 @@ export function FeedView({
     async (nextPage: number, replace = false, query = activeQuery) => {
       const sequence = ++requestSequence.current;
       setLoading(true);
+      setLiveReady(false);
       setError(null);
       try {
-        const result = await loadPage(siteID, {
+        const refresh = await loadPage(siteID, {
           text: query || undefined,
           page: nextPage,
         });
+        if (refresh.cache && sequence === requestSequence.current) {
+          const cached = refresh.cache.result;
+          setItems((current) => replace ? cached.items : [...current, ...cached.items.filter((item) => !current.some((existing) => existing.id === item.id))]);
+          setPage(cached.page);
+          setHasMore(cached.hasMore);
+          setLoading(false);
+        }
+        const result = await refresh.live;
         if (sequence !== requestSequence.current) return;
         setItems((current) =>
           replace
@@ -314,6 +329,7 @@ export function FeedView({
         );
         setPage(result.page);
         setHasMore(result.hasMore);
+        setLiveReady(true);
         if (replace) setSelection(new Set());
       } catch (reason) {
         if (sequence === requestSequence.current)
@@ -332,25 +348,38 @@ export function FeedView({
   useEffect(() => {
     let active = true;
     const sequence = ++requestSequence.current;
-    void loadSites()
-      .then(async (nextSites) => {
+    const sitesRequest = loadSites();
+    const pageRequest = loadPage("hqporner", { page: 1 });
+    void Promise.all([sitesRequest, pageRequest])
+      .then(async ([sitesRefresh, pageRefresh]) => {
+        if (!active || sequence !== requestSequence.current) return;
+        const cachedSites = sitesRefresh.cache?.result;
+        const cachedPage = pageRefresh.cache?.result;
+        if (cachedSites?.length && cachedPage) {
+          setSites(cachedSites);
+          setSiteID("hqporner");
+          setItems(cachedPage.items);
+          setPage(cachedPage.page);
+          setHasMore(cachedPage.hasMore);
+          setLoading(false);
+        }
+        const [nextSites, livePage] = await Promise.all([sitesRefresh.live, pageRefresh.live]);
         if (!active || sequence !== requestSequence.current) return;
         const initialSite = initialFeedSite(nextSites);
         if (!initialSite)
           throw new Error("The agent did not report any feed sources.");
         setSites(nextSites);
         setSiteID(initialSite.id);
-        const result = await loadPage(initialSite.id, { page: 1 });
-        if (!active || sequence !== requestSequence.current) return;
-        setItems(result.items);
-        setPage(result.page);
-        setHasMore(result.hasMore);
+        setItems(livePage.items);
+        setPage(livePage.page);
+        setHasMore(livePage.hasMore);
+        setLiveReady(true);
         setLoading(false);
       })
       .catch((reason) => {
         if (!active || sequence !== requestSequence.current) return;
         setError(
-          reason instanceof Error ? reason.message : "Unable to load the feed.",
+          reason instanceof Error ? reason.message : "Unable to refresh the HQPorner feed.",
         );
         setLoading(false);
       });
@@ -365,9 +394,17 @@ export function FeedView({
     setSearchInput("");
     setActiveQuery("");
     setLoading(true);
+    setLiveReady(false);
     setError(null);
     try {
-      const result = await loadPage(nextSite, { page: 1 });
+      const refresh = await loadPage(nextSite, { page: 1 });
+      if (refresh.cache && sequence === requestSequence.current) {
+        setItems(refresh.cache.result.items);
+        setPage(refresh.cache.result.page);
+        setHasMore(refresh.cache.result.hasMore);
+        setLoading(false);
+      }
+      const result = await refresh.live;
       if (sequence !== requestSequence.current) return;
       setItems(result.items);
       setPage(result.page);
@@ -375,6 +412,7 @@ export function FeedView({
       setSelection(new Set());
       setSearchInput("");
       setActiveQuery("");
+      setLiveReady(true);
     } catch (reason) {
       if (sequence === requestSequence.current)
         setError(
@@ -407,7 +445,7 @@ export function FeedView({
   };
 
   const queueItems = async (targets: FeedItem[]) => {
-    if (!queueEnabled || targets.length !== 1) return;
+    if (!queueEnabled || !liveReady || targets.length !== 1) return;
     const item = targets[0];
     const requestID = requestIDs.current.get(item.id) ?? crypto.randomUUID();
     requestIDs.current.set(item.id, requestID);
@@ -454,7 +492,7 @@ export function FeedView({
       </header>
 
       <p className="feed-gate-notice" role="note">
-        {destinationsEnabled && queueEnabled
+        {destinationsEnabled && queueEnabled && liveReady
           ? `${mediaEnabled ? "Protected media preview" : "Browsing preview"}, destination selection, and individual queueing are enabled.`
           : destinationsEnabled
             ? `${mediaEnabled ? "Protected media preview" : "Browsing preview"} and destination selection are enabled; queueing remains gated.`
@@ -625,13 +663,14 @@ export function FeedView({
                 <button
                   disabled={
                     !queueEnabled ||
+                    !liveReady ||
                     pendingItems.has(item.id) ||
                     state === "queued" ||
                     state === "running"
                   }
                   onClick={() => void queueItems([item])}
                 >
-                  {!queueEnabled
+                  {!queueEnabled || !liveReady
                     ? "Queue gated"
                     : pendingItems.has(item.id)
                     ? "Queueing…"

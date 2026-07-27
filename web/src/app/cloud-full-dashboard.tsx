@@ -35,7 +35,7 @@ import type { PollingInterval } from "@/lib/settings-model";
 import { ActivityView } from "./activity-view";
 import { DestinationsView, type DestinationProfile } from "./destinations-view";
 import { DownloadsView } from "./downloads-view";
-import { FeedView } from "./feed-view";
+import { FeedView, type FeedRefresh } from "./feed-view";
 import { SettingsView } from "./settings-view";
 import { DevicesView } from "./devices/devices-view";
 
@@ -216,11 +216,51 @@ async function waitForCloudCommand(base: string, id: string) {
     if (payload.command.status === "completed")
       return payload.command.result ?? {};
     if (payload.command.status === "failed")
-      throw new Error("The paired Mac could not complete this request.");
+      throw new Error(feedCommandFailureMessage(payload.command.result?.code));
   }
   throw new Error(
     "The paired Mac did not respond within 46 seconds. Check that Lustre Agent is online, then try again.",
   );
+}
+
+function feedCommandFailureMessage(code: unknown) {
+  switch (code) {
+    case "provider_verification_required": return "This source needs local verification on the paired Mac. Run `lustre feed verify --site allpornstream`, then refresh.";
+    case "provider_http_error": return "The source returned an HTTP error. Cached cards remain available where possible.";
+    case "provider_unreachable": return "The paired Mac could not reach this source. Check its network route, then refresh.";
+    case "provider_changed": return "The source page changed and could not be parsed. Cached cards remain available where possible.";
+    case "authentication_required": return "Sign in to this source on the paired Mac, then refresh.";
+    case "result_too_large": return "This source returned too many items for one safe Cloud page.";
+    case "invalid_request": return "The Feed request was rejected as invalid.";
+    default: return "The paired Mac could not complete this request.";
+  }
+}
+
+async function beginFeedCommand<T>(
+  deviceID: string,
+  body: Record<string, unknown>,
+  select: (result: Record<string, unknown>) => T,
+): Promise<FeedRefresh<T>> {
+  const base = `/api/cloud/v1/devices/${deviceID}`;
+  const response = await fetch(`${base}/commands`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    cache: "no-store",
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload.error?.message ?? "The paired Mac request failed.");
+  const cachedResult = payload.cache?.result && typeof payload.cache.result === "object"
+    ? select(payload.cache.result)
+    : null;
+  return {
+    cache: cachedResult ? {
+      result: cachedResult,
+      acknowledgedAt: payload.cache.acknowledgedAt,
+      freshness: payload.cache.freshness,
+    } : null,
+    live: waitForCloudCommand(base, payload.command.id).then((result) => select(result)),
+  };
 }
 async function agentRequest<T>(
   deviceID: string,
@@ -875,7 +915,7 @@ export function CloudFullDashboard({
       return Promise.reject(new Error("Pair a Mac before opening Cloud Feed."));
     const key = cloudFeedRequestKey({ deviceID: token, kind: "feed_sites" });
     return coalesceCloudFeedRequest(feedRequests.current, key, () =>
-      agentRequest<FeedSite[]>(token, "/v1/feed/sites"),
+      beginFeedCommand<FeedSite[]>(token, { kind: "feed_sites" }, (result) => (result.sites ?? []) as FeedSite[]),
     );
   }, [token]);
   const loadFeedPage = useCallback(
@@ -895,7 +935,12 @@ export function CloudFullDashboard({
       const search = new URLSearchParams({ site, page: String(query.page) });
       if (normalizedQuery) search.set("q", normalizedQuery);
       return coalesceCloudFeedRequest(feedRequests.current, key, () =>
-        agentRequest<FeedPage>(token, `/v1/feed/items?${search}`),
+        beginFeedCommand<FeedPage>(token, {
+          kind: "feed_page",
+          siteID: site,
+          page: query.page,
+          query: normalizedQuery || undefined,
+        }, (result) => result.page as FeedPage),
       );
     },
     [token],

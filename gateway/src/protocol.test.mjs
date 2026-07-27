@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { commandDeliveryCapability, commandDeliveryFrame, destinationsListCapability, feedPageCapability, feedQueueCapability, negotiatedCommandDelivery, negotiatedDestinationsList, negotiatedFeedPage, negotiatedFeedQueue, selectedGatewayCommand, validDestinationsAcknowledgement, validFeedPageAcknowledgement, validPersistenceResponse } from "./protocol.ts";
+import { commandDeliveryCapability, commandDeliveryFrame, commandWakeCapability, destinationsListCapability, feedPageCapability, feedQueueCapability, negotiatedCommandDelivery, negotiatedCommandWake, negotiatedDestinationsList, negotiatedFeedPage, negotiatedFeedQueue, selectedGatewayCommand, validDestinationsAcknowledgement, validFeedPageAcknowledgement, validPersistenceResponse } from "./protocol.ts";
 
 test("capability negotiation is realtime-only and survives attachment serialization", () => {
   assert.equal(negotiatedCommandDelivery({ capabilities: [commandDeliveryCapability] }, true), true);
@@ -12,11 +12,14 @@ test("capability negotiation is realtime-only and survives attachment serializat
   assert.equal(negotiatedDestinationsList({ capabilities: [destinationsListCapability] }, true), false);
   assert.equal(negotiatedFeedQueue({ capabilities: [commandDeliveryCapability, feedQueueCapability] }, true), true);
   assert.equal(negotiatedFeedQueue({ capabilities: [feedQueueCapability] }, true), false);
-  const attachment = JSON.parse(JSON.stringify({ connectionKind: "realtime", commandDeliveryV1: true, feedPageV1: true, destinationsListV1: true, feedQueueV1: true }));
+  assert.equal(negotiatedCommandWake({ capabilities: [commandDeliveryCapability, commandWakeCapability] }, true), true);
+  assert.equal(negotiatedCommandWake({ capabilities: [commandWakeCapability] }, true), false);
+  const attachment = JSON.parse(JSON.stringify({ connectionKind: "realtime", commandDeliveryV1: true, feedPageV1: true, destinationsListV1: true, feedQueueV1: true, commandWakeV1: true }));
   assert.equal(attachment.commandDeliveryV1, true);
   assert.equal(attachment.feedPageV1, true);
   assert.equal(attachment.destinationsListV1, true);
   assert.equal(attachment.feedQueueV1, true);
+  assert.equal(attachment.commandWakeV1, true);
 });
 
 test("destination acknowledgements enforce safe fields and the 32768-byte boundary", () => {

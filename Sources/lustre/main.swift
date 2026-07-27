@@ -38,6 +38,10 @@ struct LustreCLI {
                 guard arguments.count >= 2 else { throw CLIError.usage }
                 if arguments[1] == "sites" {
                     try printJSON(try await client.feedSites())
+                } else if arguments[1] == "verify",
+                          option("--site", in: arguments) == FeedSiteID.allPornStream.rawValue {
+                    try await client.verifyAllPornStream()
+                    print("AllPornStream verification completed.")
                 } else if arguments[1] == "list",
                           let rawSite = option("--site", in: arguments),
                           let site = FeedSiteID(rawValue: rawSite) {
@@ -122,6 +126,7 @@ private enum CLIError: Error, LocalizedError {
           lustre cloud disconnect
           lustre extract <url>
           lustre feed sites
+          lustre feed verify --site allpornstream
           lustre feed list --site allpornstream|hqporner|onlyfan420|pornhub [--query <text>] [--page <number>]
           lustre queue <url> [--quality <label>] [--destination <name>]
           lustre force-start <job-id>

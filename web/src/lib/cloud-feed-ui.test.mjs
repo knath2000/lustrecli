@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { cloudDashboardRefreshPaths, cloudFeedAcceptanceAllowed, cloudFeedCapabilities, cloudFeedDestinationsEnabled, cloudFeedEnabled, cloudFeedMediaEnabled, cloudFeedQueueEnabled, cloudFeedRequestKey, coalesceCloudFeedRequest } from "./cloud-feed-ui.ts";
+import { cloudDashboardRefreshPaths, cloudFeedAcceptanceAllowed, cloudFeedCacheFreshness, cloudFeedCapabilities, cloudFeedDestinationsEnabled, cloudFeedEnabled, cloudFeedMediaEnabled, cloudFeedQueueEnabled, cloudFeedRequestKey, coalesceCloudFeedRequest } from "./cloud-feed-ui.ts";
 
 test("Cloud Feed requires the exact server flag value true", () => {
   assert.equal(cloudFeedEnabled("true"), true);
@@ -54,6 +54,15 @@ test("identical in-flight Feed requests share one promise and clear after settle
   const third = coalesceCloudFeedRequest(requests, "same", async () => "again");
   assert.notEqual(third, first);
   assert.equal(await third, "again");
+});
+
+test("Feed cache freshness uses exact five and sixty minute tiers", () => {
+  const now = Date.parse("2026-07-27T02:00:00Z");
+  assert.equal(cloudFeedCacheFreshness(new Date(now - 5 * 60_000), now), "fresh");
+  assert.equal(cloudFeedCacheFreshness(new Date(now - 5 * 60_000 - 1), now), "stale");
+  assert.equal(cloudFeedCacheFreshness(new Date(now - 60 * 60_000), now), "stale");
+  assert.equal(cloudFeedCacheFreshness(new Date(now - 60 * 60_000 - 1), now), null);
+  assert.equal(cloudFeedCacheFreshness(new Date(now + 1), now), null);
 });
 
 test("K1 capabilities prevent media loading and every queue interaction", () => {

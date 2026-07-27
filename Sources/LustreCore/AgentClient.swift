@@ -45,6 +45,10 @@ public struct AgentClient {
         return try await request(url: url, method: "GET", body: Optional<Data>.none)
     }
 
+    public func verifyAllPornStream() async throws {
+        let _: EmptyAgentResponse = try await request(path: "/v1/feed/verify/allpornstream", method: "POST", body: Optional<Data>.none)
+    }
+
     public func pornHubAuthStatus() async throws -> PornHubAuthStatus {
         try await request(path: "/v1/auth/pornhub", method: "GET", body: Optional<Data>.none)
     }
@@ -99,4 +103,8 @@ public struct ErrorResponse: Codable, Sendable {
     public init(error: String) {
         self.error = error
     }
+}
+
+public struct EmptyAgentResponse: Codable, Sendable {
+    public init() {}
 }

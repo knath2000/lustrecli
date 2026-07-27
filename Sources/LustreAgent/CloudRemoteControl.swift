@@ -29,6 +29,15 @@ struct CloudRemoteCommandAck: Codable {
     let status: String
     let jobID: UUID?
     let result: CloudRemoteResult?
+    let code: String?
+
+    init(id: UUID, status: String, jobID: UUID?, result: CloudRemoteResult?, code: String? = nil) {
+        self.id = id
+        self.status = status
+        self.jobID = jobID
+        self.result = result
+        self.code = code
+    }
 }
 
 struct CloudRemoteResult: Codable {
@@ -201,9 +210,9 @@ actor CloudRemoteControl {
         case "feed_sites":
             acknowledgement = CloudRemoteCommandAck(id: command.id, status: "completed", jobID: nil, result: CloudRemoteResult(kind: "feed_sites", sites: await service.feedSites(), page: nil, destinations: nil))
         case "feed_page":
-            guard let rawSite = command.payload.siteID, let site = FeedSiteID(rawValue: rawSite), let page = command.payload.page, page > 0 else { acknowledgement = CloudRemoteCommandAck(id: command.id, status: "failed", jobID: nil, result: nil); break }
+            guard let rawSite = command.payload.siteID, let site = FeedSiteID(rawValue: rawSite), let page = command.payload.page, page > 0 else { acknowledgement = CloudRemoteCommandAck(id: command.id, status: "failed", jobID: nil, result: nil, code: "invalid_request"); break }
             do { acknowledgement = Self.boundedFeedPageAcknowledgement(id: command.id, page: try await service.feedPage(site: site, query: command.payload.query, page: page)) }
-            catch { acknowledgement = CloudRemoteCommandAck(id: command.id, status: "failed", jobID: nil, result: nil) }
+            catch { acknowledgement = CloudRemoteCommandAck(id: command.id, status: "failed", jobID: nil, result: nil, code: Self.feedFailureCode(error)) }
         case "destinations_list":
             acknowledgement = Self.boundedDestinationsAcknowledgement(id: command.id, profiles: await service.allRemoteDestinations())
         case "webdav_add":
@@ -233,7 +242,7 @@ actor CloudRemoteControl {
     static func boundedFeedPageAcknowledgement(id: UUID, page: FeedPage) -> CloudRemoteCommandAck {
         let completed = CloudRemoteCommandAck(id: id, status: "completed", jobID: nil, result: CloudRemoteResult(kind: "feed_page", sites: nil, page: page, destinations: nil))
         guard let encoded = try? JSONEncoder.cloud.encode(completed), encoded.count <= maximumFeedPageAcknowledgementBytes else {
-            return CloudRemoteCommandAck(id: id, status: "failed", jobID: nil, result: nil)
+            return CloudRemoteCommandAck(id: id, status: "failed", jobID: nil, result: nil, code: "result_too_large")
         }
         return completed
     }
@@ -259,6 +268,20 @@ actor CloudRemoteControl {
 
     private func enqueue(_ acknowledgement: CloudRemoteCommandAck) {
         Self.appendAcknowledgement(acknowledgement, to: &acknowledgements)
+    }
+
+    private static func feedFailureCode(_ error: Error) -> String {
+        if let feedError = error as? FeedError {
+            switch feedError {
+            case .challengeRequired: return "provider_verification_required"
+            case .authenticationRequired, .authenticationUnavailable: return "authentication_required"
+            case .network: return "provider_http_error"
+            case .missingStructuredData, .invalidStructuredData: return "provider_changed"
+            case .invalidPage, .invalidQuery, .unsupportedSite: return "invalid_request"
+            }
+        }
+        if error is URLError { return "provider_unreachable" }
+        return "provider_changed"
     }
 
     static func appendAcknowledgement(_ acknowledgement: CloudRemoteCommandAck, to acknowledgements: inout [CloudRemoteCommandAck]) {

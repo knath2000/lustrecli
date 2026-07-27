@@ -37,6 +37,7 @@ public actor CloudPresenceConnection {
     private static let feedPageCapability = "feed-page-v1"
     private static let destinationsListCapability = "destinations-list-v1"
     private static let feedQueueCapability = "feed-queue-v1"
+    private static let commandWakeCapability = "command-wake-v1"
     private let identity: DeviceIdentity
     private let session: URLSession
     private let remoteControl: CloudRemoteControl
@@ -120,19 +121,33 @@ public actor CloudPresenceConnection {
         let task = session.webSocketTask(with: url, protocols: ["lustre-v1", "lustre.\(token)"])
         fputs("Lustre Cloud presence connecting: generation=\(generation).\n", stderr)
         socket = task; task.resume()
+        let mailbox = CloudWebSocketMailbox()
+        let receivePump = Task {
+            do {
+                while !Task.isCancelled {
+                    switch try await task.receive() {
+                    case let .data(data): await mailbox.offer(.data(data))
+                    case let .string(text): await mailbox.offer(.text(text))
+                    @unknown default: throw CloudDeviceError.invalidResponse
+                    }
+                }
+            } catch {
+                await mailbox.finish(error)
+            }
+        }
+        defer { receivePump.cancel() }
         if usesGateway {
-            let hello: URLSessionWebSocketTask.Message
+            let hello: CloudWebSocketMessage
             do {
                 fputs("Lustre Cloud gateway: event=realtime_hello_send_started.\n", stderr)
-                hello = try await sendAndReceive(.string("{\"version\":1,\"type\":\"gateway_hello\",\"capabilities\":[\"\(Self.commandDeliveryCapability)\",\"\(Self.feedPageCapability)\",\"\(Self.destinationsListCapability)\",\"\(Self.feedQueueCapability)\"]}"), using: task)
+                try await task.send(.string("{\"version\":1,\"type\":\"gateway_hello\",\"capabilities\":[\"\(Self.commandDeliveryCapability)\",\"\(Self.feedPageCapability)\",\"\(Self.destinationsListCapability)\",\"\(Self.feedQueueCapability)\",\"\(Self.commandWakeCapability)\"]}"))
+                hello = try await receiveExpected(type: "gateway_hello_ack", from: mailbox, commandWakeV1: false, timeout: 15)
                 fputs("Lustre Cloud gateway: event=realtime_hello_reply_received.\n", stderr)
             } catch {
                 if let response = task.response as? HTTPURLResponse { throw CloudPresenceConnectionError.httpStatus(response.statusCode) }
                 throw error
             }
-            guard case let .string(helloText) = hello,
-                  let helloData = helloText.data(using: .utf8),
-                  let helloFrame = try? JSONDecoder.cloud.decode(CloudGatewayHelloResponse.self, from: helloData),
+            guard let helloFrame = try? JSONDecoder.cloud.decode(CloudGatewayHelloResponse.self, from: hello.data),
                   helloFrame.version == 1,
                   helloFrame.type == "gateway_hello_ack"
             else { throw CloudDeviceError.invalidResponse }
@@ -140,17 +155,21 @@ public actor CloudPresenceConnection {
             let feedPageV1 = commandDeliveryV1 && helloFrame.capabilities?.contains(Self.feedPageCapability) == true
             let destinationsListV1 = commandDeliveryV1 && helloFrame.capabilities?.contains(Self.destinationsListCapability) == true
             let feedQueueV1 = commandDeliveryV1 && helloFrame.capabilities?.contains(Self.feedQueueCapability) == true
-            fputs("Lustre Cloud gateway: event=realtime_hello_accepted commandDelivery=\(commandDeliveryV1) feedPage=\(feedPageV1) destinationsList=\(destinationsListV1) feedQueue=\(feedQueueV1).\n", stderr)
-            try await heartbeatLoop(task: task, generation: generation, commandDeliveryV1: commandDeliveryV1, feedPageV1: feedPageV1, destinationsListV1: destinationsListV1, feedQueueV1: feedQueueV1)
+            let commandWakeV1 = commandDeliveryV1 && helloFrame.capabilities?.contains(Self.commandWakeCapability) == true
+            fputs("Lustre Cloud gateway: event=realtime_hello_accepted commandDelivery=\(commandDeliveryV1) feedPage=\(feedPageV1) destinationsList=\(destinationsListV1) feedQueue=\(feedQueueV1) commandWake=\(commandWakeV1).\n", stderr)
+            try await heartbeatLoop(task: task, mailbox: mailbox, generation: generation, commandDeliveryV1: commandDeliveryV1, feedPageV1: feedPageV1, destinationsListV1: destinationsListV1, feedQueueV1: feedQueueV1, commandWakeV1: commandWakeV1)
             return
         }
-        try await heartbeatLoop(task: task, generation: generation, commandDeliveryV1: false, feedPageV1: false, destinationsListV1: false, feedQueueV1: false)
+        try await heartbeatLoop(task: task, mailbox: mailbox, generation: generation, commandDeliveryV1: false, feedPageV1: false, destinationsListV1: false, feedQueueV1: false, commandWakeV1: false)
     }
 
-    private func heartbeatLoop(task: URLSessionWebSocketTask, generation: CloudPresenceReconnectStateMachine.Generation, commandDeliveryV1: Bool, feedPageV1: Bool, destinationsListV1: Bool, feedQueueV1: Bool) async throws {
+    private func heartbeatLoop(task: URLSessionWebSocketTask, mailbox: CloudWebSocketMailbox, generation: CloudPresenceReconnectStateMachine.Generation, commandDeliveryV1: Bool, feedPageV1: Bool, destinationsListV1: Bool, feedQueueV1: Bool, commandWakeV1: Bool) async throws {
         var sequence = 1
         let correlationID = UUID().uuidString.lowercased()
         while !Task.isCancelled {
+            if commandWakeV1 {
+                _ = await mailbox.consumeWake()
+            }
             guard reconnectState.maySendHeartbeat(for: generation) else {
                 task.cancel(with: .goingAway, reason: nil)
                 return
@@ -158,10 +177,11 @@ public actor CloudPresenceConnection {
             let payload = await remoteControl.heartbeatPayload()
             let data = try heartbeatData(sequence: sequence, correlationID: correlationID, acknowledgements: payload.acks, jobs: payload.jobs)
             fputs("Lustre Cloud gateway: event=realtime_heartbeat_send_started sequence=\(sequence) bytes=\(data.count).\n", stderr)
-            let response = try await sendAndReceive(.data(data), using: task)
+            try await task.send(.data(data))
+            let response = try await receiveExpected(type: "heartbeat-accepted", from: mailbox, commandWakeV1: commandWakeV1, timeout: 15)
             fputs("Lustre Cloud gateway: event=realtime_heartbeat_reply_received sequence=\(sequence).\n", stderr)
             let responseData: Data
-            switch response { case let .data(data): responseData = data; case let .string(text): responseData = Data(text.utf8); @unknown default: throw CloudDeviceError.invalidResponse }
+            responseData = response.data
             let responseFrame: CloudHeartbeatResponse
             do { responseFrame = try JSONDecoder.cloud.decode(CloudHeartbeatResponse.self, from: responseData) }
             catch { throw CloudPresenceConnectionError.invalidHeartbeatResponse(responseData.count) }
@@ -175,10 +195,10 @@ public actor CloudPresenceConnection {
             await remoteControl.acknowledgedByCloud(responseFrame.acknowledgedCommandAcks ?? [])
             let command: CloudRemoteCommand?
             if commandDeliveryV1 {
-                let deliveryMessage = try await receive(using: task)
+                let deliveryMessage = try await receiveExpected(type: "command-delivery", from: mailbox, commandWakeV1: commandWakeV1, timeout: 10)
                 fputs("Lustre Cloud gateway: event=realtime_delivery_received sequence=\(sequence).\n", stderr)
                 let deliveryData: Data
-                switch deliveryMessage { case let .data(data): deliveryData = data; case let .string(text): deliveryData = Data(text.utf8); @unknown default: throw CloudDeviceError.invalidResponse }
+                deliveryData = deliveryMessage.data
                 guard let delivery = try? JSONDecoder.cloud.decode(CloudCommandDelivery.self, from: deliveryData),
                       delivery.version == 1,
                       delivery.type == "command-delivery",
@@ -194,7 +214,44 @@ public actor CloudPresenceConnection {
             let handledCommand = await remoteControl.handle(command)
             sequence += 1
             if handledCommand { continue }
-            try await Task.sleep(nanoseconds: UInt64(Self.heartbeatInterval * 1_000_000_000))
+            if commandWakeV1, await mailbox.consumeWake() { continue }
+            do {
+                let message = try await timedMessage(from: mailbox, after: Self.heartbeatInterval)
+                guard commandWakeV1, frameType(message) == "command-available" else { throw CloudDeviceError.invalidResponse }
+                _ = await mailbox.consumeWake()
+            } catch CloudPresenceConnectionError.timedOut {
+                continue
+            }
+        }
+    }
+
+    private func receiveExpected(type: String, from mailbox: CloudWebSocketMailbox, commandWakeV1: Bool, timeout: TimeInterval) async throws -> CloudWebSocketMessage {
+        while true {
+            let message = try await timedMessage(from: mailbox, after: timeout)
+            let receivedType = frameType(message)
+            if receivedType == type { return message }
+            if commandWakeV1, receivedType == "command-available" { continue }
+            throw CloudDeviceError.invalidResponse
+        }
+    }
+
+    private func frameType(_ message: CloudWebSocketMessage) -> String? {
+        guard let object = try? JSONSerialization.jsonObject(with: message.data) as? [String: Any],
+              object["version"] as? Int == 1
+        else { return nil }
+        return object["type"] as? String
+    }
+
+    private func timedMessage(from mailbox: CloudWebSocketMailbox, after seconds: TimeInterval) async throws -> CloudWebSocketMessage {
+        try await withThrowingTaskGroup(of: CloudWebSocketMessage.self) { group in
+            group.addTask { try await mailbox.next() }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                throw CloudPresenceConnectionError.timedOut
+            }
+            defer { group.cancelAll() }
+            guard let message = try await group.next() else { throw CloudPresenceConnectionError.timedOut }
+            return message
         }
     }
 

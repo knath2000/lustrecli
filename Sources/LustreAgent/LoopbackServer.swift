@@ -82,6 +82,10 @@ public final class LoopbackServer: @unchecked Sendable {
             if request.method == "GET", routePath == "/v1/feed/sites" {
                 return json(status: 200, value: await service.feedSites())
             }
+            if request.method == "POST", routePath == "/v1/feed/verify/allpornstream" {
+                try await service.verifyAllPornStream()
+                return json(status: 200, value: EmptyAgentResponse())
+            }
             if request.method == "GET", routePath == "/v1/feed/items" {
                 let query = (components?.queryItems ?? []).reduce(into: [String: String]()) { values, item in
                     if let value = item.value { values[item.name] = value }

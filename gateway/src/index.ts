@@ -2,6 +2,7 @@ export interface Env {
   CONTROL_PLANE_ORIGIN: string;
   LUSTRE_DEVICE_TOKEN_SECRET: string;
   LUSTRE_GATEWAY_RELAY_SECRET: string;
+  LUSTRE_GATEWAY_CONTROL_SECRET: string;
   DEVICE_CONNECTION: DurableObjectNamespace<DeviceConnection>;
 }
 
@@ -11,6 +12,7 @@ const tokenPrefix = "lustre.";
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const JOB_STATUSES = new Set(["queued", "running", "paused", "completed", "failed", "cancelled", "verificationRequired"]);
 const JOB_PHASES = new Set(["resolving", "downloading", "materializing", "postProcessing", "uploading", "verifying"]);
+const ACKNOWLEDGEMENT_CODES = new Set(["provider_verification_required", "provider_http_error", "provider_unreachable", "provider_changed", "authentication_required", "result_too_large", "invalid_request"]);
 
 function isRecord(value: unknown): value is Record<string, unknown> { return !!value && typeof value === "object" && !Array.isArray(value); }
 function isUUID(value: unknown): value is string { return typeof value === "string" && UUID_PATTERN.test(value); }
@@ -20,7 +22,8 @@ function heartbeatSchema(value: Record<string, unknown>): { acknowledgementCount
   if (typeof value.sentAt !== "string" || Number.isNaN(Date.parse(value.sentAt)) || !isBoundedString(value.agentVersion, 80) || !isBoundedString(value.correlationID, 64)) return null;
   if (!Array.isArray(value.commandAcks) || value.commandAcks.length > 8 || !Array.isArray(value.jobs) || value.jobs.length > 50) return null;
   for (const acknowledgement of value.commandAcks) {
-    if (!isRecord(acknowledgement) || !isUUID(acknowledgement.id) || !["completed", "failed"].includes(acknowledgement.status as string) || (acknowledgement.jobID !== undefined && !isUUID(acknowledgement.jobID)) || (acknowledgement.result !== undefined && !isRecord(acknowledgement.result))) return null;
+    if (!isRecord(acknowledgement) || !isUUID(acknowledgement.id) || !["completed", "failed"].includes(acknowledgement.status as string) || (acknowledgement.jobID !== undefined && !isUUID(acknowledgement.jobID)) || (acknowledgement.result !== undefined && !isRecord(acknowledgement.result)) || (acknowledgement.code !== undefined && (typeof acknowledgement.code !== "string" || !ACKNOWLEDGEMENT_CODES.has(acknowledgement.code)))) return null;
+    if (acknowledgement.status === "failed" && acknowledgement.result !== undefined) return null;
     if (acknowledgement.status === "completed" && isRecord(acknowledgement.result) && acknowledgement.result.kind === "feed_page" && !validFeedPageAcknowledgement(acknowledgement)) return null;
     if (acknowledgement.status === "completed" && isRecord(acknowledgement.result) && acknowledgement.result.kind === "destinations_list" && !validDestinationsAcknowledgement(acknowledgement)) return null;
   }
@@ -68,9 +71,28 @@ async function deviceClaims(token: string, env: Env): Promise<DeviceClaims> {
 }
 
 export class DeviceConnection extends DurableObject<Env> {
-  private readonly pendingAttachments = new Map<WebSocket, { deviceID: string; connectionID: string; connectedAt: string; protocolVersion: 1; lastSequence: number; connectionKind: "realtime" | "smoke"; commandDeliveryV1: boolean; feedPageV1: boolean; destinationsListV1: boolean; feedQueueV1: boolean }>();
+  private readonly pendingAttachments = new Map<WebSocket, { deviceID: string; connectionID: string; connectedAt: string; protocolVersion: 1; lastSequence: number; connectionKind: "realtime" | "smoke"; commandDeliveryV1: boolean; feedPageV1: boolean; destinationsListV1: boolean; feedQueueV1: boolean; commandWakeV1: boolean }>();
 
   async fetch(request: Request) {
+    if (request.method === "POST" && new URL(request.url).pathname === "/control/command-wake") {
+      const wake = await request.json() as { commandID?: unknown };
+      if (!isUUID(wake.commandID)) return new Response("Invalid wake.", { status: 400 });
+      const previous = await this.ctx.storage.get<{ commandID: string; receivedAt: number }>("lastCommandWake");
+      if (previous?.commandID === wake.commandID && Date.now() - previous.receivedAt < 60_000) {
+        return Response.json({ status: "coalesced", notified: 0 });
+      }
+      await this.ctx.storage.put("lastCommandWake", { commandID: wake.commandID, receivedAt: Date.now() });
+      let notified = 0;
+      for (const socket of this.ctx.getWebSockets()) {
+        const attachment = socket.deserializeAttachment() as { connectionKind?: unknown; commandWakeV1?: unknown } | null;
+        if (attachment?.connectionKind !== "realtime" || attachment.commandWakeV1 !== true) continue;
+        try {
+          socket.send(JSON.stringify({ version: 1, type: "command-available" }));
+          notified += 1;
+        } catch {}
+      }
+      return Response.json({ status: "accepted", notified });
+    }
     if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") return new Response("WebSocket upgrade required.", { status: 426 });
     const smoke = new URL(request.url).pathname === "/_ws-smoke-do";
     const protocol = tokenFrom(request);
@@ -82,7 +104,7 @@ export class DeviceConnection extends DurableObject<Env> {
     const [client, server] = Object.values(pair);
     this.ctx.acceptWebSocket(server);
     await this.ctx.storage.put("stage", "do_socket_accepted");
-    this.pendingAttachments.set(server, { deviceID, connectionID, connectedAt: new Date().toISOString(), protocolVersion: 1, lastSequence: 0, connectionKind: smoke ? "smoke" : "realtime", commandDeliveryV1: false, feedPageV1: false, destinationsListV1: false, feedQueueV1: false });
+    this.pendingAttachments.set(server, { deviceID, connectionID, connectedAt: new Date().toISOString(), protocolVersion: 1, lastSequence: 0, connectionKind: smoke ? "smoke" : "realtime", commandDeliveryV1: false, feedPageV1: false, destinationsListV1: false, feedQueueV1: false, commandWakeV1: false });
     if (smoke) return new Response(null, { status: 101, headers: { "Sec-WebSocket-Protocol": "lustre-v1" }, webSocket: client });
     return new Response(null, { status: 101, headers: { "Sec-WebSocket-Protocol": "lustre-v1" }, webSocket: client });
   }
@@ -179,6 +201,7 @@ export class DeviceConnection extends DurableObject<Env> {
       const feedPageV1 = connection.feedPageV1 === true;
       const destinationsListV1 = connection.destinationsListV1 === true;
       const feedQueueV1 = connection.feedQueueV1 === true;
+      const commandWakeV1 = connection.commandWakeV1 === true;
       const previousSequence = lastSequence === undefined ? 0 : lastSequence as number;
       const attachmentRecord = { stage: "heartbeat_attachment_restored", connectionID: connection.connectionID, protocolVersion: connection.protocolVersion, sequence };
       await this.ctx.storage.put("lastBinarySmoke", attachmentRecord);
@@ -202,6 +225,7 @@ export class DeviceConnection extends DurableObject<Env> {
         feedPageV1,
         destinationsListV1,
         feedQueueV1,
+        commandWakeV1,
       });
       const acceptedRecord = { stage: "heartbeat_sequence_accepted", ...sequenceRecord };
       await this.ctx.storage.put("lastBinarySmoke", acceptedRecord);
@@ -232,8 +256,9 @@ export class DeviceConnection extends DurableObject<Env> {
       const feedPageV1 = negotiatedFeedPage(frame as Record<string, unknown>, attachment?.connectionKind === "realtime");
       const destinationsListV1 = negotiatedDestinationsList(frame as Record<string, unknown>, attachment?.connectionKind === "realtime");
       const feedQueueV1 = negotiatedFeedQueue(frame as Record<string, unknown>, attachment?.connectionKind === "realtime");
-      webSocket.send(JSON.stringify({ version: 1, type: "gateway_hello_ack", capabilities: [...(commandDeliveryV1 ? [commandDeliveryCapability] : []), ...(feedPageV1 ? [feedPageCapability] : []), ...(destinationsListV1 ? [destinationsListCapability] : []), ...(feedQueueV1 ? [feedQueueCapability] : [])] }));
-      if (attachment) { webSocket.serializeAttachment({ ...attachment, commandDeliveryV1, feedPageV1, destinationsListV1, feedQueueV1 }); this.pendingAttachments.delete(webSocket); }
+      const commandWakeV1 = negotiatedCommandWake(frame as Record<string, unknown>, attachment?.connectionKind === "realtime");
+      webSocket.send(JSON.stringify({ version: 1, type: "gateway_hello_ack", capabilities: [...(commandDeliveryV1 ? [commandDeliveryCapability] : []), ...(feedPageV1 ? [feedPageCapability] : []), ...(destinationsListV1 ? [destinationsListCapability] : []), ...(feedQueueV1 ? [feedQueueCapability] : []), ...(commandWakeV1 ? [commandWakeCapability] : [])] }));
+      if (attachment) { webSocket.serializeAttachment({ ...attachment, commandDeliveryV1, feedPageV1, destinationsListV1, feedQueueV1, commandWakeV1 }); this.pendingAttachments.delete(webSocket); }
       await this.ctx.storage.put("stage", "do_hello_acked");
       return;
     }
@@ -301,6 +326,26 @@ export class DeviceConnection extends DurableObject<Env> {
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const path = new URL(request.url).pathname;
+    if (path === "/control/command-wake" && request.method === "POST") {
+      const body = await request.arrayBuffer();
+      if (body.byteLength === 0 || body.byteLength > 1_024) return new Response("Invalid request.", { status: 400 });
+      const timestamp = request.headers.get("X-Lustre-Control-Timestamp");
+      const signature = request.headers.get("X-Lustre-Control-Signature");
+      const issuedAt = timestamp && /^\d{13}$/.test(timestamp) ? Number(timestamp) : NaN;
+      if (!Number.isSafeInteger(issuedAt) || Math.abs(Date.now() - issuedAt) > 30_000 || !signature || !/^[0-9a-f]{64}$/i.test(signature)) return new Response("Unauthenticated.", { status: 401 });
+      const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(env.LUSTRE_GATEWAY_CONTROL_SECRET), { name: "HMAC", hash: "SHA-256" }, false, ["verify"]);
+      const prefix = new TextEncoder().encode(`${timestamp}.`);
+      const signed = new Uint8Array(prefix.byteLength + body.byteLength);
+      signed.set(prefix);
+      signed.set(new Uint8Array(body), prefix.byteLength);
+      const verified = await crypto.subtle.verify("HMAC", key, Uint8Array.from(signature.match(/../g)!, (byte) => Number.parseInt(byte, 16)), signed);
+      if (!verified) return new Response("Unauthenticated.", { status: 401 });
+      let wake: unknown;
+      try { wake = JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(body)); }
+      catch { return new Response("Invalid request.", { status: 400 }); }
+      if (!isRecord(wake) || Object.keys(wake).sort().join(",") !== "commandID,deviceID,version" || wake.version !== 1 || !isUUID(wake.deviceID) || !isUUID(wake.commandID)) return new Response("Invalid request.", { status: 400 });
+      return env.DEVICE_CONNECTION.getByName(wake.deviceID).fetch(new Request("https://durable-object/control/command-wake", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ commandID: wake.commandID }) }));
+    }
     if (path === "/probe" && request.method === "GET") {
       const token = tokenFrom(request);
       if (!token) return new Response("Unauthenticated.", { status: 401 });
@@ -328,4 +373,4 @@ export default {
   },
 } satisfies ExportedHandler<Env>;
 import { DurableObject } from "cloudflare:workers";
-import { commandDeliveryCapability, commandDeliveryFrame, destinationsListCapability, feedPageCapability, feedQueueCapability, negotiatedCommandDelivery, negotiatedDestinationsList, negotiatedFeedPage, negotiatedFeedQueue, selectedGatewayCommand, validDestinationsAcknowledgement, validFeedPageAcknowledgement, validPersistenceResponse } from "./protocol";
+import { commandDeliveryCapability, commandDeliveryFrame, commandWakeCapability, destinationsListCapability, feedPageCapability, feedQueueCapability, negotiatedCommandDelivery, negotiatedCommandWake, negotiatedDestinationsList, negotiatedFeedPage, negotiatedFeedQueue, selectedGatewayCommand, validDestinationsAcknowledgement, validFeedPageAcknowledgement, validPersistenceResponse } from "./protocol";

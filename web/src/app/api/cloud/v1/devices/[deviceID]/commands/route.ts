@@ -1,6 +1,7 @@
 import { requireCurrentAccount } from "@/lib/auth/current-account";
 import { DeviceContractError, normalizeFeedPageCommand } from "@/lib/cloud/device-contract";
-import { feedCommand, feedQueueCommand, jobActionCommand, queueURLCommand } from "@/lib/cloud/device-repository";
+import { notifyCommandWake } from "@/lib/cloud/command-wake";
+import { cachedFeedResult, feedCommand, feedQueueCommand, jobActionCommand, queueURLCommand } from "@/lib/cloud/device-repository";
 import { jsonError, requestBody } from "@/lib/cloud/route";
 
 type RouteContext = { params: Promise<{ deviceID: string }> };
@@ -38,7 +39,17 @@ export async function POST(request: Request, context: RouteContext) {
     const queue = body.kind === "queue_url" ? queueURL(body) : null;
     const feedQueueInput = body.kind === "feed_queue" ? feedQueue(body) : null;
     const page = body.kind === "feed_page" ? feedPage(body) : null;
-    const created = feedQueueInput ? await feedQueueCommand({ accountID: account.id, deviceID, ...feedQueueInput }) : queue ? await queueURLCommand(account.id, deviceID, queue.url, queue.preferredQualityLabel, queue.destination) : body.kind === "job_action" ? await jobActionCommand(account.id, deviceID, jobAction(body).jobID, jobAction(body).action) : body.kind === "feed_sites" ? await feedCommand(account.id, deviceID, "feed_sites", {}) : page ? await feedCommand(account.id, deviceID, "feed_page", { siteID: page.siteID, page: String(page.page), query: page.query }) : body.kind === "destinations_list" ? await feedCommand(account.id, deviceID, "destinations_list", {}) : body.kind === "webdav_add" && ["name", "baseURL", "username", "remotePath"].every((field) => typeof body[field] === "string") ? await feedCommand(account.id, deviceID, "webdav_add", { name: body.name as string, baseURL: body.baseURL as string, username: body.username as string, remotePath: body.remotePath as string, allowInvalidCertificate: body.allowInvalidCertificate === true ? "true" : "false" }) : (() => { throw new DeviceContractError("invalid_request", "Unsupported Cloud command."); })();
-    return Response.json({ command: { id: created.id, status: created.status, createdAt: created.createdAt.toISOString() } }, { status: 201 });
+    const feedPayload = body.kind === "feed_sites" ? {} : page ? { siteID: page.siteID, page: String(page.page), query: page.query } : null;
+    const cache = body.kind === "feed_sites"
+      ? await cachedFeedResult(account.id, deviceID, "feed_sites", {})
+      : page
+        ? await cachedFeedResult(account.id, deviceID, "feed_page", feedPayload!)
+        : null;
+    const created = feedQueueInput ? await feedQueueCommand({ accountID: account.id, deviceID, ...feedQueueInput }) : queue ? await queueURLCommand(account.id, deviceID, queue.url, queue.preferredQualityLabel, queue.destination) : body.kind === "job_action" ? await jobActionCommand(account.id, deviceID, jobAction(body).jobID, jobAction(body).action) : body.kind === "feed_sites" ? await feedCommand(account.id, deviceID, "feed_sites", {}) : page ? await feedCommand(account.id, deviceID, "feed_page", feedPayload!) : body.kind === "destinations_list" ? await feedCommand(account.id, deviceID, "destinations_list", {}) : body.kind === "webdav_add" && ["name", "baseURL", "username", "remotePath"].every((field) => typeof body[field] === "string") ? await feedCommand(account.id, deviceID, "webdav_add", { name: body.name as string, baseURL: body.baseURL as string, username: body.username as string, remotePath: body.remotePath as string, allowInvalidCertificate: body.allowInvalidCertificate === true ? "true" : "false" }) : (() => { throw new DeviceContractError("invalid_request", "Unsupported Cloud command."); })();
+    await notifyCommandWake(deviceID, created.id);
+    return Response.json({
+      command: { id: created.id, status: created.status, createdAt: created.createdAt.toISOString() },
+      cache: cache ? { ...cache, acknowledgedAt: cache.acknowledgedAt.toISOString() } : null,
+    }, { status: 201 });
   } catch (error) { return jsonError(error); }
 }

@@ -30,7 +30,7 @@ final class OnlyFan420FeedTests: XCTestCase {
         XCTAssertTrue(OnlyFan420FeedParser.parse(html: "<broken>").items.isEmpty)
     }
 
-    func testOnlyFirstPageFetchesWithRequiredHeaders() async throws {
+    func testLogicalPagesRefetchSourceWithRequiredHeaders() async throws {
         actor Capture {
             var calls: [(URL, [String: String])] = []
             func add(_ url: URL, _ headers: [String: String]) { calls.append((url, headers)) }
@@ -43,12 +43,31 @@ final class OnlyFan420FeedTests: XCTestCase {
         _ = try await service.page(site: .onlyFan420, page: 1)
         let second = try await service.page(site: .onlyFan420, page: 2)
         let calls = await capture.calls
-        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(calls.count, 2)
         XCTAssertEqual(calls[0].0, FeedSite.onlyFan420.homeURL)
         XCTAssertEqual(calls[0].1["Referer"], "https://rentry.co")
         XCTAssertNotNil(calls[0].1["User-Agent"])
         XCTAssertNotNil(calls[0].1["Accept"])
         XCTAssertNotNil(calls[0].1["Accept-Language"])
         XCTAssertEqual(second, FeedPage(items: [], page: 2, hasMore: false))
+    }
+
+    func testParserSlicesLargeSourceIntoStableFiftyItemPages() {
+        let cards = (0..<121).map { index in
+            #"<a class="external" href="https://playmogo.com/e/\#(index)">Item \#(index)<img src="https://images.example/\#(index).jpg"></a>"#
+        }.joined()
+        let html = #"<span style="color:yellow">22 July 2026 -- New</span>"# + cards
+        let first = OnlyFan420FeedParser.parse(html: html, page: 1)
+        let second = OnlyFan420FeedParser.parse(html: html, page: 2)
+        let third = OnlyFan420FeedParser.parse(html: html, page: 3)
+        XCTAssertEqual(first.items.count, 50)
+        XCTAssertEqual(second.items.count, 50)
+        XCTAssertEqual(third.items.count, 21)
+        XCTAssertEqual(first.items.first?.title, "Item 0")
+        XCTAssertEqual(second.items.first?.title, "Item 50")
+        XCTAssertEqual(third.items.first?.title, "Item 100")
+        XCTAssertTrue(first.hasMore)
+        XCTAssertTrue(second.hasMore)
+        XCTAssertFalse(third.hasMore)
     }
 }

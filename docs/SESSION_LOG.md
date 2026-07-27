@@ -1,5 +1,15 @@
 # Session Log
 
+## 2026-07-26 — Cached-first Feed, immediate wake, and provider recovery
+
+- Added exact cached-first Feed command responses with five-minute fresh and 60-minute stale tiers, concurrent initial site/HQPorner loading, identical pending/running command coalescing, cached fallback warnings, and live-refresh gating for queue controls.
+- Added the negotiated `command-wake-v1` path. Vercel signs bounded ID-only notifications with a dedicated control secret; the Cloudflare gateway validates timestamp, HMAC, size, UTF-8, and schema before routing to the device Durable Object. Hibernating negotiated sockets receive only `command-available`.
+- Replaced agent WebSocket reads with one receive pump and a bounded mailbox. Wake signals coalesce and remain latched across in-flight heartbeat replies; the normal sequenced heartbeat remains the only command delivery path and the 30-second fallback remains intact.
+- Added fixed safe failed-acknowledgement codes and actionable dashboard messages without persisting provider content or failure payloads.
+- Split OnlyFan420 into deterministic 50-item logical pages. Added restricted AllPornStream local WebKit verification/rendering, provider-only bounded clearance-cookie Keychain storage, and `lustre feed verify --site allpornstream`.
+- Applied production migration `0006_lustre_feed_command_cache`, deployed compatibility web build `dpl_8KAwBfwLpLPMMvsoFSU1BUKwNZC8`, deployed gateway version `7a405308-4aa3-4fb5-ae42-9b2d5e99f215`, confirmed zero active transfers, installed the release agent/helper/CLI, and restarted the LaunchAgent. The agent negotiated Feed, destinations, queue, and command-wake capabilities.
+- Enabled command wake last and deployed Production `dpl_14Hfc1R6jxpRkSSRszLYwK9qaKv9`. Automated production probes returned `200` for the dashboard and the expected unauthenticated `401` from the gateway. Provider timing, pagination, and local AllPornStream verification are intentionally left for manual Production acceptance.
+
 ## 2026-07-26 — K4 exactly-once Cloud Feed queue delivery
 
 - Added the negotiated `feed-queue-v1` capability across the macOS agent, Cloudflare gateway, Vercel control plane, and Cloud Feed UI. Queue delivery is admitted only when the connected agent negotiated that capability; the gateway enforces an exact credential-free HTTPS source URL, canonical destination syntax, UUID request ID, no quality override, and a 4 KiB payload bound.

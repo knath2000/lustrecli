@@ -117,6 +117,10 @@ public actor AgentService {
                 } catch {
                     throw FeedError.authenticationUnavailable
                 }
+            },
+            allPornStreamHTML: { url in
+                do { return try await AllPornStreamWebKitHelper().render(url: url) }
+                catch AllPornStreamVerificationError.verificationRequired { throw FeedError.challengeRequired }
             }
         )
         self.feedAssetProxy = feedAssetProxy
@@ -141,6 +145,10 @@ public actor AgentService {
 
     public func feedPage(site: FeedSiteID, query: String? = nil, page: Int) async throws -> FeedPage {
         try await feed.page(FeedQuery(site: site, text: query, page: page))
+    }
+
+    public func verifyAllPornStream() async throws {
+        try await AllPornStreamWebKitHelper().verify()
     }
 
     public func feedAsset(url: URL, kind: FeedAssetKind) async throws -> FeedAssetResponse {
