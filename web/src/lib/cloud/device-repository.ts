@@ -478,6 +478,17 @@ export async function watchlistResolveCommand(accountID: string, deviceID: strin
     acknowledgedAt: row.acknowledged_at instanceof Date ? row.acknowledged_at : row.acknowledged_at ? new Date(row.acknowledged_at) : null,
   };
 }
+export async function watchlistQueueCommand(accountID: string, deviceID: string, watchlistID: string, requestID: string, destination: "local") {
+  const item = (await db.select({
+    sourcePageURL: lustreWatchlistItems.sourcePageURL,
+    title: lustreWatchlistItems.title,
+  }).from(lustreWatchlistItems).where(and(
+    eq(lustreWatchlistItems.id, watchlistID),
+    eq(lustreWatchlistItems.accountID, accountID),
+  )).limit(1))[0];
+  if (!item) throw new DeviceContractError("invalid_request", "Watchlist item not found.");
+  return queueURLCommand(accountID, deviceID, item.sourcePageURL, item.title, undefined, destination, requestID);
+}
 export async function watchlistOwnsThumbnail(accountID: string, deviceID: string, thumbnailURL: string) {
   const row = await db.select({ id: lustreWatchlistItems.id })
     .from(lustreWatchlistItems)
@@ -661,7 +672,7 @@ export async function nextGatewayCommand(input: { deviceID: string; connectionID
   if (row.kind === "gdrive_connect") return { id: row.id, kind: "gdrive_connect" as const, payload: { deliveryProtocol: "gateway-v1" as const } };
   if (row.kind === "gdrive_test") return { id: row.id, kind: "gdrive_test" as const, payload: { profileID: row.payload.profileID as string, deliveryProtocol: "gateway-v1" as const } };
   if (row.kind === "gdrive_folders" || row.kind === "gdrive_create_folder" || row.kind === "gdrive_select_folder") return { id: row.id, kind: row.kind, payload: { profileID: row.payload.profileID as string, path: row.payload.path as string, deliveryProtocol: "gateway-v1" as const } };
-  if (row.kind === "queue_url") return { id: row.id, kind: "queue_url" as const, payload: { url: row.payload.url as string, destination: row.payload.destination as string, ...(typeof row.payload.preferredQualityLabel === "string" ? { preferredQualityLabel: row.payload.preferredQualityLabel } : {}), deliveryProtocol: "gateway-v1" as const } };
+  if (row.kind === "queue_url") return { id: row.id, kind: "queue_url" as const, payload: { url: row.payload.url as string, ...(typeof row.payload.title === "string" ? { title: row.payload.title } : {}), destination: row.payload.destination as string, ...(typeof row.payload.preferredQualityLabel === "string" ? { preferredQualityLabel: row.payload.preferredQualityLabel } : {}), deliveryProtocol: "gateway-v1" as const } };
   if (row.kind === "job_action") return { id: row.id, kind: "job_action" as const, payload: { jobID: row.payload.jobID as string, action: row.payload.action as "pause" | "resume" | "cancel" | "retry", deliveryProtocol: "gateway-v1" as const } };
   if (row.kind === "pornhub_auth_status" || row.kind === "pornhub_auth_login" || row.kind === "pornhub_auth_cancel" || row.kind === "pornhub_auth_logout") {
     return { id: row.id, kind: row.kind, payload: { deliveryProtocol: "gateway-v1" as const } };

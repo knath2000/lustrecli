@@ -100,6 +100,7 @@ export function WatchApp({
   canQueue = false,
   canAgentResolve = false,
   onQueue,
+  onQueueWatchlist,
   onAgentResolveFeed,
   onAgentResolveWatchlist,
   onTabChange,
@@ -109,6 +110,7 @@ export function WatchApp({
   canQueue?: boolean;
   canAgentResolve?: boolean;
   onQueue?: (item: FeedItem) => Promise<void>;
+  onQueueWatchlist?: (item: WatchlistItem) => Promise<void>;
   onAgentResolveFeed?: (item: FeedItem) => Promise<FeedPlaybackResolution>;
   onAgentResolveWatchlist?: (item: WatchlistItem) => Promise<FeedPlaybackResolution>;
   onTabChange?: (tab: Tab) => void;
@@ -205,6 +207,19 @@ export function WatchApp({
     }
   }
 
+  async function queueWatchlist(item: WatchlistItem) {
+    if (!onQueueWatchlist) return;
+    setQueueingSource(item.sourcePageURL);
+    try {
+      await onQueueWatchlist(item);
+      notify({ kind: "success", title: "Added to download queue", message: item.title });
+    } catch (reason) {
+      notify({ kind: "error", title: "Could not queue download", message: reason instanceof Error ? reason.message : "The paired Mac is unavailable." });
+    } finally {
+      setQueueingSource((current) => current === item.sourcePageURL ? "" : current);
+    }
+  }
+
   const itemKey = (item: FeedItem) => `${item.siteID}:${item.id}`;
   const selectedItems = page.items.filter((item) => selection.has(itemKey(item)));
   const selectedWatchItems = watchlist.filter((item) => watchSelection.has(item.id));
@@ -293,11 +308,13 @@ export function WatchApp({
   }
 
   async function downloadWatchlistSelected() {
-    if (!onQueue || !selectedWatchItems.length) return;
+    if (!onQueueWatchlist || !selectedWatchItems.length) return;
     setBatchAction("download");
     const targets = [...selectedWatchItems];
-    const feedItems = targets.map(watchlistFeedItem);
-    const results = await inBatches(feedItems, onQueue);
+    const results: Array<PromiseSettledResult<void>> = [];
+    for (let start = 0; start < targets.length; start += 3) {
+      results.push(...await Promise.allSettled(targets.slice(start, start + 3).map(onQueueWatchlist)));
+    }
     const failures = results.filter((result) => result.status === "rejected").length;
     setWatchSelection(new Set(targets.filter((_, index) => results[index]?.status === "rejected").map((item) => item.id)));
     notify({ kind: failures ? "warning" : "success", title: `${targets.length - failures} added to downloads`, message: failures ? `${failures} item${failures === 1 ? "" : "s"} remain selected for retry.` : "The paired Mac will process them in queue order." });
@@ -571,7 +588,7 @@ export function WatchApp({
         <button onClick={() => setWatchSelection(watchSelection.size === watchlist.length ? new Set() : new Set(watchlist.map((item) => item.id)))}>{watchSelection.size === watchlist.length && watchlist.length ? "Clear all" : "Select all"}</button>
         <span>{watchSelection.size ? `${watchSelection.size} selected` : "Select saved scenes for batch actions"}</span>
         <div>
-          <button disabled={!selectedWatchItems.length || !!batchAction || !canQueue} onClick={() => void downloadWatchlistSelected()}>{batchAction === "download" ? "Queueing…" : "↓ Download all"}</button>
+          <button disabled={!selectedWatchItems.length || !!batchAction || !canQueue || !onQueueWatchlist} onClick={() => void downloadWatchlistSelected()}>{batchAction === "download" ? "Queueing…" : "↓ Download all"}</button>
           <button disabled={!selectedWatchItems.length || !!batchAction || !canAgentResolve} onClick={() => void extractWatchlistSelected()}>{batchAction === "extract" ? "Extracting…" : "▶ Extract all"}</button>
           {watchSelection.size > 0 && <button onClick={() => setWatchSelection(new Set())}>Clear</button>}
         </div>
@@ -579,7 +596,7 @@ export function WatchApp({
       <motion.section layout className="watchlist">{watchlist.map((item) => <motion.article layout initial={{ opacity: 0, scale: reducedMotion ? 1 : .97 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: .94 }} className={`watch-row ${item.watched ? "watched" : ""} ${watchSelection.has(item.id) ? "selected" : ""}`} key={item.id}>
         <button className="watch-select" onClick={() => setWatchSelection((current) => { const next = new Set(current); if (next.has(item.id)) next.delete(item.id); else next.add(item.id); return next; })} aria-pressed={watchSelection.has(item.id)} aria-label={`${watchSelection.has(item.id) ? "Deselect" : "Select"} ${item.title}`}>{watchSelection.has(item.id) ? "✓" : ""}</button>
         <div className="watch-art">{item.thumbnailURL ? <AssetImage url={item.thumbnailURL} /> : <div className="placeholder">No preview</div>}<div className="card-scrim" />{item.watched && <div className="watched-badge"><span>✓</span> Watched</div>}<p className="provider">{item.provider}</p></div>
-        <div className="watch-content"><h2>{item.title}</h2><div className="actions"><button className="card-play" onClick={() => void resolve(item.sourcePageURL, item.title, item.thumbnailURL ?? undefined, onAgentResolveWatchlist ? () => onAgentResolveWatchlist(item) : undefined)}>▶ <span>Extract</span></button><button onClick={() => void copyValue(`source:${item.id}`, item.sourcePageURL, "Source URL")} aria-label={`Copy source URL for ${item.title}`}>{copied === `source:${item.id}` ? "Copied ✓" : "Copy source URL"}</button><button onClick={() => void toggleWatched(item)}>{item.watched ? "Mark unwatched" : "Mark watched"}</button><button className="danger" onClick={() => void removeWatchlist(item)}>Remove</button></div></div>
+        <div className="watch-content"><h2>{item.title}</h2><div className="actions"><button className="card-play" onClick={() => void resolve(item.sourcePageURL, item.title, item.thumbnailURL ?? undefined, onAgentResolveWatchlist ? () => onAgentResolveWatchlist(item) : undefined)}>▶ <span>Extract</span></button>{onQueueWatchlist && <button disabled={!canQueue || queueingSource === item.sourcePageURL} onClick={() => void queueWatchlist(item)}>↓ <span>{queueingSource === item.sourcePageURL ? "Queuing…" : "Download"}</span></button>}<button onClick={() => void copyValue(`source:${item.id}`, item.sourcePageURL, "Source URL")} aria-label={`Copy source URL for ${item.title}`}>{copied === `source:${item.id}` ? "Copied ✓" : "Copy source URL"}</button><button onClick={() => void toggleWatched(item)}>{item.watched ? "Mark unwatched" : "Mark watched"}</button><button className="danger" onClick={() => void removeWatchlist(item)}>Remove</button></div></div>
       </motion.article>)}</motion.section>
       {!watchlist.length && <div className="empty">Your void is empty. Save a scene from the Feed to begin.</div>}
     </>}

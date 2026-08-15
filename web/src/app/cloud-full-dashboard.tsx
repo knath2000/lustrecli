@@ -406,6 +406,16 @@ async function agentRequest<T>(
     target = `${base}/commands`;
     body = { kind: "watchlist_resolve", watchlistID: input.watchlistID };
   }
+  if (path === "/v1/watchlist/queue" && options.method === "POST") {
+    const input = JSON.parse(String(options.body ?? "{}"));
+    target = `${base}/commands`;
+    body = {
+      kind: "watchlist_queue",
+      watchlistID: input.watchlistID,
+      requestID: input.requestID,
+      destination: "local",
+    };
+  }
   if (path === "/v1/destinations") {
     target = `${base}/commands`;
     body = { kind: "destinations_list" };
@@ -1301,6 +1311,16 @@ export function CloudFullDashboard({
     await queueFeedItem(item as FeedItem, "local", crypto.randomUUID());
     if (token) await refresh(token, true);
   }, [queueFeedItem, refresh, token]);
+  const queueWatchlistItem = useCallback(async (item: WatchlistEntry) => {
+    await agentRequest<DownloadJob>(token, "/v1/watchlist/queue", {
+      method: "POST",
+      body: JSON.stringify({
+        watchlistID: item.id,
+        requestID: crypto.randomUUID(),
+      }),
+    });
+    if (token) await refresh(token, true);
+  }, [refresh, token]);
   const loadFeedAsset = useCallback(async (url: string, kind: "image" | "video") => {
     if (!token || !feedMediaEnabled) throw new Error("Feed media is unavailable.");
     const ticketResponse = await fetch(`/api/cloud/v1/devices/${token}/feed-assets/ticket`, {
@@ -1343,7 +1363,7 @@ export function CloudFullDashboard({
         {activeNav === "Devices" ? (
           <DevicesView />
         ) : feedEnabled && activeNav === "Feed" ? (
-          <WatchApp activeTab="feed" canQueue={connected && feedQueueEnabled} canAgentResolve={connected} onQueue={queueWatchItem} onAgentResolveFeed={resolveFeedItem} onAgentResolveWatchlist={resolveWatchlistItem} onTabChange={(tab) => setActiveNav(tab === "feed" ? "Feed" : "Watchlist")} onExit={() => setActiveNav("Home")} />
+          <WatchApp activeTab="feed" canQueue={connected && feedQueueEnabled} canAgentResolve={connected} onQueue={queueWatchItem} onQueueWatchlist={queueWatchlistItem} onAgentResolveFeed={resolveFeedItem} onAgentResolveWatchlist={resolveWatchlistItem} onTabChange={(tab) => setActiveNav(tab === "feed" ? "Feed" : "Watchlist")} onExit={() => setActiveNav("Home")} />
         ) : activeNav === "Downloads" ? (
           <DownloadsView
             jobs={jobs}
@@ -1370,7 +1390,7 @@ export function CloudFullDashboard({
             }}
           />
         ) : activeNav === "Watchlist" ? (
-          <WatchApp activeTab="watchlist" canQueue={connected && feedQueueEnabled} canAgentResolve={connected} onQueue={queueWatchItem} onAgentResolveFeed={resolveFeedItem} onAgentResolveWatchlist={resolveWatchlistItem} onTabChange={(tab) => setActiveNav(tab === "feed" ? "Feed" : "Watchlist")} onExit={() => setActiveNav("Home")} />
+          <WatchApp activeTab="watchlist" canQueue={connected && feedQueueEnabled} canAgentResolve={connected} onQueue={queueWatchItem} onQueueWatchlist={queueWatchlistItem} onAgentResolveFeed={resolveFeedItem} onAgentResolveWatchlist={resolveWatchlistItem} onTabChange={(tab) => setActiveNav(tab === "feed" ? "Feed" : "Watchlist")} onExit={() => setActiveNav("Home")} />
         ) : activeNav === "Destinations" ? (
           <DestinationsView
             destinations={destinations}
