@@ -12,6 +12,7 @@ export type JobLog = {
 export type DownloadJob = {
   id: string;
   sourcePageURL: string;
+  displayName?: string;
   preferredQualityLabel?: string;
   destination: string;
   status: JobStatus;

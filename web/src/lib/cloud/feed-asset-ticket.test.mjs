@@ -54,6 +54,24 @@ test("ticket handler enforces recent provenance and returns no-store", async () 
   await assert.rejects(handler(new Request("http://localhost", { method: "POST", body: JSON.stringify({ url: "https://cdn.hqporner.com/unlisted.jpg", kind: "image" }) }), deviceID));
 });
 
+test("ticket handler accepts an account-owned stored Watchlist thumbnail", async () => {
+  process.env.LUSTRE_FEED_ASSET_ORIGIN = "https://assets.example";
+  const calls = [];
+  const handler = createFeedAssetTicketHandler({
+    currentAccount: async () => ({ id: "account-1" }),
+    recentResults: async () => [],
+    storedImage: async (accountID, selectedDeviceID, url) => {
+      calls.push({ accountID, selectedDeviceID, url });
+      return url === thumbnailURL;
+    },
+    issueTicket: async () => ({ ticket: "signed", expiresAt: new Date("2026-07-26T12:01:00Z") }),
+  });
+  const response = await handler(new Request("http://localhost", { method: "POST", body: JSON.stringify({ url: thumbnailURL, kind: "image" }) }), deviceID);
+  assert.equal(response.status, 200);
+  assert.deepEqual(calls, [{ accountID: "account-1", selectedDeviceID: deviceID, url: thumbnailURL }]);
+  await assert.rejects(handler(new Request("http://localhost", { method: "POST", body: JSON.stringify({ url: videoURL, kind: "video" }) }), deviceID));
+});
+
 test("ticket handler propagates an unowned-device rejection", async () => {
   const handler = createFeedAssetTicketHandler({
     currentAccount: async () => ({ id: "account-1" }),

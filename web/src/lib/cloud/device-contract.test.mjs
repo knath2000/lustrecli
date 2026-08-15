@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { normalizeFeedPageCommand, normalizePairingCode, parseHeartbeatFrame, validDestinationsResult, validFeedPageResult, validateDisplayName } from "./device-contract.ts";
+import { normalizeFeedPageCommand, normalizePairingCode, parseHeartbeatFrame, validDestinationsResult, validFeedPageResult, validHomeWorkspaceResult, validLibraryResult, validLocalDownloadFolderResult, validateDisplayName } from "./device-contract.ts";
 
 test("pairing codes normalize grouped Crockford Base32", () => {
   assert.equal(normalizePairingCode("abcde-fghjk-mnpqr-stvwz"), "ABCDEFGHJKMNPQRSTVWZ");
@@ -55,4 +55,30 @@ test("destination results contain only bounded credential-free fields", () => {
   assert.equal(validDestinationsResult({ kind: "destinations_list", destinations: [{ ...destination, baseURL: "https://user:secret@dav.example.com" }] }), false);
   assert.equal(validDestinationsResult({ kind: "destinations_list", destinations: [{ ...destination, remotePath: "/safe/../secret" }] }), false);
   assert.equal(validDestinationsResult({ kind: "destinations_list", destinations: Array(65).fill(destination) }), false);
+  const drive = { id: destination.id, name: "Google Drive", kind: "google_drive", remoteName: "gdrive", remotePath: "/Lustre Uploads" };
+  assert.equal(validDestinationsResult({ kind: "destinations_list", destinations: [drive] }), true);
+  assert.equal(validDestinationsResult({ kind: "destinations_list", destinations: [{ ...drive, token: "secret" }] }), false);
+  assert.equal(validDestinationsResult({ kind: "destinations_list", destinations: [{ ...drive, remoteName: "../unsafe" }] }), false);
+});
+
+test("local folder status accepts a display name but rejects paths", () => {
+  assert.equal(validLocalDownloadFolderResult({ kind: "local_download_folder", localDownloadFolder: { mode: "custom", folderName: "Videos" } }), true);
+  assert.equal(validLocalDownloadFolderResult({ kind: "local_download_folder", localDownloadFolder: { mode: "custom", folderName: "Videos", path: "/Volumes/Private" } }), false);
+});
+
+test("home preview results enforce sanitized bounded fields", () => {
+  const item = { sourcePageURL: "https://pmvhaven.com/video/example", state: "resolved", title: "Example", thumbnailURL: "https://cdn.example.com/thumb.jpg", provider: "PMVHaven", qualities: [{ label: "2160p", mediaKind: "direct" }], errorCode: null };
+  const result = { kind: "extract_preview", homePreview: [item] };
+  assert.equal(validHomeWorkspaceResult(result), true);
+  assert.equal(validHomeWorkspaceResult({ ...result, homePreview: [{ ...item, mediaURL: "https://cdn.example.com/video.mp4" }] }), false);
+  assert.equal(validHomeWorkspaceResult({ ...result, homePreview: [{ ...item, qualities: Array(21).fill(item.qualities[0]) }] }), false);
+  assert.equal(validHomeWorkspaceResult({ kind: "home_status", homeReadiness: { ytDlp: true, ffmpeg: false, browserBridge: true } }), true);
+});
+
+test("library results reject paths and private thumbnails", () => {
+  const item = { id: "f8ca8705-69c4-4c73-81fb-7bb1dc5c1853", kind: "video", sourcePageURL: "https://pmvhaven.com/video/example", title: "Example", provider: "pmvhaven.com", timestamp: "2026-08-02T12:00:00Z", tags: [], favorite: false, duplicateKey: "pmvhaven|example", mediaKind: "video", pipeline: [{ destination: "Local Downloads", state: "succeeded", updatedAt: "2026-08-02T12:00:00Z" }] };
+  const result = { kind: "library_snapshot", library: { revision: 1, page: 1, hasMore: false, items: [item] } };
+  assert.equal(validLibraryResult(result), true);
+  assert.equal(validLibraryResult({ ...result, library: { ...result.library, items: [{ ...item, remotePath: "/secret" }] } }), false);
+  assert.equal(validLibraryResult({ ...result, library: { ...result.library, items: [{ ...item, thumbnailURL: "https://192.168.1.4/thumb.jpg" }] } }), false);
 });

@@ -6,13 +6,16 @@ import { eq } from "drizzle-orm";
 
 export type CurrentAccount = { id: string; authSubject: string; emailVerified: boolean };
 
-export async function getCurrentAccount(): Promise<CurrentAccount | null> {
+export async function getCurrentAccount(requireVerifiedEmail = false): Promise<CurrentAccount | null> {
   let session;
   try { session = await auth(); } catch { console.error("cloud_current_account_failure", { stage: "clerk_session" }); throw new Error("current_account_unavailable"); }
   if (!session.isAuthenticated || !session.userId) return null;
-  let user;
-  try { user = await currentUser(); } catch { console.error("cloud_current_account_failure", { stage: "clerk_user" }); throw new Error("current_account_unavailable"); }
-  const verified = user?.emailAddresses.some((email) => email.id === user.primaryEmailAddressId && email.verification?.status === "verified") ?? false;
+  let verified = false;
+  if (requireVerifiedEmail) {
+    let user;
+    try { user = await currentUser(); } catch { console.error("cloud_current_account_failure", { stage: "clerk_user" }); throw new Error("current_account_unavailable"); }
+    verified = user?.emailAddresses.some((email) => email.id === user.primaryEmailAddressId && email.verification?.status === "verified") ?? false;
+  }
   let account;
   try {
     const existing = await db.select().from(lustreAccounts).where(eq(lustreAccounts.authSubject, session.userId)).limit(1);
@@ -22,7 +25,7 @@ export async function getCurrentAccount(): Promise<CurrentAccount | null> {
 }
 
 export async function requireCurrentAccount(requireVerifiedEmail = false): Promise<CurrentAccount> {
-  const account = await getCurrentAccount();
+  const account = await getCurrentAccount(requireVerifiedEmail);
   if (!account) throw new Error("unauthenticated");
   if (requireVerifiedEmail && !account.emailVerified) throw new Error("email_unverified");
   return account;

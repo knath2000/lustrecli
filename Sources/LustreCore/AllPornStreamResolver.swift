@@ -108,6 +108,10 @@ public struct AllPornStreamResolver: Sendable {
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.9"
         ])
+        if isCloudflareChallenge(page) { throw ProviderResolverError.cloudflareChallenge }
+        guard (200...299).contains(page.statusCode) else {
+            throw ProviderResolverError.network("Provider returned HTTP \(page.statusCode).")
+        }
         let metadata = Self.parseMetadata(from: page.body, relativeTo: page.finalURL)
         let results = await resolveCandidates(metadata.candidates)
         let attempts = results.map(\.attempt)

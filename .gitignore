@@ -5,3 +5,9 @@
 gateway/.dev.vars
 gateway/.wrangler/
 gateway/node_modules/
+.hermes/
+.playwright-mcp/
+.DS_Store
+watch-cloud/node_modules/
+watch-cloud/services/resolver/dist/
+watch-cloud/services/assets-worker/.wrangler/

@@ -21,6 +21,7 @@ export type FeedItem = {
   viewCount: number;
   studio?: string;
   queueCapability: "supported";
+  downloadedAt?: string | number;
 };
 
 export type FeedPage = { items: FeedItem[]; page: number; hasMore: boolean };
@@ -58,13 +59,28 @@ export function feedUsesAuthenticatedAssetProxy(siteID: FeedSiteID): boolean {
 }
 
 export function feedPreviewDelay(hovered: boolean, frameCount: number): number | null {
-  return hovered && frameCount > 1 ? 800 : null;
+  return hovered && frameCount > 1 ? 2_000 : null;
 }
 
 export function toggleFeedSelection(selection: Set<string>, id: string): Set<string> {
   const next = new Set(selection);
   if (next.has(id)) next.delete(id);
   else next.add(id);
+  return next;
+}
+
+export function feedSelectionKey(item: Pick<FeedItem, "siteID" | "id">): string {
+  return JSON.stringify([item.siteID, item.id]);
+}
+
+export function toggleFeedItemSelection<T extends Pick<FeedItem, "siteID" | "id">>(
+  selection: Map<string, T>,
+  item: T,
+): Map<string, T> {
+  const next = new Map(selection);
+  const key = feedSelectionKey(item);
+  if (next.has(key)) next.delete(key);
+  else next.set(key, item);
   return next;
 }
 

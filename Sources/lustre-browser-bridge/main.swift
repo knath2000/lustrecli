@@ -6,7 +6,7 @@ import LustreAgent
 struct LustreBrowserBridge {
     static func main() {
         guard CommandLine.arguments.count == 2,
-              CommandLine.arguments[1] == BrowserCaptureConstants.extensionOrigin,
+              [BrowserCaptureConstants.extensionOrigin, BrowserCaptureConstants.firefoxExtensionID].contains(CommandLine.arguments[1]),
               let message = readNativeMessage(),
               message.count <= BrowserCaptureConstants.maximumMessageBytes
         else { exit(1) }

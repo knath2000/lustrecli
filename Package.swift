@@ -15,7 +15,10 @@ let package = Package(
     targets: [
         .systemLibrary(name: "CSQLite", pkgConfig: "sqlite3"),
         .target(name: "LustreCore", dependencies: ["CSQLite"]),
-        .target(name: "LustreAgent", dependencies: ["LustreCore"], resources: [.copy("Resources/ChromeExtension")]),
+        .target(name: "LustreAgent", dependencies: ["LustreCore"], resources: [
+            .copy("Resources/ChromeExtension"),
+            .copy("Resources/FirefoxManifest.json")
+        ]),
         .executableTarget(name: "lustre-agent", dependencies: ["LustreAgent"]),
         .executableTarget(name: "lustre-browser-bridge", dependencies: ["LustreAgent"]),
         .executableTarget(name: "lustre-auth-helper", dependencies: ["LustreAgent"]),

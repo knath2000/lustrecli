@@ -12,12 +12,22 @@ const tokenPrefix = "lustre.";
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const JOB_STATUSES = new Set(["queued", "running", "paused", "completed", "failed", "cancelled", "verificationRequired"]);
 const JOB_PHASES = new Set(["resolving", "downloading", "materializing", "postProcessing", "uploading", "verifying"]);
-const ACKNOWLEDGEMENT_CODES = new Set(["provider_verification_required", "provider_http_error", "provider_unreachable", "provider_changed", "authentication_required", "browser_extension_required", "result_too_large", "invalid_request"]);
+const ACKNOWLEDGEMENT_CODES = new Set(["provider_verification_required", "provider_http_error", "provider_unreachable", "provider_changed", "authentication_required", "browser_extension_required", "result_too_large", "invalid_request", "signed_out", "signing_in", "cancelled", "expired", "auth_helper_unavailable", "auth_helper_failed", "auth_timeout", "invalid_session", "auth_storage_unavailable"]);
+const AUTH_STATES = new Set(["signedOut", "signingIn", "signedIn", "expired"]);
 
 function isRecord(value: unknown): value is Record<string, unknown> { return !!value && typeof value === "object" && !Array.isArray(value); }
 function isUUID(value: unknown): value is string { return typeof value === "string" && UUID_PATTERN.test(value); }
 function isBoundedString(value: unknown, maximum: number): value is string { return typeof value === "string" && value.trim().length > 0 && Array.from(value).length <= maximum; }
 function isNonNegativeInteger(value: unknown): value is number { return Number.isSafeInteger(value) && (value as number) >= 0; }
+function validPornHubAuthAcknowledgement(value: Record<string, unknown>) {
+  if (!isRecord(value.result) || value.result.kind !== "pornhub_auth" || !isRecord(value.result.pornHubAuth)) return false;
+  if (Object.keys(value.result).some((key) => !["kind", "pornHubAuth"].includes(key))) return false;
+  const status = value.result.pornHubAuth;
+  return Object.keys(status).every((key) => ["state", "lastValidatedAt", "code"].includes(key))
+    && typeof status.state === "string" && AUTH_STATES.has(status.state)
+    && (status.lastValidatedAt === undefined || (typeof status.lastValidatedAt === "string" && !Number.isNaN(Date.parse(status.lastValidatedAt))))
+    && (status.code === undefined || (typeof status.code === "string" && ACKNOWLEDGEMENT_CODES.has(status.code)));
+}
 function heartbeatSchema(value: Record<string, unknown>): { acknowledgementCount: number; jobCount: number } | null {
   if (typeof value.sentAt !== "string" || Number.isNaN(Date.parse(value.sentAt)) || !isBoundedString(value.agentVersion, 80) || !isBoundedString(value.correlationID, 64)) return null;
   if (!Array.isArray(value.commandAcks) || value.commandAcks.length > 8 || !Array.isArray(value.jobs) || value.jobs.length > 50) return null;
@@ -26,6 +36,12 @@ function heartbeatSchema(value: Record<string, unknown>): { acknowledgementCount
     if (acknowledgement.status === "failed" && acknowledgement.result !== undefined) return null;
     if (acknowledgement.status === "completed" && isRecord(acknowledgement.result) && acknowledgement.result.kind === "feed_page" && !validFeedPageAcknowledgement(acknowledgement)) return null;
     if (acknowledgement.status === "completed" && isRecord(acknowledgement.result) && acknowledgement.result.kind === "destinations_list" && !validDestinationsAcknowledgement(acknowledgement)) return null;
+    if (acknowledgement.status === "completed" && isRecord(acknowledgement.result) && acknowledgement.result.kind === "google_drive_folders" && !validGoogleDriveFoldersAcknowledgement(acknowledgement)) return null;
+    if (acknowledgement.status === "completed" && isRecord(acknowledgement.result) && acknowledgement.result.kind === "local_download_folder" && !validLocalDownloadFolderAcknowledgement(acknowledgement)) return null;
+    if (acknowledgement.status === "completed" && isRecord(acknowledgement.result) && acknowledgement.result.kind === "pornhub_auth" && !validPornHubAuthAcknowledgement(acknowledgement)) return null;
+    if (acknowledgement.status === "completed" && isRecord(acknowledgement.result) && ["home_status", "extract_preview"].includes(acknowledgement.result.kind as string) && !validHomeWorkspaceAcknowledgement(acknowledgement)) return null;
+    if (acknowledgement.status === "completed" && isRecord(acknowledgement.result) && acknowledgement.result.kind === "feed_resolve" && !validFeedResolveAcknowledgement(acknowledgement)) return null;
+    if (acknowledgement.status === "completed" && isRecord(acknowledgement.result) && acknowledgement.result.kind === "library_snapshot" && !validLibraryAcknowledgement(acknowledgement)) return null;
   }
   for (const job of value.jobs) {
     if (!isRecord(job) || !isUUID(job.id) || typeof job.status !== "string" || !JOB_STATUSES.has(job.status) || !isNonNegativeInteger(job.attempts)) return null;
@@ -71,7 +87,7 @@ async function deviceClaims(token: string, env: Env): Promise<DeviceClaims> {
 }
 
 export class DeviceConnection extends DurableObject<Env> {
-  private readonly pendingAttachments = new Map<WebSocket, { deviceID: string; connectionID: string; connectedAt: string; protocolVersion: 1; lastSequence: number; connectionKind: "realtime" | "smoke"; commandDeliveryV1: boolean; feedPageV1: boolean; destinationsListV1: boolean; feedQueueV1: boolean; commandWakeV1: boolean }>();
+  private readonly pendingAttachments = new Map<WebSocket, { deviceID: string; connectionID: string; connectedAt: string; protocolVersion: 1; lastSequence: number; connectionKind: "realtime" | "smoke"; commandDeliveryV1: boolean; feedPageV1: boolean; destinationsListV1: boolean; feedQueueV1: boolean; commandWakeV1: boolean; pornHubAuthV1: boolean; homeWorkspaceV1: boolean; libraryV1: boolean }>();
 
   async fetch(request: Request) {
     if (request.method === "POST" && new URL(request.url).pathname === "/control/command-wake") {
@@ -104,7 +120,7 @@ export class DeviceConnection extends DurableObject<Env> {
     const [client, server] = Object.values(pair);
     this.ctx.acceptWebSocket(server);
     await this.ctx.storage.put("stage", "do_socket_accepted");
-    this.pendingAttachments.set(server, { deviceID, connectionID, connectedAt: new Date().toISOString(), protocolVersion: 1, lastSequence: 0, connectionKind: smoke ? "smoke" : "realtime", commandDeliveryV1: false, feedPageV1: false, destinationsListV1: false, feedQueueV1: false, commandWakeV1: false });
+    this.pendingAttachments.set(server, { deviceID, connectionID, connectedAt: new Date().toISOString(), protocolVersion: 1, lastSequence: 0, connectionKind: smoke ? "smoke" : "realtime", commandDeliveryV1: false, feedPageV1: false, destinationsListV1: false, feedQueueV1: false, commandWakeV1: false, pornHubAuthV1: false, homeWorkspaceV1: false, libraryV1: false });
     if (smoke) return new Response(null, { status: 101, headers: { "Sec-WebSocket-Protocol": "lustre-v1" }, webSocket: client });
     return new Response(null, { status: 101, headers: { "Sec-WebSocket-Protocol": "lustre-v1" }, webSocket: client });
   }
@@ -202,6 +218,9 @@ export class DeviceConnection extends DurableObject<Env> {
       const destinationsListV1 = connection.destinationsListV1 === true;
       const feedQueueV1 = connection.feedQueueV1 === true;
       const commandWakeV1 = connection.commandWakeV1 === true;
+      const pornHubAuthV1 = connection.pornHubAuthV1 === true;
+      const homeWorkspaceV1 = connection.homeWorkspaceV1 === true;
+      const libraryV1 = connection.libraryV1 === true;
       const previousSequence = lastSequence === undefined ? 0 : lastSequence as number;
       const attachmentRecord = { stage: "heartbeat_attachment_restored", connectionID: connection.connectionID, protocolVersion: connection.protocolVersion, sequence };
       await this.ctx.storage.put("lastBinarySmoke", attachmentRecord);
@@ -226,6 +245,9 @@ export class DeviceConnection extends DurableObject<Env> {
         destinationsListV1,
         feedQueueV1,
         commandWakeV1,
+        pornHubAuthV1,
+        homeWorkspaceV1,
+        libraryV1,
       });
       const acceptedRecord = { stage: "heartbeat_sequence_accepted", ...sequenceRecord };
       await this.ctx.storage.put("lastBinarySmoke", acceptedRecord);
@@ -241,6 +263,9 @@ export class DeviceConnection extends DurableObject<Env> {
           feedPageV1,
           destinationsListV1,
           feedQueueV1,
+          pornHubAuthV1,
+          homeWorkspaceV1,
+          libraryV1,
         );
         if (commandDeliveryV1) webSocket.send(JSON.stringify(delivery));
       }
@@ -257,8 +282,11 @@ export class DeviceConnection extends DurableObject<Env> {
       const destinationsListV1 = negotiatedDestinationsList(frame as Record<string, unknown>, attachment?.connectionKind === "realtime");
       const feedQueueV1 = negotiatedFeedQueue(frame as Record<string, unknown>, attachment?.connectionKind === "realtime");
       const commandWakeV1 = negotiatedCommandWake(frame as Record<string, unknown>, attachment?.connectionKind === "realtime");
-      webSocket.send(JSON.stringify({ version: 1, type: "gateway_hello_ack", capabilities: [...(commandDeliveryV1 ? [commandDeliveryCapability] : []), ...(feedPageV1 ? [feedPageCapability] : []), ...(destinationsListV1 ? [destinationsListCapability] : []), ...(feedQueueV1 ? [feedQueueCapability] : []), ...(commandWakeV1 ? [commandWakeCapability] : [])] }));
-      if (attachment) { webSocket.serializeAttachment({ ...attachment, commandDeliveryV1, feedPageV1, destinationsListV1, feedQueueV1, commandWakeV1 }); this.pendingAttachments.delete(webSocket); }
+      const pornHubAuthV1 = negotiatedPornHubAuth(frame as Record<string, unknown>, attachment?.connectionKind === "realtime");
+      const homeWorkspaceV1 = negotiatedHomeWorkspace(frame as Record<string, unknown>, attachment?.connectionKind === "realtime");
+      const libraryV1 = negotiatedLibrary(frame as Record<string, unknown>, attachment?.connectionKind === "realtime");
+      webSocket.send(JSON.stringify({ version: 1, type: "gateway_hello_ack", capabilities: [...(commandDeliveryV1 ? [commandDeliveryCapability] : []), ...(feedPageV1 ? [feedPageCapability] : []), ...(destinationsListV1 ? [destinationsListCapability] : []), ...(feedQueueV1 ? [feedQueueCapability] : []), ...(commandWakeV1 ? [commandWakeCapability] : []), ...(pornHubAuthV1 ? [pornHubAuthCapability] : []), ...(homeWorkspaceV1 ? [homeWorkspaceCapability] : []), ...(libraryV1 ? [libraryCapability] : [])] }));
+      if (attachment) { webSocket.serializeAttachment({ ...attachment, commandDeliveryV1, feedPageV1, destinationsListV1, feedQueueV1, commandWakeV1, pornHubAuthV1, homeWorkspaceV1, libraryV1 }); this.pendingAttachments.delete(webSocket); }
       await this.ctx.storage.put("stage", "do_hello_acked");
       return;
     }
@@ -274,7 +302,7 @@ export class DeviceConnection extends DurableObject<Env> {
     webSocket.send(JSON.stringify({ version: 1, type: "heartbeat-accepted", sequence: frame.sequence, command: null, acknowledgedCommandAcks: [] }));
   }
 
-  private async relayHeartbeat(deviceID: string, connectionID: string, connectedAt: string, frame: Record<string, unknown>, commandDeliveryV1: boolean, feedPageV1: boolean, destinationsListV1: boolean, feedQueueV1: boolean) {
+  private async relayHeartbeat(deviceID: string, connectionID: string, connectedAt: string, frame: Record<string, unknown>, commandDeliveryV1: boolean, feedPageV1: boolean, destinationsListV1: boolean, feedQueueV1: boolean, pornHubAuthV1: boolean, homeWorkspaceV1: boolean, libraryV1: boolean) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 5_000);
     let acknowledgedCommandAckIDs: string[] = [];
@@ -298,12 +326,12 @@ export class DeviceConnection extends DurableObject<Env> {
       const commandResponse = await fetch(new URL("/api/cloud/v1/gateway/commands/next", this.env.CONTROL_PLANE_ORIGIN), {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-Lustre-Gateway-Relay-Secret": this.env.LUSTRE_GATEWAY_RELAY_SECRET },
-        body: JSON.stringify({ deviceID, connectionID, sequence: frame.sequence, correlationID: frame.correlationID, allowFeedPage: feedPageV1, allowDestinationsList: destinationsListV1, allowFeedQueue: feedQueueV1 }),
+        body: JSON.stringify({ deviceID, connectionID, sequence: frame.sequence, correlationID: frame.correlationID, allowFeedPage: feedPageV1, allowDestinationsList: destinationsListV1, allowFeedQueue: feedQueueV1, allowPornHubAuth: pornHubAuthV1, allowHomeWorkspace: homeWorkspaceV1, allowLibrary: libraryV1 }),
         signal: controller.signal,
       });
       if (!commandResponse.ok) throw new Error(`http_${commandResponse.status}`);
       const selected: unknown = await commandResponse.json();
-      const command = selectedGatewayCommand(selected, frame.sequence as number, frame.correlationID as string, feedPageV1, destinationsListV1, feedQueueV1);
+      const command = selectedGatewayCommand(selected, frame.sequence as number, frame.correlationID as string, feedPageV1, destinationsListV1, feedQueueV1, pornHubAuthV1, homeWorkspaceV1, libraryV1);
       if (command === undefined) throw new Error("invalid_response");
       return commandDeliveryFrame({
         sequence: frame.sequence as number,
@@ -373,4 +401,4 @@ export default {
   },
 } satisfies ExportedHandler<Env>;
 import { DurableObject } from "cloudflare:workers";
-import { commandDeliveryCapability, commandDeliveryFrame, commandWakeCapability, destinationsListCapability, feedPageCapability, feedQueueCapability, negotiatedCommandDelivery, negotiatedCommandWake, negotiatedDestinationsList, negotiatedFeedPage, negotiatedFeedQueue, selectedGatewayCommand, validDestinationsAcknowledgement, validFeedPageAcknowledgement, validPersistenceResponse } from "./protocol";
+import { commandDeliveryCapability, commandDeliveryFrame, commandWakeCapability, destinationsListCapability, feedPageCapability, feedQueueCapability, homeWorkspaceCapability, libraryCapability, negotiatedCommandDelivery, negotiatedCommandWake, negotiatedDestinationsList, negotiatedFeedPage, negotiatedFeedQueue, negotiatedHomeWorkspace, negotiatedLibrary, negotiatedPornHubAuth, pornHubAuthCapability, selectedGatewayCommand, validDestinationsAcknowledgement, validFeedPageAcknowledgement, validFeedResolveAcknowledgement, validGoogleDriveFoldersAcknowledgement, validHomeWorkspaceAcknowledgement, validLibraryAcknowledgement, validLocalDownloadFolderAcknowledgement, validPersistenceResponse } from "./protocol";

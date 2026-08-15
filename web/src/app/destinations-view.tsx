@@ -1,20 +1,24 @@
 "use client";
 
-import { FormEvent, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 import { destinationSecurityLabel, destinationUsageCounts, safeDestinationHost } from "@/lib/destination-model";
 
 export type DestinationProfile = {
   id: string;
   name: string;
-  baseURL: string;
-  username: string;
+  kind?: "webdav" | "google_drive";
+  baseURL?: string;
+  username?: string;
   remotePath: string;
-  allowInvalidCertificate: boolean;
+  allowInvalidCertificate?: boolean;
+  remoteName?: string;
 };
 
 type DestinationJob = { destination: string };
-type DestinationInput = Omit<DestinationProfile, "id"> & { password: string };
+type DestinationInput = { name: string; baseURL: string; username: string; remotePath: string; allowInvalidCertificate: boolean; password: string };
+export type GoogleDriveFolder = { name: string; path: string };
 type TestState = { kind: "testing" | "success" | "error"; message: string };
+type LocalDownloadFolder = { mode: "default" | "custom"; folderName: string };
 
 type DestinationsViewProps = {
   destinations: DestinationProfile[];
@@ -23,6 +27,13 @@ type DestinationsViewProps = {
   onSave: (input: DestinationInput) => Promise<void>;
   onTest: (id: string) => Promise<string>;
   onDelete: (id: string) => Promise<void>;
+  onConnectGoogleDrive?: () => Promise<void>;
+  onLoadGoogleDriveFolders?: (id: string, path: string) => Promise<GoogleDriveFolder[]>;
+  onSelectGoogleDriveFolder?: (id: string, path: string) => Promise<void>;
+  onCreateGoogleDriveFolder?: (id: string, path: string) => Promise<void>;
+  onLoadLocalDownloadFolder?: () => Promise<LocalDownloadFolder>;
+  onChooseLocalDownloadFolder?: () => Promise<LocalDownloadFolder>;
+  onResetLocalDownloadFolder?: () => Promise<LocalDownloadFolder>;
 };
 
 function ServerGlyph() {
@@ -33,13 +44,24 @@ function FolderGlyph() {
   return <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden><path d="M3.5 7.5h6l2 2h9V18a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2Z" /><path d="M3.5 7.5V6a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2v1.5" /></svg>;
 }
 
-export function DestinationsView({ destinations, jobs, error, onSave, onTest, onDelete }: DestinationsViewProps) {
+export function DestinationsView({ destinations, jobs, error, onSave, onTest, onDelete, onConnectGoogleDrive, onLoadGoogleDriveFolders, onSelectGoogleDriveFolder, onCreateGoogleDriveFolder, onLoadLocalDownloadFolder, onChooseLocalDownloadFolder, onResetLocalDownloadFolder }: DestinationsViewProps) {
   const [showForm, setShowForm] = useState(false);
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [tests, setTests] = useState<Record<string, TestState>>({});
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [connectingDrive, setConnectingDrive] = useState(false);
+  const [driveBrowser, setDriveBrowser] = useState<{ profile: DestinationProfile; path: string; folders: GoogleDriveFolder[]; loading: boolean } | null>(null);
+  const [localFolder, setLocalFolder] = useState<LocalDownloadFolder | null>(null);
+  const [changingLocalFolder, setChangingLocalFolder] = useState(false);
   const usage = useMemo(() => destinationUsageCounts(jobs), [jobs]);
+
+  useEffect(() => {
+    if (!onLoadLocalDownloadFolder) return;
+    let active = true;
+    void onLoadLocalDownloadFolder().then((status) => { if (active) setLocalFolder(status); }).catch(() => {});
+    return () => { active = false; };
+  }, [onLoadLocalDownloadFolder]);
 
   const save = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -86,35 +108,66 @@ export function DestinationsView({ destinations, jobs, error, onSave, onTest, on
     finally { setDeletingId(null); }
   };
 
+  const connectDrive = async () => {
+    setConnectingDrive(true);
+    setFormError(null);
+    try {
+      if (!onConnectGoogleDrive) throw new Error("Google Drive setup is unavailable.");
+      await onConnectGoogleDrive();
+    }
+    catch (reason) { setFormError(reason instanceof Error ? reason.message : "Unable to connect Google Drive."); }
+    finally { setConnectingDrive(false); }
+  };
+
+  const openDriveFolder = async (profile: DestinationProfile, path = profile.remotePath) => {
+    setDriveBrowser({ profile, path, folders: [], loading: true });
+    try {
+      if (!onLoadGoogleDriveFolders) throw new Error("Google Drive folder browsing is unavailable.");
+      const folders = await onLoadGoogleDriveFolders(profile.id, path);
+      setDriveBrowser({ profile, path, folders, loading: false });
+    } catch (reason) {
+      setDriveBrowser(null);
+      setTests((current) => ({ ...current, [profile.id]: { kind: "error", message: reason instanceof Error ? reason.message : "Unable to browse Google Drive." } }));
+    }
+  };
+
   return <div className="destinations-page">
     <header className="destinations-header">
       <div><p className="eyebrow">Transfer endpoints</p><h2>Destinations</h2><p>Control where the local Lustre agent writes completed media.</p></div>
-      <button className="queue-button" onClick={() => setShowForm(true)}>＋ Add WebDAV</button>
+      <div className="destination-header-actions">{onConnectGoogleDrive && <button className="secondary-button" disabled={connectingDrive} onClick={() => void connectDrive()}>{connectingDrive ? "Connecting…" : "Connect Google Drive"}</button>}<button className="queue-button" onClick={() => setShowForm(true)}>＋ Add WebDAV</button></div>
     </header>
 
     <section className="destination-summary" aria-label="Destination summary">
       <div><span>Available targets</span><strong>{destinations.length + 1}</strong></div>
       <div><span>Remote profiles</span><strong>{destinations.length}</strong></div>
-      <div><span>Remote jobs</span><strong>{jobs.filter((job) => /^webdav:/i.test(job.destination)).length}</strong></div>
+      <div><span>Remote jobs</span><strong>{jobs.filter((job) => /^(webdav|gdrive):/i.test(job.destination)).length}</strong></div>
       <p><i /> Credentials stay in the macOS Keychain</p>
     </section>
 
     {error && <p className="inline-error destinations-error" role="alert">{error}</p>}
+    {formError && !showForm && <p className="inline-error destinations-error" role="alert">{formError}</p>}
 
     <section className="destination-grid" aria-label="Saved destinations">
       <article className="destination-card local-destination glass-panel">
         <header><span className="destination-icon"><FolderGlyph /></span><div><p className="eyebrow">Built-in target</p><h3>Local Downloads</h3></div><span className="destination-kind">Local</span></header>
-        <p className="destination-description">Files remain on this Mac under Lustre’s managed Downloads folder.</p>
-        <dl><div><dt>Location</dt><dd>~/Downloads/Lustre</dd></div><div><dt>Security</dt><dd>On-device filesystem</dd></div><div><dt>Used by</dt><dd>{usage.local ?? 0} job{(usage.local ?? 0) === 1 ? "" : "s"}</dd></div></dl>
-        <footer><span className="destination-health ready"><i /> Always available</span><span className="managed-label">Managed by agent</span></footer>
+        <p className="destination-description">Choose the folder on the paired Mac. Its full filesystem path never leaves the Mac.</p>
+        <dl><div><dt>Location</dt><dd>{localFolder ? `${localFolder.folderName}${localFolder.mode === "custom" ? " (custom)" : ""}` : "Loading from paired Mac…"}</dd></div><div><dt>Security</dt><dd>On-device filesystem</dd></div><div><dt>Used by</dt><dd>{usage.local ?? 0} job{(usage.local ?? 0) === 1 ? "" : "s"}</dd></div></dl>
+        <footer><span className="destination-health ready"><i /> Available on paired Mac</span><div><button className="destination-test" disabled={changingLocalFolder || !onChooseLocalDownloadFolder} onClick={async () => { if (!onChooseLocalDownloadFolder) return; setChangingLocalFolder(true); setFormError(null); try { setLocalFolder(await onChooseLocalDownloadFolder()); } catch (reason) { setFormError(reason instanceof Error ? reason.message : "Unable to change the local folder."); } finally { setChangingLocalFolder(false); } }}>{changingLocalFolder ? "Waiting on Mac…" : "Choose folder"}</button>{localFolder?.mode === "custom" && <button className="destination-test" disabled={changingLocalFolder || !onResetLocalDownloadFolder} onClick={async () => { if (!onResetLocalDownloadFolder) return; setChangingLocalFolder(true); try { setLocalFolder(await onResetLocalDownloadFolder()); } catch (reason) { setFormError(reason instanceof Error ? reason.message : "Unable to reset the local folder."); } finally { setChangingLocalFolder(false); } }}>Use default</button>}</div></footer>
       </article>
 
       {destinations.map((profile) => {
         const state = tests[profile.id];
+        if (profile.kind === "google_drive") return <article className="destination-card glass-panel" key={profile.id}>
+          <header><span className="destination-icon remote"><FolderGlyph /></span><div><p className="eyebrow">Google Drive</p><h3>{profile.name}</h3></div><span className="destination-kind">Cloud</span></header>
+          <p className="destination-description">Connected locally through {profile.remoteName ?? "rclone"} on the paired Mac.</p>
+          <dl><div><dt>Upload folder</dt><dd>{profile.remotePath}</dd></div><div><dt>Credentials</dt><dd>Stored by rclone on Mac</dd></div><div><dt>Used by</dt><dd>{usage[profile.id.toLowerCase()] ?? 0} job{(usage[profile.id.toLowerCase()] ?? 0) === 1 ? "" : "s"}</dd></div></dl>
+          {state && <p className={`destination-test-result ${state.kind}`} role="status"><i />{state.message}</p>}
+          <footer><button className="destination-test" onClick={() => void openDriveFolder(profile)}>Choose folder</button><button className="destination-test" disabled={state?.kind === "testing"} onClick={() => void test(profile)}>{state?.kind === "testing" ? "Testing…" : "Test"}</button></footer>
+        </article>;
         return <article className="destination-card glass-panel" key={profile.id}>
           <header><span className="destination-icon remote"><ServerGlyph /></span><div><p className="eyebrow">WebDAV profile</p><h3>{profile.name}</h3></div><span className="destination-kind">Remote</span></header>
-          <p className="destination-description">{safeDestinationHost(profile.baseURL)}</p>
-          <dl><div><dt>Remote path</dt><dd>{profile.remotePath}</dd></div><div><dt>Username</dt><dd>{profile.username}</dd></div><div><dt>Security</dt><dd className={profile.allowInvalidCertificate ? "certificate-warning" : ""}>{destinationSecurityLabel(profile.allowInvalidCertificate)}</dd></div><div><dt>Used by</dt><dd>{usage[profile.id.toLowerCase()] ?? 0} job{(usage[profile.id.toLowerCase()] ?? 0) === 1 ? "" : "s"}</dd></div></dl>
+          <p className="destination-description">{safeDestinationHost(profile.baseURL!)}</p>
+          <dl><div><dt>Remote path</dt><dd>{profile.remotePath}</dd></div><div><dt>Username</dt><dd>{profile.username}</dd></div><div><dt>Security</dt><dd className={profile.allowInvalidCertificate ? "certificate-warning" : ""}>{destinationSecurityLabel(profile.allowInvalidCertificate ?? false)}</dd></div><div><dt>Used by</dt><dd>{usage[profile.id.toLowerCase()] ?? 0} job{(usage[profile.id.toLowerCase()] ?? 0) === 1 ? "" : "s"}</dd></div></dl>
           {state && <p className={`destination-test-result ${state.kind}`} role="status"><i />{state.message}</p>}
           <footer><button className="destination-test" disabled={state?.kind === "testing"} onClick={() => void test(profile)}>{state?.kind === "testing" ? "Testing…" : "Test connection"}</button><button className="destination-delete" disabled={deletingId === profile.id} onClick={() => void remove(profile)}>{deletingId === profile.id ? "Removing…" : "Remove"}</button></footer>
         </article>;
@@ -131,5 +184,9 @@ export function DestinationsView({ destinations, jobs, error, onSave, onTest, on
       {formError && <p className="form-error" role="alert">{formError}</p>}
       <footer><p>Passwords travel only over the authenticated loopback bridge to the local agent.</p><div><button type="button" className="secondary-button" onClick={() => setShowForm(false)}>Cancel</button><button className="initiate-button" disabled={saving}>{saving ? "Saving…" : "Save destination"}</button></div></footer>
     </form></section></div>}
+    {driveBrowser && <div className="modal-backdrop" role="presentation"><section className="destination-sheet drive-folder-sheet" role="dialog" aria-modal="true" aria-labelledby="drive-folder-title"><button className="modal-close" aria-label="Close Google Drive folder browser" onClick={() => setDriveBrowser(null)}>×</button><header><p className="eyebrow">Google Drive destination</p><h2 id="drive-folder-title">Choose upload folder</h2><p>{driveBrowser.path}</p></header>
+      <div className="drive-folder-toolbar"><div>{driveBrowser.path !== "/" && <button className="secondary-button" onClick={() => void openDriveFolder(driveBrowser.profile, driveBrowser.path.split("/").slice(0, -1).join("/") || "/")}>← Parent folder</button>}{onCreateGoogleDriveFolder && <button className="secondary-button" onClick={async () => { const name = window.prompt("New Google Drive folder name"); if (!name?.trim() || name.includes("/")) return; const path = driveBrowser.path === "/" ? `/${name.trim()}` : `${driveBrowser.path}/${name.trim()}`; try { await onCreateGoogleDriveFolder(driveBrowser.profile.id, path); await openDriveFolder(driveBrowser.profile, driveBrowser.path); } catch (reason) { setTests((current) => ({ ...current, [driveBrowser.profile.id]: { kind: "error", message: reason instanceof Error ? reason.message : "Unable to create the Google Drive folder." } })); } }}>＋ New folder</button>}</div><button className="initiate-button" disabled={driveBrowser.loading || !onSelectGoogleDriveFolder} onClick={async () => { if (!onSelectGoogleDriveFolder) return; try { await onSelectGoogleDriveFolder(driveBrowser.profile.id, driveBrowser.path); setDriveBrowser(null); } catch (reason) { setTests((current) => ({ ...current, [driveBrowser.profile.id]: { kind: "error", message: reason instanceof Error ? reason.message : "Unable to select the Google Drive folder." } })); } }}>Choose this folder</button></div>
+      {driveBrowser.loading ? <p className="destination-description">Loading folders from the paired Mac…</p> : driveBrowser.folders.length ? <div className="drive-folder-list">{driveBrowser.folders.map((folder) => <button key={folder.path} onClick={() => void openDriveFolder(driveBrowser.profile, folder.path)}><FolderGlyph /><span>{folder.name}</span><b>›</b></button>)}</div> : <p className="destination-description">This folder has no subfolders. You can choose it as the upload destination.</p>}
+    </section></div>}
   </div>;
 }

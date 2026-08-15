@@ -51,6 +51,85 @@ final class BrowserCaptureTests: XCTestCase {
         }
     }
 
+    func testPostCaptureReturnsOnlyValidatedBoundedMetadataSources() async throws {
+        let opened = OpenedPages()
+        let coordinator = AllPornStreamCaptureCoordinator(timeout: 2) { url in await opened.append(url) }
+        let pageURL = URL(string: "https://allpornstream.com/post/example")!
+        async let capturedHTML = coordinator.capturePost(url: pageURL)
+
+        let markedURL = await opened.next()
+        let requestID = try XCTUnwrap(
+            URLComponents(url: markedURL, resolvingAgainstBaseURL: false)?.fragment?.split(separator: "=").last.flatMap { UUID(uuidString: String($0)) }
+        )
+        let capture = BrowserPostCapture(
+            type: "post_capture_v1",
+            version: 1,
+            requestID: requestID,
+            siteID: "allpornstream",
+            pageURL: pageURL,
+            capturedAt: .now,
+            metadataSources: [#"self.__next_f.push([1,"{\"video_urls\":[{\"hosting_provider\":\"MIXDROP\",\"iframe\":\"https://mixdrop.co/e/example\"}]}"])"#]
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let response = await coordinator.receiveForTesting(try encoder.encode(capture))
+        let html = try await capturedHTML
+
+        XCTAssertEqual(try JSONDecoder().decode(BrowserCaptureResponse.self, from: response).type, "capture_accepted")
+        XCTAssertTrue(html.contains("hosting_provider"))
+    }
+
+    func testPornHubAuthenticationAcceptsOnlyAValidatedLocalSession() async throws {
+        let opened = OpenedPages()
+        let coordinator = AllPornStreamCaptureCoordinator(timeout: 2) { url in await opened.append(url) }
+        async let capturedCookies = coordinator.authenticatePornHub()
+
+        let markedURL = await opened.next()
+        let requestID = try XCTUnwrap(
+            URLComponents(url: markedURL, resolvingAgainstBaseURL: false)?.fragment?.split(separator: "=").last.flatMap { UUID(uuidString: String($0)) }
+        )
+        let capture: [String: Any] = [
+            "type": "pornhub_auth_v1",
+            "version": 1,
+            "requestID": requestID.uuidString,
+            "pageURL": "https://www.pornhub.com/",
+            "capturedAt": ISO8601DateFormatter().string(from: .now),
+            "cookies": [[
+                "name": "il",
+                "value": "session",
+                "domain": ".pornhub.com",
+                "path": "/",
+                "secure": true,
+                "hostOnly": false
+            ]]
+        ]
+        let response = await coordinator.receiveForTesting(try JSONSerialization.data(withJSONObject: capture))
+        let cookies = try await capturedCookies
+
+        XCTAssertEqual(try JSONDecoder().decode(BrowserCaptureResponse.self, from: response).type, "capture_accepted")
+        XCTAssertEqual(cookies.map(\.name), ["il"])
+    }
+
+    func testClosingPornHubAuthenticationTabTerminatesThePendingLogin() async throws {
+        let opened = OpenedPages()
+        let coordinator = AllPornStreamCaptureCoordinator(timeout: 2) { url in await opened.append(url) }
+        let task = Task { try await coordinator.authenticatePornHub() }
+        let markedURL = await opened.next()
+        let requestID = try XCTUnwrap(
+            URLComponents(url: markedURL, resolvingAgainstBaseURL: false)?.fragment?.split(separator: "=").last.flatMap { UUID(uuidString: String($0)) }
+        )
+        let closed = try JSONSerialization.data(withJSONObject: [
+            "type": "pornhub_auth_closed_v1",
+            "version": 1,
+            "requestID": requestID.uuidString
+        ])
+        _ = await coordinator.receiveForTesting(closed)
+
+        await XCTAssertThrowsErrorAsync {
+            _ = try await task.value
+        }
+    }
+
     func testNativeFramingUsesBoundedLittleEndianMessages() throws {
         var descriptors: [Int32] = [0, 0]
         XCTAssertEqual(socketpair(AF_UNIX, SOCK_STREAM, 0, &descriptors), 0)

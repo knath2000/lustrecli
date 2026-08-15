@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { feedPreviewDelay, feedPreviewFrames, feedPreviewMediaKind, feedTransferState, feedUsesAuthenticatedAssetProxy, initialFeedSite, queueFeedItems, toggleFeedSelection } from "./feed-model.ts";
+import { feedPreviewDelay, feedPreviewFrames, feedPreviewMediaKind, feedSelectionKey, feedTransferState, feedUsesAuthenticatedAssetProxy, initialFeedSite, queueFeedItems, toggleFeedItemSelection, toggleFeedSelection } from "./feed-model.ts";
 
 const alpha = { id: "alpha", sourcePageURL: "https://allpornstream.com/post/alpha" };
 const beta = { id: "beta", sourcePageURL: "https://allpornstream.com/post/beta" };
@@ -21,6 +21,17 @@ test("toggleFeedSelection adds and removes stable item ids", () => {
   assert.deepEqual([...toggleFeedSelection(new Set(["alpha", "beta"]), alpha.id)], ["beta"]);
 });
 
+test("feed selection keys and items remain distinct across feed sources", () => {
+  const first = { id: "shared", siteID: "hqporner", sourcePageURL: "https://hqporner.com/one" };
+  const second = { id: "shared", siteID: "pornhub", sourcePageURL: "https://pornhub.com/view_video.php?viewkey=one" };
+  let selection = toggleFeedItemSelection(new Map(), first);
+  selection = toggleFeedItemSelection(selection, second);
+  assert.equal(selection.size, 2);
+  assert.deepEqual([...selection.keys()], [feedSelectionKey(first), feedSelectionKey(second)]);
+  selection = toggleFeedItemSelection(selection, first);
+  assert.deepEqual([...selection.values()], [second]);
+});
+
 test("feedPreviewFrames rotates the card thumbnail with distinct scene thumbnails", () => {
   assert.deepEqual(
     feedPreviewFrames({ thumbnailURL: "thumb.jpg", previewURLs: ["scene-1.jpg", "scene-2.jpg", "scene-1.jpg", "scene-3.jpg", "scene-4.jpg", "scene-5.jpg", ""] }),
@@ -34,7 +45,7 @@ test("feedPreviewFrames rotates the card thumbnail with distinct scene thumbnail
 test("feedPreviewDelay rotates multi-frame previews whenever the user is hovering", () => {
   assert.equal(feedPreviewDelay(false, 4), null);
   assert.equal(feedPreviewDelay(true, 1), null);
-  assert.equal(feedPreviewDelay(true, 4), 800);
+  assert.equal(feedPreviewDelay(true, 4), 2_000);
 });
 
 test("feedPreviewMediaKind keeps video previews out of image elements", () => {

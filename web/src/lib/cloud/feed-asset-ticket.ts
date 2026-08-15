@@ -1,5 +1,5 @@
 import { SignJWT, jwtVerify } from "jose";
-import { DeviceContractError, validFeedPageResult } from "./device-contract.ts";
+import { DeviceContractError, validFeedPageResult, validHomeWorkspaceResult, validLibraryResult } from "./device-contract.ts";
 
 export const FEED_ASSET_TICKET_ISSUER = "lustre-cloud";
 export const FEED_ASSET_TICKET_AUDIENCE = "lustre-feed-assets";
@@ -34,6 +34,14 @@ export function normalizeFeedAssetRequest(value: unknown): { url: string; kind: 
 
 export function feedAssetAppearedInResults(results: unknown[], url: string, kind: FeedAssetKind): boolean {
   for (const candidate of results) {
+    if (validLibraryResult(candidate) && kind === "image") {
+      const snapshot = candidate.library as { items: Array<{ thumbnailURL?: string | null }> };
+      if (snapshot.items.some((item) => item.thumbnailURL === url)) return true;
+    }
+    if (validHomeWorkspaceResult(candidate) && candidate.kind === "extract_preview" && kind === "image") {
+      const items = candidate.homePreview as Array<{ thumbnailURL?: string | null }>;
+      if (items.some((item) => item.thumbnailURL === url)) return true;
+    }
     if (!validFeedPageResult(candidate)) continue;
     const page = candidate.page as { items: Array<{ thumbnailURL?: string | null; previewURLs: string[] }> };
     for (const item of page.items) {
@@ -70,6 +78,7 @@ export async function verifyFeedAssetTicket(ticket: string, now?: Date) {
 export function createFeedAssetTicketHandler(dependencies: {
   currentAccount: () => Promise<{ id: string }>;
   recentResults: (accountID: string, deviceID: string, since: Date) => Promise<Array<{ result: unknown }>>;
+  storedImage?: (accountID: string, deviceID: string, url: string) => Promise<boolean>;
   issueTicket?: typeof issueFeedAssetTicket;
   now?: () => Date;
 }) {
@@ -84,7 +93,11 @@ export function createFeedAssetTicketHandler(dependencies: {
     try { parsed = JSON.parse(encoded); } catch { throw new DeviceContractError("invalid_request", "Request body must be valid JSON."); }
     const body = normalizeFeedAssetRequest(parsed);
     const rows = await dependencies.recentResults(account.id, deviceID, new Date(now.getTime() - 60 * 60_000));
-    if (!feedAssetAppearedInResults(rows.map((row) => row.result), body.url, body.kind)) {
+    const recent = feedAssetAppearedInResults(rows.map((row) => row.result), body.url, body.kind);
+    const stored = !recent && body.kind === "image" && dependencies.storedImage
+      ? await dependencies.storedImage(account.id, deviceID, body.url)
+      : false;
+    if (!recent && !stored) {
       throw new DeviceContractError("invalid_request", "The feed asset is unavailable.");
     }
     const { ticket, expiresAt } = await (dependencies.issueTicket ?? issueFeedAssetTicket)({ deviceID, ...body }, now);

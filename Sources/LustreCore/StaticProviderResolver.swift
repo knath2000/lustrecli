@@ -107,6 +107,10 @@ public struct StaticProviderResolver: Sendable {
             guard Self.isHQPornerSourceURL(url) else { throw ProviderResolverError.invalidURL }
             return try await resolveHQPorner(url: url)
         }
+        if trustedProvider == .pmvHaven || Self.isPMVHavenSourceURL(url) {
+            guard Self.isPMVHavenSourceURL(url) else { throw ProviderResolverError.invalidURL }
+            return try await resolvePMVHaven(url: url)
+        }
         if trustedProvider == .doodStream || isDoodHost(url.host) {
             return try await resolveDood(url: url, forcePlaymogo: trustedProvider == .doodStream)
         }
@@ -126,6 +130,39 @@ public struct StaticProviderResolver: Sendable {
             return try await resolveStreamTape(url: url)
         }
         throw ProviderResolverError.unsupportedProvider
+    }
+
+    private func resolvePMVHaven(url: URL) async throws -> ProviderResolution {
+        let page = try await fetchProviderPage(url, headers: htmlHeaders(referer: nil))
+        guard Self.isPMVHavenHost(page.finalURL.host), page.finalURL.scheme?.lowercased() == "https" else {
+            throw ProviderResolverError.invalidURL
+        }
+        let html = normalizePMVHaven(page.body)
+        let headers = [
+            "Referer": "https://pmvhaven.com/",
+            "User-Agent": NetworkConstants.chromeUserAgent
+        ]
+        let qualities = pmvHavenSources(in: html).map {
+            ResolvedQuality(
+                label: $0.label,
+                url: $0.url,
+                headers: headers,
+                resolutionMethod: "Static PMVHaven page resolver",
+                mediaKind: $0.url.pathExtension.lowercased() == "m3u8" ? .hls : .direct
+            )
+        }
+        guard !qualities.isEmpty else { throw ProviderResolverError.noMediaFound }
+        return ProviderResolution(
+            sourcePageURL: url,
+            provider: .pmvHaven,
+            title: pmvHavenTitle(in: html, pageURL: url),
+            thumbnailURL: imageURL(in: html, relativeTo: page.finalURL),
+            qualities: qualities,
+            trace: [
+                "Fetched PMVHaven video page.",
+                "Resolved \(qualities.count) target media source\(qualities.count == 1 ? "" : "s") with required CDN request headers."
+            ]
+        )
     }
 
     func resolveMyDaddy(url: URL) async throws -> ProviderResolution {
@@ -392,6 +429,16 @@ public struct StaticProviderResolver: Sendable {
         return url.path.range(of: #"^/hdporn/\d+(?:[-/][^/?#]*)?$"#, options: .regularExpression) != nil
     }
 
+    public static func isPMVHavenHost(_ host: String?) -> Bool {
+        guard let host = host?.lowercased() else { return false }
+        return host == "pmvhaven.com" || host.hasSuffix(".pmvhaven.com")
+    }
+
+    public static func isPMVHavenSourceURL(_ url: URL) -> Bool {
+        guard url.scheme?.lowercased() == "https", isPMVHavenHost(url.host) else { return false }
+        return url.path.hasPrefix("/video/") || url.path.hasPrefix("/videos/")
+    }
+
     private static func makeRandomSuffix() -> String {
         let alphabet = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789")
         return String((0..<10).compactMap { _ in alphabet.randomElement() })
@@ -515,7 +562,7 @@ private func isCloudAtaMediaURL(_ url: URL) -> Bool {
     return names.contains("token") && names.contains("expiry")
 }
 
-private func isCloudflareChallenge(_ page: HTTPPage) -> Bool {
+func isCloudflareChallenge(_ page: HTTPPage) -> Bool {
     page.statusCode == 403 && (page.body.localizedCaseInsensitiveContains("cf-mitigated") || page.body.localizedCaseInsensitiveContains("just a moment"))
 }
 
@@ -540,6 +587,77 @@ private func normalize(_ value: String) -> String {
         .replacingOccurrences(of: "&amp;", with: "&")
         .replacingOccurrences(of: "&#038;", with: "&")
         .replacingOccurrences(of: "&quot;", with: "\"")
+}
+
+private func normalizePMVHaven(_ value: String) -> String {
+    normalize(value)
+        .replacingOccurrences(of: "\\u002F", with: "/", options: .caseInsensitive)
+        .replacingOccurrences(of: "\\u003A", with: ":", options: .caseInsensitive)
+        .replacingOccurrences(of: "\\u0026", with: "&", options: .caseInsensitive)
+}
+
+private func pmvHavenSources(in html: String) -> [(label: String, url: URL)] {
+    guard let regex = try? NSRegularExpression(
+        pattern: #"https?://[^"'\s<>\\]+\.(?:mp4|m3u8)(?:\?[^"'\s<>\\]+)?"#,
+        options: [.caseInsensitive]
+    ) else { return [] }
+    var urls: [URL] = []
+    var seen = Set<String>()
+    for match in regex.matches(in: html, range: NSRange(html.startIndex..., in: html)) {
+        guard let range = Range(match.range, in: html),
+              let url = URL(string: String(html[range])),
+              URLSafetyPolicy.isAllowed(url),
+              seen.insert(url.absoluteString).inserted else { continue }
+        urls.append(url)
+    }
+    guard let master = urls.first(where: { $0.lastPathComponent.lowercased() == "master.m3u8" }) else { return [] }
+    let directory = master.deletingLastPathComponent()
+    let target = urls.filter {
+        $0.deletingLastPathComponent() == directory
+            && !$0.path.lowercased().contains("/videopreview/")
+    }
+    return target.sorted {
+        let leftMP4 = $0.pathExtension.lowercased() == "mp4"
+        let rightMP4 = $1.pathExtension.lowercased() == "mp4"
+        if leftMP4 != rightMP4 { return leftMP4 }
+        let leftMaster = $0.lastPathComponent.lowercased() == "master.m3u8"
+        let rightMaster = $1.lastPathComponent.lowercased() == "master.m3u8"
+        if leftMaster != rightMaster { return !leftMaster }
+        return resolutionHeight(in: $0.lastPathComponent) > resolutionHeight(in: $1.lastPathComponent)
+    }.map {
+        let filename = $0.lastPathComponent.lowercased()
+        let label: String
+        if $0.pathExtension.lowercased() == "mp4" {
+            label = "MP4"
+        } else if filename == "master.m3u8" {
+            label = "Master HLS"
+        } else {
+            let height = resolutionHeight(in: filename)
+            label = height > 0 ? "\(height)p" : "HLS"
+        }
+        return (label, $0)
+    }
+}
+
+private func pmvHavenTitle(in html: String, pageURL: URL) -> String? {
+    let raw = firstMatch([
+        #"<meta[^>]+(?:property|name)=["'](?:og:title|twitter:title)["'][^>]+content=["']([^"']+)"#,
+        #"<title[^>]*>(.+?)</title>"#
+    ], in: html) ?? pageURL.lastPathComponent
+    var value = raw
+        .replacingOccurrences(of: "&amp;", with: "&", options: .caseInsensitive)
+        .replacingOccurrences(of: "&quot;", with: "\"", options: .caseInsensitive)
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    for suffix in [" - PMVHaven", " | PMVHaven", " – PMVHaven", " — PMVHaven"] where value.lowercased().hasSuffix(suffix.lowercased()) {
+        value.removeLast(suffix.count)
+        break
+    }
+    if value == pageURL.lastPathComponent,
+       let range = value.range(of: #"_[0-9a-f]{24}$"#, options: [.regularExpression, .caseInsensitive]) {
+        value.removeSubrange(range)
+        value = value.replacingOccurrences(of: "-", with: " ").replacingOccurrences(of: "_", with: " ").capitalized
+    }
+    return value.isEmpty ? nil : value
 }
 
 private func firstMatch(_ patterns: [String], in text: String) -> String? {

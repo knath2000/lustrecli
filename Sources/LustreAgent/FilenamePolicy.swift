@@ -24,6 +24,15 @@ enum FilenamePolicy {
         )
     }
 
+    static func uniqueYtDlpURL(directory: URL, title: String?, fileExtension: String) -> URL {
+        uniqueURL(
+            directory: directory,
+            base: sanitizedBase(title, fallback: "Lustre-video"),
+            suffix: nil,
+            fileExtension: safeExtension(fileExtension, fallback: "mp4")
+        )
+    }
+
     static func sanitizedBase(_ value: String?, fallback: String) -> String {
         let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let allowed = CharacterSet.alphanumerics

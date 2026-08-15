@@ -3,7 +3,7 @@ type DestinationJob = { destination: string };
 export function destinationUsageCounts(jobs: DestinationJob[]): Record<string, number> {
   const counts: Record<string, number> = { local: 0 };
   for (const job of jobs) {
-    const match = /^webdav:(.+)$/i.exec(job.destination);
+    const match = /^(?:webdav|gdrive):(.+)$/i.exec(job.destination);
     const key = match ? match[1].toLowerCase() : "local";
     counts[key] = (counts[key] ?? 0) + 1;
   }

@@ -6,9 +6,12 @@ import {
   feedPreviewDelay,
   feedPreviewFrames,
   feedPreviewMediaKind,
+  feedSelectionKey,
   feedTransferState,
   feedUsesAuthenticatedAssetProxy,
   initialFeedSite,
+  queueFeedItems,
+  toggleFeedItemSelection,
   type FeedItem,
   type FeedPage,
   type FeedQuery,
@@ -28,12 +31,29 @@ export type FeedJob = {
     | "verificationRequired";
 };
 
+export type FeedPlaybackResolution = {
+  kind: "feed_resolve";
+  playback: {
+    sourcePageURL: string;
+    title?: string;
+    provider: string;
+    qualities: Array<{
+      label: string;
+      url: string;
+      mediaKind: "direct" | "hls" | "yt-dlp";
+      headers: Record<string, string>;
+    }>;
+  };
+};
+
 type FeedViewProps = {
   destinations: DestinationProfile[];
   jobs: FeedJob[];
   loadSites: () => Promise<FeedRefresh<FeedSite[]>>;
   loadPage: (site: FeedSite["id"], query: FeedQuery) => Promise<FeedRefresh<FeedPage>>;
   queueItem: (item: FeedItem, destination: string, requestID: string) => Promise<void>;
+  resolveItem?: (item: FeedItem) => Promise<FeedPlaybackResolution>;
+  saveItem?: (item: FeedItem) => Promise<void>;
   loadAsset: (url: string, kind: "image" | "video") => Promise<Blob>;
   onQueued: () => Promise<void>;
   mediaEnabled: boolean;
@@ -123,6 +143,9 @@ function FeedThumbnail({
           loadAsset(item.thumbnailURL, "image").then((blob) => {
             assetCache.current.set(item.thumbnailURL!, blob);
             return blob;
+          }).catch((error) => {
+            assetCache.current.delete(item.thumbnailURL!);
+            throw error;
           }));
     if (!cached) assetCache.current.set(item.thumbnailURL, request);
     void request
@@ -139,7 +162,7 @@ function FeedThumbnail({
     return () => {
       active = false;
     };
-  }, [item.thumbnailURL, loadAsset, usesAssetProxy]);
+  }, [item.thumbnailURL, item.uploadedAt, loadAsset, usesAssetProxy]);
 
   useEffect(() => {
     let active = true;
@@ -152,6 +175,9 @@ function FeedThumbnail({
           loadAsset(frame, frameKind).then((blob) => {
             assetCache.current.set(frame, blob);
             return blob;
+          }).catch((error) => {
+            assetCache.current.delete(frame);
+            throw error;
           }));
     if (!cached) assetCache.current.set(frame, request);
     void request
@@ -271,6 +297,8 @@ export function FeedView({
   loadSites,
   loadPage,
   queueItem,
+  resolveItem,
+  saveItem,
   loadAsset,
   onQueued,
   mediaEnabled,
@@ -282,13 +310,17 @@ export function FeedView({
   const [items, setItems] = useState<FeedItem[]>([]);
   const [page, setPage] = useState(0);
   const [hasMore, setHasMore] = useState(true);
-  const [selection, setSelection] = useState<Set<string>>(new Set());
+  const [selection, setSelection] = useState<Map<string, FeedItem>>(new Map());
   const [destination, setDestination] = useState("local");
   const [loading, setLoading] = useState(true);
   const [pendingItems, setPendingItems] = useState<Set<string>>(new Set());
   const requestIDs = useRef(new Map<string, string>());
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [resolvingItem, setResolvingItem] = useState<string | null>(null);
+  const [playback, setPlayback] = useState<FeedPlaybackResolution["playback"] | null>(null);
+  const [copiedURL, setCopiedURL] = useState<string | null>(null);
+  const [savedItems, setSavedItems] = useState<Set<string>>(new Set());
   const [searchInput, setSearchInput] = useState("");
   const [activeQuery, setActiveQuery] = useState("");
   const [retryNonce, setRetryNonce] = useState(0);
@@ -297,7 +329,7 @@ export function FeedView({
   const selectedSite = sites.find((site) => site.id === siteID);
 
   const fetchPage = useCallback(
-    async (nextPage: number, replace = false, query = activeQuery) => {
+    async (nextPage: number, query = activeQuery) => {
       const sequence = ++requestSequence.current;
       setLoading(true);
       setLiveReady(false);
@@ -309,28 +341,17 @@ export function FeedView({
         });
         if (refresh.cache && sequence === requestSequence.current) {
           const cached = refresh.cache.result;
-          setItems((current) => replace ? cached.items : [...current, ...cached.items.filter((item) => !current.some((existing) => existing.id === item.id))]);
+          setItems(cached.items);
           setPage(cached.page);
           setHasMore(cached.hasMore);
           setLoading(false);
         }
         const result = await refresh.live;
         if (sequence !== requestSequence.current) return;
-        setItems((current) =>
-          replace
-            ? result.items
-            : [
-                ...current,
-                ...result.items.filter(
-                  (item) =>
-                    !current.some((existing) => existing.id === item.id),
-                ),
-              ],
-        );
+        setItems(result.items);
         setPage(result.page);
         setHasMore(result.hasMore);
         setLiveReady(true);
-        if (replace) setSelection(new Set());
       } catch (reason) {
         if (sequence === requestSequence.current)
           setError(
@@ -409,7 +430,6 @@ export function FeedView({
       setItems(result.items);
       setPage(result.page);
       setHasMore(result.hasMore);
-      setSelection(new Set());
       setSearchInput("");
       setActiveQuery("");
       setLiveReady(true);
@@ -430,8 +450,7 @@ export function FeedView({
     setItems([]);
     setPage(0);
     setHasMore(false);
-    setSelection(new Set());
-    await fetchPage(1, true, query);
+    await fetchPage(1, query);
   };
 
   const clearSearch = async () => {
@@ -440,34 +459,100 @@ export function FeedView({
     setItems([]);
     setPage(0);
     setHasMore(false);
-    setSelection(new Set());
-    await fetchPage(1, true, "");
+    await fetchPage(1, "");
   };
 
   const queueItems = async (targets: FeedItem[]) => {
-    if (!queueEnabled || !liveReady || targets.length !== 1) return;
-    const item = targets[0];
-    const requestID = requestIDs.current.get(item.id) ?? crypto.randomUUID();
-    requestIDs.current.set(item.id, requestID);
-    setPendingItems((current) => new Set(current).add(item.id));
+    if (!queueEnabled || !liveReady || targets.length === 0) return;
+    const targetKeys = targets.map(feedSelectionKey);
+    setPendingItems((current) => new Set([...current, ...targetKeys]));
     setError(null);
     setNotice(null);
-    try {
+    const results = await queueFeedItems(targets, async (item) => {
+      const key = feedSelectionKey(item);
+      const requestID = requestIDs.current.get(key) ?? crypto.randomUUID();
+      requestIDs.current.set(key, requestID);
       await queueItem(item, destination, requestID);
-      await onQueued();
+      requestIDs.current.delete(key);
+    });
+    const successfulKeys = new Set(
+      results.flatMap((result, index) =>
+        result.ok ? [targetKeys[index]] : [],
+      ),
+    );
+    const successfulCount = successfulKeys.size;
+    let refreshError: string | null = null;
+    if (successfulCount) {
+      try {
+        await onQueued();
+      } catch (reason) {
+        refreshError =
+          reason instanceof Error
+            ? reason.message
+            : "Queued transfers could not be refreshed.";
+      }
       setNotice(
-        `Transfer queued to ${destination === "local" ? "Local Downloads" : "the selected WebDAV destination"}.`,
+        `${successfulCount} transfer${successfulCount === 1 ? "" : "s"} queued to ${destination === "local" ? "Local Downloads" : "the selected WebDAV destination"}.`,
       );
-      requestIDs.current.delete(item.id);
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "The transfer could not be queued.");
     }
-    setSelection(new Set());
-    setPendingItems((current) => {
-      const next = new Set(current);
-      next.delete(item.id);
+    const failures = results.filter((result) => !result.ok);
+    if (failures.length) {
+      setError(
+        failures.length === 1
+          ? failures[0].error ?? "One transfer could not be queued."
+          : `${failures.length} transfers could not be queued. The failed selections remain selected for retry.`,
+      );
+    } else if (refreshError) {
+      setError(refreshError);
+    }
+    setSelection((current) => {
+      const next = new Map(current);
+      successfulKeys.forEach((key) => next.delete(key));
       return next;
     });
+    setPendingItems((current) => {
+      const next = new Set(current);
+      targetKeys.forEach((key) => next.delete(key));
+      return next;
+    });
+  };
+
+  const extractLink = async (item: FeedItem) => {
+    if (!resolveItem) return;
+    const key = feedSelectionKey(item);
+    setResolvingItem(key);
+    setPlayback(null);
+    setError(null);
+    try {
+      const result = await resolveItem(item);
+      setPlayback(result.playback);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Unable to extract a playable link.");
+    } finally {
+      setResolvingItem(null);
+    }
+  };
+
+  const copyText = async (value: string, marker: string) => {
+    await navigator.clipboard.writeText(value);
+    setCopiedURL(marker);
+    window.setTimeout(() => setCopiedURL((current) => current === marker ? null : current), 1_500);
+  };
+
+  const saveForLater = async (item: FeedItem) => {
+    if (!saveItem) return;
+    const key = feedSelectionKey(item);
+    setResolvingItem(key);
+    setError(null);
+    try {
+      await saveItem(item);
+      setSavedItems((current) => new Set(current).add(key));
+      setNotice("Saved to Experimental Watchlist.");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Unable to save this video.");
+    } finally {
+      setResolvingItem(null);
+    }
   };
 
   return (
@@ -493,7 +578,7 @@ export function FeedView({
 
       <p className="feed-gate-notice" role="note">
         {destinationsEnabled && queueEnabled && liveReady
-          ? `${mediaEnabled ? "Protected media preview" : "Browsing preview"}, destination selection, and individual queueing are enabled.`
+          ? `${mediaEnabled ? "Protected media preview" : "Browsing preview"}, destination selection, and multi-select queueing are enabled.`
           : destinationsEnabled
             ? `${mediaEnabled ? "Protected media preview" : "Browsing preview"} and destination selection are enabled; queueing remains gated.`
             : mediaEnabled
@@ -550,8 +635,8 @@ export function FeedView({
             >
               <option value="local">Local Downloads</option>
               {destinations.map((item) => (
-                <option key={item.id} value={`webdav:${item.id}`}>
-                  {item.name} · WebDAV
+                <option key={item.id} value={`${item.kind === "google_drive" ? "gdrive" : "webdav"}:${item.id}`}>
+                  {item.name} · {item.kind === "google_drive" ? "Google Drive" : "WebDAV"}
                 </option>
               ))}
             </select>
@@ -560,7 +645,7 @@ export function FeedView({
             className="secondary-button feed-refresh"
             aria-label={activeQuery ? "Refresh results" : "Refresh feed"}
             disabled={loading}
-            onClick={() => void fetchPage(1, true)}
+            onClick={() => void fetchPage(Math.max(page, 1))}
           >
             ↻
           </button>
@@ -590,7 +675,7 @@ export function FeedView({
             disabled={loading}
             onClick={() =>
               sites.length && siteID
-                ? void fetchPage(Math.max(page, 1), items.length === 0)
+                ? void fetchPage(Math.max(page, 1))
                 : setRetryNonce((current) => current + 1)
             }
           >
@@ -600,7 +685,7 @@ export function FeedView({
       )}
       {!liveReady && siteID === "allpornstream" && !error && (
         <p className="feed-notice" role="status">
-          Complete verification in Chrome on the paired Mac. Cached cards remain visible while Lustre waits.
+          Complete verification in the selected browser on the paired Mac. Cached cards remain visible while Lustre waits.
         </p>
       )}
       {notice && (
@@ -609,21 +694,47 @@ export function FeedView({
         </p>
       )}
 
+      {selection.size > 0 && (
+        <section className="feed-selection-bar" aria-label="Selected feed items">
+          <div>
+            <i aria-hidden="true">✓</i>
+            <p>
+              <strong>{selection.size} selected</strong>
+              <span>Across feed pages</span>
+            </p>
+          </div>
+          <button onClick={() => setSelection(new Map())}>Clear</button>
+          <button
+            className="queue-button"
+            disabled={!queueEnabled || !liveReady || pendingItems.size > 0}
+            onClick={() => void queueItems([...selection.values()])}
+          >
+            {pendingItems.size > 0 ? "Queueing…" : "Queue selected"}
+          </button>
+        </section>
+      )}
+
       <section
         className="feed-grid"
         aria-label={`${selectedSite?.displayName ?? "Video"} feed`}
       >
         {items.map((item) => {
           const state = feedTransferState(item.sourcePageURL, jobs);
-          const selected = selection.has(item.id);
+          const downloaded = item.downloadedAt !== undefined || state === "completed";
+          const itemKey = feedSelectionKey(item);
+          const selected = selection.has(itemKey);
           return (
             <article
-              className={`feed-card glass-panel ${selected ? "selected" : ""}`}
+              className={`feed-card glass-panel ${selected ? "selected" : ""} ${downloaded ? "downloaded" : ""}`}
               key={item.id}
             >
               <div className="feed-thumb">
                 {mediaEnabled ? (
-                  <FeedThumbnail item={item} loadAsset={loadAsset} />
+                  <FeedThumbnail
+                    key={`${item.id}-${item.uploadedAt}`}
+                    item={item}
+                    loadAsset={loadAsset}
+                  />
                 ) : (
                   <div
                     className="feed-media-placeholder"
@@ -634,10 +745,37 @@ export function FeedView({
                   </div>
                 )}
                 <span className={`feed-transfer-state state-${state}`}>
-                  {state === "available"
+                  {downloaded && state === "available"
+                    ? "Downloaded"
+                    : state === "available"
                     ? "Ready"
                     : state.replace(/([A-Z])/g, " $1")}
                 </span>
+                {downloaded && (
+                  <span
+                    className="feed-downloaded-check"
+                    aria-label="Previously downloaded"
+                    title={item.downloadedAt
+                      ? `Downloaded ${new Date(agentDateMilliseconds(item.downloadedAt)).toLocaleString()}`
+                      : "Previously downloaded"}
+                  >
+                    ✓
+                  </span>
+                )}
+                <button
+                  className="feed-select"
+                  type="button"
+                  aria-label={`${selected ? "Deselect" : "Select"} ${item.title}`}
+                  aria-pressed={selected}
+                  disabled={!queueEnabled || pendingItems.has(itemKey)}
+                  onClick={() =>
+                    setSelection((current) =>
+                      toggleFeedItemSelection(current, item),
+                    )
+                  }
+                >
+                  {selected ? "✓" : "+"}
+                </button>
               </div>
               <div className="feed-card-copy">
                 <p>{item.studio ?? selectedSite?.displayName ?? "Video"}</p>
@@ -666,10 +804,19 @@ export function FeedView({
                   View source ↗
                 </a>
                 <button
+                  disabled={!resolveItem || !liveReady || resolvingItem === itemKey}
+                  onClick={() => void extractLink(item)}
+                >
+                  {resolvingItem === itemKey ? "Extracting…" : "Extract link"}
+                </button>
+                <button disabled={!saveItem || savedItems.has(itemKey) || resolvingItem === itemKey} onClick={() => void saveForLater(item)}>
+                  {savedItems.has(itemKey) ? "Saved" : "Save"}
+                </button>
+                <button
                   disabled={
                     !queueEnabled ||
                     !liveReady ||
-                    pendingItems.has(item.id) ||
+                    pendingItems.has(itemKey) ||
                     state === "queued" ||
                     state === "running"
                   }
@@ -677,7 +824,7 @@ export function FeedView({
                 >
                   {!queueEnabled || !liveReady
                     ? "Queue gated"
-                    : pendingItems.has(item.id)
+                    : pendingItems.has(itemKey)
                     ? "Queueing…"
                     : state === "queued" || state === "running"
                     ? "In queue"
@@ -688,6 +835,43 @@ export function FeedView({
           );
         })}
       </section>
+
+      {playback && (
+        <div className="feed-playback-backdrop" role="presentation" onMouseDown={() => setPlayback(null)}>
+          <section className="feed-playback-panel glass-panel" role="dialog" aria-modal="true" aria-label="Playable video links" onMouseDown={(event) => event.stopPropagation()}>
+            <header>
+              <div>
+                <p>{playback.provider}</p>
+                <h3>{playback.title ?? "Playable video links"}</h3>
+              </div>
+              <button type="button" aria-label="Close playable links" onClick={() => setPlayback(null)}>×</button>
+            </header>
+            <p className="feed-playback-note">Provider links are temporary. Re-extract if one expires. VLC or Infuse may require the listed request headers.</p>
+            <div className="feed-playback-options">
+              {playback.qualities.map((quality, index) => {
+                const marker = `${index}:${quality.url}`;
+                const headerText = Object.entries(quality.headers).map(([key, value]) => `${key}: ${value}`).join("\n");
+                return (
+                  <article key={marker}>
+                    <div>
+                      <strong>{quality.label}</strong>
+                      <span>{quality.mediaKind === "hls" ? "HLS stream" : "Direct media"}</span>
+                    </div>
+                    <button type="button" onClick={() => void copyText(quality.url, marker)}>
+                      {copiedURL === marker ? "Copied" : "Copy URL"}
+                    </button>
+                    {headerText && (
+                      <button type="button" onClick={() => void copyText(headerText, `${marker}:headers`)}>
+                        {copiedURL === `${marker}:headers` ? "Copied" : "Copy headers"}
+                      </button>
+                    )}
+                  </article>
+                );
+              })}
+            </div>
+          </section>
+        </div>
+      )}
 
       {loading && !items.length && (
         <section className="feed-empty glass-panel" aria-busy="true">
@@ -712,16 +896,26 @@ export function FeedView({
           </p>
         </section>
       )}
-      {hasMore && items.length > 0 && (
-        <div className="feed-load-more">
+      {items.length > 0 && (
+        <nav className="feed-pagination" aria-label="Feed pagination">
           <button
             className="secondary-button"
-            disabled={loading}
+            disabled={loading || page <= 1}
+            onClick={() => void fetchPage(page - 1)}
+          >
+            ← Previous
+          </button>
+          <span>
+            Page <strong>{page}</strong>
+          </span>
+          <button
+            className="secondary-button"
+            disabled={loading || !hasMore}
             onClick={() => void fetchPage(page + 1)}
           >
-            {loading ? "Loading…" : "Load more"}
+            Next →
           </button>
-        </div>
+        </nav>
       )}
     </div>
   );

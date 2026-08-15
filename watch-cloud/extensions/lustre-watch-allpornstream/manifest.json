@@ -1,0 +1,36 @@
+{
+  "manifest_version": 3,
+  "name": "Lustre Watch Provider Capture",
+  "version": "1.4.0",
+  "description": "Provides browser-assisted feeds and playback sources for Lustre Watch.",
+  "permissions": ["debugger", "tabs", "scripting"],
+  "host_permissions": [
+    "https://lustre-watch.vercel.app/*",
+    "https://allpornstream.com/*",
+    "https://www.allpornstream.com/*",
+    "https://luluvid.com/*",
+    "https://*.luluvid.com/*",
+    "https://luluvdo.com/*",
+    "https://*.luluvdo.com/*",
+    "https://lulustream.com/*",
+    "https://*.lulustream.com/*",
+    "https://playmogo.com/*",
+    "https://*.playmogo.com/*",
+    "https://ds2play.com/*",
+    "https://*.ds2play.com/*",
+    "https://doodstream.com/*",
+    "https://*.doodstream.com/*",
+    "https://dood.wf/*",
+    "https://*.dood.wf/*",
+    "https://vide0.net/*",
+    "https://*.vide0.net/*",
+    "https://dooodster.com/*",
+    "https://*.dooodster.com/*"
+  ],
+  "background": { "service_worker": "service.js" },
+  "content_scripts": [{
+    "matches": ["https://lustre-watch.vercel.app/*"],
+    "js": ["bridge.js"],
+    "run_at": "document_start"
+  }]
+}

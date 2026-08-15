@@ -1,0 +1,43 @@
+{
+  "manifest_version": 3,
+  "name": "Lustre AllPornStream Capture",
+  "version": "1.0.0",
+  "description": "Captures bounded Feed metadata and local Pornhub sessions for the Lustre Agent.",
+  "permissions": ["nativeMessaging", "tabs", "storage", "cookies"],
+  "host_permissions": [
+    "https://allpornstream.com/*",
+    "https://www.allpornstream.com/*",
+    "https://pornhub.com/*",
+    "https://www.pornhub.com/*"
+  ],
+  "background": {
+    "scripts": ["service.js"]
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://allpornstream.com/*",
+        "https://www.allpornstream.com/*"
+      ],
+      "js": ["extractor.js", "capture.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://pornhub.com/*",
+        "https://www.pornhub.com/*"
+      ],
+      "js": ["pornhub-auth.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "lustre-allpornstream@pmvdl.local",
+      "strict_min_version": "128.0",
+      "data_collection_permissions": {
+        "required": ["websiteContent"]
+      }
+    }
+  }
+}

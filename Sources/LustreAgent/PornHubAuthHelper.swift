@@ -29,30 +29,60 @@ public struct PornHubAuthHelper: PornHubAuthHelping {
     private func run(argument: String) async throws -> PornHubHelperResult {
         let current = executableURL ?? Bundle.main.executableURL
         guard let current else { throw PornHubAuthError.helperUnavailable }
-        let executable = try Self.validatedExecutable(runningAgent: current)
+        fputs("PornHub auth helper validation started: action=\(argument).\n", Darwin.stderr)
+        let executable: URL
+        do {
+            executable = try Self.validatedExecutable(runningAgent: current)
+        } catch {
+            fputs("PornHub auth helper failed: action=\(argument) category=unavailable.\n", Darwin.stderr)
+            throw error
+        }
+        fputs("PornHub auth helper validated: action=\(argument).\n", Darwin.stderr)
         let process = Process()
         let stdout = Pipe(); let stderr = Pipe()
         process.executableURL = executable
         process.arguments = [argument]
         process.standardOutput = stdout
         process.standardError = stderr
-        try process.run()
+        do {
+            try process.run()
+        } catch {
+            fputs("PornHub auth helper failed: action=\(argument) category=launch.\n", Darwin.stderr)
+            throw error
+        }
+        fputs("PornHub auth helper launched: action=\(argument).\n", Darwin.stderr)
         let output: ProcessOutput
         do {
             output = try await wait(process: process, stdout: stdout.fileHandleForReading, stderr: stderr.fileHandleForReading)
         } catch {
             terminateAndWait(process)
+            fputs("PornHub auth helper failed: action=\(argument) category=\(diagnosticCategory(error)).\n", Darwin.stderr)
             throw error
         }
         guard output.status == 0, output.stdout.count <= 64,
               let token = String(data: output.stdout, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) else { throw PornHubAuthError.helperFailed }
         switch token {
-        case "signed-in": return .signedIn
-        case "cancelled": return .cancelled
-        case "signed-out": return .signedOut
+        case "signed-in":
+            fputs("PornHub auth helper completed: action=\(argument) result=signed-in.\n", Darwin.stderr)
+            return .signedIn
+        case "cancelled":
+            fputs("PornHub auth helper completed: action=\(argument) result=cancelled.\n", Darwin.stderr)
+            return .cancelled
+        case "signed-out":
+            fputs("PornHub auth helper completed: action=\(argument) result=signed-out.\n", Darwin.stderr)
+            return .signedOut
         case "storage-unavailable": throw PornHubAuthError.storageUnavailable
         case "helper-failed": throw PornHubAuthError.helperFailed
         default: throw PornHubAuthError.helperFailed
+        }
+    }
+
+    private func diagnosticCategory(_ error: Error) -> String {
+        switch error as? PornHubAuthError {
+        case .helperUnavailable: "unavailable"
+        case .timeout: "timeout"
+        case .cancelled: "cancelled"
+        default: "failed"
         }
     }
 
@@ -137,5 +167,25 @@ public struct PornHubAuthHelper: PornHubAuthHelping {
         }
         if process.isRunning { kill(process.processIdentifier, SIGKILL) }
         if process.isRunning { process.waitUntilExit() }
+    }
+}
+
+public struct BrowserPornHubAuthHelper: PornHubAuthHelping {
+    private let capture: AllPornStreamCaptureCoordinator
+    private let store: PornHubCookieStore
+
+    public init(capture: AllPornStreamCaptureCoordinator, store: PornHubCookieStore) {
+        self.capture = capture
+        self.store = store
+    }
+
+    public func login() async throws -> PornHubHelperResult {
+        let cookies = try await capture.authenticatePornHub()
+        try store.save(cookies)
+        return .signedIn
+    }
+
+    public func logout() async throws {
+        try store.remove()
     }
 }

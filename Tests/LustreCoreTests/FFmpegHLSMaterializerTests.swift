@@ -21,6 +21,10 @@ final class FFmpegHLSMaterializerTests: XCTestCase {
             "Referer: https://embed.example/e/code\r\nUser-Agent: Fixture\r\n"
         )
         XCTAssertEqual(arguments.suffix(2), ["mp4", partial.path])
+        XCTAssertTrue(arguments.contains("-progress"))
+        XCTAssertTrue(arguments.contains("-reconnect"))
+        XCTAssertTrue(arguments.contains("-rw_timeout"))
+        XCTAssertFalse(arguments.contains("+faststart"))
     }
 
     func testArgumentsRejectHeaderCRLFInjection() {
@@ -55,6 +59,22 @@ final class FFmpegHLSMaterializerTests: XCTestCase {
         } catch is CancellationError {
         } catch {
             XCTFail("Expected CancellationError, got \(error)")
+        }
+    }
+
+    func testStalledProcessIsTerminated() async throws {
+        do {
+            _ = try await FFmpegHLSMaterializer.runProcess(
+                executable: URL(fileURLWithPath: "/bin/sh"),
+                arguments: ["-c", "sleep 5"],
+                timeout: 10,
+                stallTimeout: 0.2,
+                onProgress: { _ in }
+            )
+            XCTFail("Expected stalled transfer")
+        } catch HLSMaterializationError.stalled {
+        } catch {
+            XCTFail("Expected stalled transfer, got \(error)")
         }
     }
 }

@@ -48,6 +48,7 @@ public struct JobLogEntry: Codable, Equatable, Sendable {
 
 public enum ProviderKind: String, Codable, Sendable {
     case direct
+    case pmvHaven = "pmvhaven"
     case allPornStream
     case hqPorner = "hqporner"
     case doodStream
@@ -57,6 +58,7 @@ public enum ProviderKind: String, Codable, Sendable {
     case luluStream
     case vidara
     case pornHub = "pornhub"
+    case ytDlp = "yt-dlp"
 }
 
 public enum ProviderAttemptOutcome: String, Codable, Sendable {
@@ -182,6 +184,7 @@ public struct DownloadProgress: Equatable, Sendable {
 public struct DownloadJob: Codable, Identifiable, Equatable, Sendable {
     public let id: UUID
     public let sourcePageURL: URL
+    public var title: String?
     public var preferredQualityLabel: String?
     public var destination: String
     public var status: JobStatus
@@ -204,6 +207,7 @@ public struct DownloadJob: Codable, Identifiable, Equatable, Sendable {
     public init(
         id: UUID = UUID(),
         sourcePageURL: URL,
+        title: String? = nil,
         preferredQualityLabel: String? = nil,
         destination: String = "local",
         status: JobStatus = .queued,
@@ -225,6 +229,7 @@ public struct DownloadJob: Codable, Identifiable, Equatable, Sendable {
     ) {
         self.id = id
         self.sourcePageURL = sourcePageURL
+        self.title = title
         self.preferredQualityLabel = preferredQualityLabel
         self.destination = destination
         self.status = status
@@ -274,12 +279,14 @@ public struct ExtractionResult: Codable, Equatable, Sendable {
 public struct CreateJobRequest: Codable, Sendable {
     public let id: UUID?
     public let sourcePageURL: URL
+    public let title: String?
     public let preferredQualityLabel: String?
     public let destination: String?
 
-    public init(id: UUID? = nil, sourcePageURL: URL, preferredQualityLabel: String? = nil, destination: String? = nil) {
+    public init(id: UUID? = nil, sourcePageURL: URL, title: String? = nil, preferredQualityLabel: String? = nil, destination: String? = nil) {
         self.id = id
         self.sourcePageURL = sourcePageURL
+        self.title = title
         self.preferredQualityLabel = preferredQualityLabel
         self.destination = destination
     }

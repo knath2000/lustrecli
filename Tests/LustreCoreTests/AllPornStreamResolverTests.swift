@@ -2,6 +2,23 @@ import LustreCore
 import XCTest
 
 final class AllPornStreamResolverTests: XCTestCase {
+    func testRejectsCloudflareChallengeOnPostPageBeforeParsingMetadata() async throws {
+        let postURL = URL(string: "https://allpornstream.com/post/challenged")!
+        let resolver = StaticProviderResolver(
+            fetch: { url, _ in
+                HTTPPage(body: "<html>cf-mitigated: challenge</html>", finalURL: url, statusCode: 403)
+            },
+            randomSuffix: { "unused" },
+            nowMilliseconds: { "0" }
+        )
+
+        do {
+            _ = try await AllPornStreamResolver(fetch: resolver.pageFetch, providerResolver: resolver).resolve(postURL: postURL)
+            XCTFail("Expected the post-page challenge to require verification.")
+        } catch ProviderResolverError.cloudflareChallenge {
+        }
+    }
+
     func testKeepsMyDaddySuccessWhenAnotherConcurrentCandidateFails() async throws {
         let postURL = URL(string: "https://allpornstream.com/post/partial-mydaddy")!
         let mixDropURL = URL(string: "https://mixdrop.co/e/broken")!

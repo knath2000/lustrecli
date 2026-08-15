@@ -58,15 +58,38 @@ test("command selection gates destinations_list and requires an empty payload", 
 
 test("command selection carries only a negotiated canonical Feed queue payload", async () => {
   process.env.LUSTRE_GATEWAY_RELAY_SECRET = secret;
-  const command = { id: deviceID, kind: "queue_url", payload: { url: "https://hqporner.com/hdporn/example.html", destination: "local", deliveryProtocol: "gateway-v1" } };
+  const command = { id: deviceID, kind: "queue_url", payload: { url: "https://hqporner.com/hdporn/example.html", destination: "local", deliveryProtocol: "gateway-v1", preferredQualityLabel: "1080p" } };
   const calls = [];
   const handler = gatewayCommandHandler(async (input) => { calls.push(input); return input.allowFeedQueue ? command : null; });
   assert.equal((await (await handler(request({ deviceID, connectionID, sequence: 13, correlationID: "legacy" }))).json()).command, null);
   const response = await handler(request({ deviceID, connectionID, sequence: 14, correlationID: "k4", allowFeedQueue: true }));
   assert.deepEqual((await response.json()).command, command);
   assert.equal(calls[1].allowFeedQueue, true);
-  const invalid = gatewayCommandHandler(async () => ({ ...command, payload: { ...command.payload, preferredQualityLabel: "1080p" } }));
+  const invalid = gatewayCommandHandler(async () => ({ ...command, payload: { ...command.payload, preferredQualityLabel: "x".repeat(81) } }));
   assert.equal((await invalid(request({ deviceID, connectionID, sequence: 15, correlationID: "k4", allowFeedQueue: true }))).status, 400);
+});
+
+test("command selection carries canonical job actions over base command delivery", async () => {
+  process.env.LUSTRE_GATEWAY_RELAY_SECRET = secret;
+  const command = { id: deviceID, kind: "job_action", payload: { jobID: connectionID, action: "retry", deliveryProtocol: "gateway-v1" } };
+  const handler = gatewayCommandHandler(async () => command);
+  const response = await handler(request({ deviceID, connectionID, sequence: 16, correlationID: "job-action" }));
+  assert.deepEqual((await response.json()).command, command);
+  const invalid = gatewayCommandHandler(async () => ({ ...command, payload: { ...command.payload, action: "delete" } }));
+  assert.equal((await invalid(request({ deviceID, connectionID, sequence: 17, correlationID: "job-action" }))).status, 400);
+});
+
+test("command selection gates PornHub auth and carries no session data", async () => {
+  process.env.LUSTRE_GATEWAY_RELAY_SECRET = secret;
+  const command = { id: deviceID, kind: "pornhub_auth_login", payload: { deliveryProtocol: "gateway-v1" } };
+  const calls = [];
+  const handler = gatewayCommandHandler(async (input) => { calls.push(input); return input.allowPornHubAuth ? command : null; });
+  assert.equal((await (await handler(request({ deviceID, connectionID, sequence: 18, correlationID: "auth-legacy" }))).json()).command, null);
+  assert.equal(calls[0].allowPornHubAuth, false);
+  const response = await handler(request({ deviceID, connectionID, sequence: 19, correlationID: "auth", allowPornHubAuth: true }));
+  assert.deepEqual((await response.json()).command, command);
+  const invalid = gatewayCommandHandler(async () => ({ ...command, payload: { deliveryProtocol: "gateway-v1", cookie: "secret" } }));
+  assert.equal((await invalid(request({ deviceID, connectionID, sequence: 20, correlationID: "auth", allowPornHubAuth: true }))).status, 400);
 });
 
 test("command selection supports null delivery and requires exact boundary fields", async () => {

@@ -68,6 +68,26 @@ final class CloudRemoteControlDestinationsTests: XCTestCase {
         XCTAssertEqual(pending.map(\.id), [id])
     }
 
+    func testGoogleDriveDestinationIsProjectedWithoutRcloneConfiguration() throws {
+        let drive = try GoogleDriveDestinationProfile(
+            id: UUID(uuidString: "00000000-0000-4000-8000-000000000003")!,
+            name: "Google Drive",
+            remoteName: "gdrive",
+            remotePath: "/Lustre Uploads"
+        )
+        let acknowledgement = CloudRemoteControl.boundedDestinationsAcknowledgement(id: UUID(), webDAV: [], googleDrive: [drive])
+        XCTAssertEqual(acknowledgement.status, "completed")
+        let projected = try XCTUnwrap(acknowledgement.result?.destinations?.first)
+        XCTAssertEqual(projected.kind, "google_drive")
+        XCTAssertEqual(projected.remoteName, "gdrive")
+        XCTAssertEqual(projected.remotePath, "/Lustre Uploads")
+        XCTAssertNil(projected.baseURL)
+        XCTAssertNil(projected.username)
+        let encoded = String(decoding: try JSONEncoder.cloud.encode(acknowledgement), as: UTF8.self)
+        XCTAssertFalse(encoded.localizedCaseInsensitiveContains("token"))
+        XCTAssertFalse(encoded.localizedCaseInsensitiveContains("client_secret"))
+    }
+
     private func profile(id: UUID, name: String, username: String = "user", remotePath: String = "/remote") throws -> WebDAVDestinationProfile {
         try WebDAVDestinationProfile(id: id, name: name, baseURL: URL(string: "https://dav.example.com")!, username: username, remotePath: remotePath)
     }

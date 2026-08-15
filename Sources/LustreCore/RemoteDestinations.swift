@@ -88,6 +88,7 @@ public struct RemoteDestinationTestResult: Codable, Equatable, Sendable {
 
 public enum RemoteDestination {
     private static let webDAVPrefix = "webdav:"
+    private static let googleDrivePrefix = "gdrive:"
 
     public static func webDAV(_ id: UUID) -> String {
         webDAVPrefix + id.uuidString.lowercased()
@@ -96,6 +97,94 @@ public enum RemoteDestination {
     public static func webDAVProfileID(from destination: String) -> UUID? {
         guard destination.lowercased().hasPrefix(webDAVPrefix) else { return nil }
         return UUID(uuidString: String(destination.dropFirst(webDAVPrefix.count)))
+    }
+
+    public static func googleDrive(_ id: UUID) -> String {
+        googleDrivePrefix + id.uuidString.lowercased()
+    }
+
+    public static func googleDriveProfileID(from destination: String) -> UUID? {
+        guard destination.lowercased().hasPrefix(googleDrivePrefix) else { return nil }
+        return UUID(uuidString: String(destination.dropFirst(googleDrivePrefix.count)))
+    }
+}
+
+public struct GoogleDriveDestinationProfile: Codable, Equatable, Identifiable, Sendable {
+    public let id: UUID
+    public let name: String
+    public let remoteName: String
+    public let remotePath: String
+
+    public init(id: UUID = UUID(), name: String = "Google Drive", remoteName: String = "gdrive", remotePath: String = "/") throws {
+        let normalizedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedRemoteName = remoteName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedPath = remotePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        let components = trimmedPath.split(separator: "/", omittingEmptySubsequences: true)
+        guard !normalizedName.isEmpty,
+              !normalizedRemoteName.isEmpty,
+              normalizedRemoteName.count <= 64,
+              normalizedRemoteName.range(of: #"^[A-Za-z0-9._-]+$"#, options: .regularExpression) != nil,
+              !components.contains("."),
+              !components.contains("..") else {
+            throw RemoteDestinationError.invalidConfiguration
+        }
+        self.id = id
+        self.name = normalizedName
+        self.remoteName = normalizedRemoteName
+        self.remotePath = components.isEmpty ? "/" : "/" + components.joined(separator: "/")
+    }
+}
+
+public actor GoogleDriveDestinationStore {
+    private let fileURL: URL
+    private var profiles: [UUID: GoogleDriveDestinationProfile]
+
+    public init(fileURL: URL) throws {
+        self.fileURL = fileURL
+        if FileManager.default.fileExists(atPath: fileURL.path) {
+            let decoded = try JSONDecoder().decode([GoogleDriveDestinationProfile].self, from: Data(contentsOf: fileURL))
+            profiles = Dictionary(uniqueKeysWithValues: decoded.map { ($0.id, $0) })
+        } else {
+            profiles = [:]
+        }
+    }
+
+    public func all() -> [GoogleDriveDestinationProfile] {
+        profiles.values.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    public func profile(id: UUID) -> GoogleDriveDestinationProfile? {
+        profiles[id]
+    }
+
+    public func save(name: String = "Google Drive", remoteName: String, remotePath: String, id: UUID? = nil) throws -> GoogleDriveDestinationProfile {
+        let matchingID = id ?? profiles.values.first(where: { $0.remoteName.caseInsensitiveCompare(remoteName) == .orderedSame })?.id ?? UUID()
+        let profile = try GoogleDriveDestinationProfile(id: matchingID, name: name, remoteName: remoteName, remotePath: remotePath)
+        profiles[profile.id] = profile
+        try persist()
+        return profile
+    }
+
+    public func remove(id: UUID) throws {
+        guard profiles.removeValue(forKey: id) != nil else { throw RemoteDestinationError.notFound }
+        try persist()
+    }
+
+    private func persist() throws {
+        try FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        try encoder.encode(all()).write(to: fileURL, options: .atomic)
+    }
+}
+
+public struct GoogleDriveFolder: Codable, Equatable, Sendable {
+    public let name: String
+    public let path: String
+
+    public init(name: String, path: String) {
+        self.name = name
+        self.path = path
     }
 }
 

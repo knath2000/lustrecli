@@ -26,25 +26,53 @@ import {
 import type { FeedItem, FeedPage, FeedQuery, FeedSite } from "@/lib/feed-model";
 import {
   cloudDashboardRefreshPaths,
+  cloudDashboardPollingDelay,
+  cloudDeviceIsOnline,
+  cloudDeviceOfflineMessage,
   cloudDestinationViewNeedsRefresh,
   cloudFeedRequestKey,
+  cloudGoogleDriveFolderListPath,
   coalesceCloudFeedRequest,
   normalizeCloudFeedQuery,
 } from "@/lib/cloud-feed-ui";
+import type { CloudDevicePresence } from "@/lib/cloud-feed-ui";
 import { pornHubAuthMutationMessage } from "@/lib/pornhub-auth-model";
 import type { PollingInterval } from "@/lib/settings-model";
 import { ActivityView } from "./activity-view";
-import { DestinationsView, type DestinationProfile } from "./destinations-view";
+import { DestinationsView, type DestinationProfile, type GoogleDriveFolder } from "./destinations-view";
 import { DownloadsView } from "./downloads-view";
-import { FeedView, type FeedRefresh } from "./feed-view";
+import { type FeedRefresh } from "./feed-view";
 import { SettingsView } from "./settings-view";
 import { DevicesView } from "./devices/devices-view";
+import { HomeWorkspaceView } from "./home-workspace-view";
+import { LibraryView } from "./library-view";
+import { WatchApp } from "@/components/lustre-watch/watch-app";
+import type { FeedItem as WatchFeedItem, FeedPlaybackResolution as WatchPlaybackResolution, WatchlistItem as WatchlistEntry } from "@/lib/lustre-watch/contracts";
 
 type Destination = DestinationProfile;
 type PornHubAuthStatus = {
   state: "signedOut" | "signingIn" | "signedIn" | "expired";
   lastValidatedAt?: string;
   message?: string;
+  code?: string;
+};
+type DashboardCounts = {
+  active: number;
+  queued: number;
+  failed: number;
+  completed: number;
+};
+type CloudJobPayload = {
+  id: string;
+  sourcePageURL?: string | null;
+  displayName: string;
+  preferredQualityLabel?: string | null;
+  status: string;
+  progress?: number | null;
+  downloadedBytes?: number | null;
+  totalBytes?: number | null;
+  phase?: string | null;
+  updatedAt: string;
 };
 
 const navigation = [
@@ -57,6 +85,28 @@ const navigation = [
 ] as const;
 const feedNavigation = ["Feed", "feed"] as const;
 const tokenPattern = /^[A-Za-z0-9+/=]+$/;
+
+function cloudJobs(payload: { jobs?: CloudJobPayload[] }): DownloadJob[] {
+  return (payload.jobs ?? []).map((job) => ({
+    id: job.id,
+    sourcePageURL: job.sourcePageURL ?? `lustre://job/${job.id}`,
+    displayName: job.displayName,
+    preferredQualityLabel: job.preferredQualityLabel ?? undefined,
+    destination: "local",
+    status: job.status as DownloadJob["status"],
+    message: `${job.displayName} · synced from paired Mac`,
+    progress: job.progress ?? undefined,
+    downloadedBytes: job.downloadedBytes ?? undefined,
+    totalBytes: job.totalBytes ?? undefined,
+    transferPhase: job.phase as DownloadJob["transferPhase"] | undefined,
+    logs: [{
+      timestamp: job.updatedAt,
+      level: ["failed", "verificationRequired"].includes(job.status) ? "error" as const : "info" as const,
+      message: `${job.status} reported by paired Mac.`,
+    }],
+    updatedAt: job.updatedAt,
+  }));
+}
 
 function Glyph({ name, size = 18 }: { name: string; size?: number }) {
   const props = {
@@ -71,6 +121,30 @@ function Glyph({ name, size = 18 }: { name: string; size?: number }) {
     "aria-hidden": true,
   };
   const shapes: Record<string, React.ReactNode> = {
+    menu: (
+      <>
+        <path d="M5 7h14M5 12h14M5 17h14" />
+      </>
+    ),
+    home: (
+      <>
+        <path d="m4 10 8-6 8 6" />
+        <path d="M6.5 9v10h11V9M10 19v-5h4v5" />
+      </>
+    ),
+    broadcast: (
+      <>
+        <path d="M8.2 8.2a5.4 5.4 0 0 0 0 7.6M5.4 5.4a9.4 9.4 0 0 0 0 13.2M15.8 8.2a5.4 5.4 0 0 1 0 7.6M18.6 5.4a9.4 9.4 0 0 1 0 13.2" />
+        <circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none" />
+      </>
+    ),
+    books: (
+      <>
+        <rect x="4" y="6" width="4" height="13" rx="1" />
+        <rect x="10" y="3" width="4" height="16" rx="1" />
+        <path d="m16.5 6 3.5-1 3.2 12.8-3.5.9Z" />
+      </>
+    ),
     cloud: (
       <>
         <path d="M7 18.5h10a4 4 0 0 0 .7-7.94A5.5 5.5 0 0 0 7.1 9.14 4.7 4.7 0 0 0 7 18.5Z" />
@@ -180,6 +254,7 @@ function Glyph({ name, size = 18 }: { name: string; size?: number }) {
 }
 
 function titleFor(job: DownloadJob) {
+  if (job.displayName?.trim()) return job.displayName;
   try {
     return decodeURIComponent(
       new URL(job.sourcePageURL).pathname.split("/").filter(Boolean).at(-1) ||
@@ -191,11 +266,11 @@ function titleFor(job: DownloadJob) {
 }
 function destinationName(job: DownloadJob, destinations: Destination[]) {
   if (job.destination === "local") return "Local Downloads";
-  const id = job.destination.replace(/^webdav:/i, "");
+  const id = job.destination.replace(/^(webdav|gdrive):/i, "");
   return (
     destinations.find(
       (destination) => destination.id.toLowerCase() === id.toLowerCase(),
-    )?.name ?? "Remote WebDAV"
+    )?.name ?? (/^gdrive:/i.test(job.destination) ? "Google Drive" : "Remote WebDAV")
   );
 }
 async function waitForCloudCommand(base: string, id: string) {
@@ -234,8 +309,27 @@ function feedCommandFailureMessage(code: unknown) {
     case "authentication_required": return "Sign in to this source on the paired Mac, then refresh.";
     case "result_too_large": return "This source returned too many items for one safe Cloud page.";
     case "invalid_request": return "The Feed request was rejected as invalid.";
+    case "signing_in": return "A PornHub sign-in window is already open on the paired Mac.";
+    case "auth_helper_unavailable": return "The PornHub sign-in helper is unavailable on the paired Mac.";
+    case "auth_helper_failed": return "The PornHub sign-in helper did not complete.";
+    case "auth_timeout": return "The PornHub sign-in window timed out.";
+    case "invalid_session": return "PornHub rejected the saved session.";
+    case "auth_storage_unavailable": return "PornHub session storage is unavailable on the paired Mac.";
+    case "agent_offline": return "Paired Mac is offline. Mount MyPassport and start Lustre Agent, then retry.";
+    case "command_expired": return "The PornHub sign-in request expired before the paired Mac received it. Confirm the agent is online, then retry.";
     default: return "The paired Mac could not complete this request.";
   }
+}
+
+function cloudPornHubAuthStatus(value: PornHubAuthStatus): PornHubAuthStatus {
+  return { ...value, message: value.code ? feedCommandFailureMessage(value.code) : undefined };
+}
+
+async function fetchCloudPresence(deviceID: string): Promise<CloudDevicePresence> {
+  const response = await fetch(`/api/cloud/v1/devices/${deviceID}/presence`, { cache: "no-store" });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload.error?.message ?? "Unable to load paired Mac presence.");
+  return payload as CloudDevicePresence;
 }
 
 async function beginFeedCommand<T>(
@@ -280,8 +374,10 @@ async function agentRequest<T>(
     body = {
       kind: "queue_url",
       url: input.sourcePageURL,
+      title: input.title ?? undefined,
       preferredQualityLabel: input.preferredQualityLabel ?? undefined,
       destination: input.destination ?? "local",
+      requestID: input.requestID ?? undefined,
     };
   } else {
     const match = path.match(/^\/v1\/jobs\/([^/]+)\/action$/);
@@ -300,9 +396,28 @@ async function agentRequest<T>(
     target = `${base}/commands`;
     body = { kind: "feed_queue", ...input };
   }
+  if (path === "/v1/feed/resolve" && options.method === "POST") {
+    const input = JSON.parse(String(options.body ?? "{}"));
+    target = `${base}/commands`;
+    body = { kind: "feed_resolve", ...input };
+  }
+  if (path === "/v1/watchlist/resolve" && options.method === "POST") {
+    const input = JSON.parse(String(options.body ?? "{}"));
+    target = `${base}/commands`;
+    body = { kind: "watchlist_resolve", watchlistID: input.watchlistID };
+  }
   if (path === "/v1/destinations") {
     target = `${base}/commands`;
     body = { kind: "destinations_list" };
+  } else if (path === "/v1/destinations/local-folder" && (options.method ?? "GET") === "GET") {
+    target = `${base}/commands`;
+    body = { kind: "local_folder_status" };
+  } else if (path === "/v1/destinations/local-folder" && options.method === "POST") {
+    target = `${base}/commands`;
+    body = { kind: "local_folder_choose" };
+  } else if (path === "/v1/destinations/local-folder" && options.method === "DELETE") {
+    target = `${base}/commands`;
+    body = { kind: "local_folder_reset" };
   } else {
     const feed = path.match(/^\/v1\/feed\/items\?(.+)$/);
     if (feed) {
@@ -328,6 +443,46 @@ async function agentRequest<T>(
       allowInvalidCertificate: input.allowInvalidCertificate,
     };
   }
+  if (path === "/v1/destinations/google-drive/connect" && options.method === "POST") {
+    target = `${base}/commands`;
+    body = { kind: "gdrive_connect" };
+  } else {
+    const folders = path.match(/^\/v1\/destinations\/([^/]+)\/google-drive\/folders\?path=(.*)$/);
+    const createFolder = path.match(/^\/v1\/destinations\/([^/]+)\/google-drive\/folders$/);
+    const selectFolder = path.match(/^\/v1\/destinations\/([^/]+)\/google-drive\/folder$/);
+    if (folders) {
+      target = `${base}/commands`;
+      body = { kind: "gdrive_folders", profileID: folders[1], path: decodeURIComponent(folders[2]) };
+    } else if (createFolder && options.method === "POST") {
+      const input = JSON.parse(String(options.body ?? "{}"));
+      target = `${base}/commands`;
+      body = { kind: "gdrive_create_folder", profileID: createFolder[1], path: input.path };
+    } else if (selectFolder && options.method === "POST") {
+      const input = JSON.parse(String(options.body ?? "{}"));
+      target = `${base}/commands`;
+      body = { kind: "gdrive_select_folder", profileID: selectFolder[1], path: input.path };
+    }
+  }
+  {
+    const test = path.match(/^\/v1\/destinations\/([^/]+)\/google-drive\/test$/);
+    if (test && options.method === "POST") {
+      target = `${base}/commands`;
+      body = { kind: "gdrive_test", profileID: test[1] };
+    }
+  }
+  if (path === "/v1/auth/pornhub" && (options.method ?? "GET") === "GET") {
+    target = `${base}/commands`;
+    body = { kind: "pornhub_auth_status" };
+  } else if (path === "/v1/auth/pornhub/login" && options.method === "POST") {
+    target = `${base}/commands`;
+    body = { kind: "pornhub_auth_login" };
+  } else if (path === "/v1/auth/pornhub/login" && options.method === "DELETE") {
+    target = `${base}/commands`;
+    body = { kind: "pornhub_auth_cancel" };
+  } else if (path === "/v1/auth/pornhub" && options.method === "DELETE") {
+    target = `${base}/commands`;
+    body = { kind: "pornhub_auth_logout" };
+  }
   if (!target)
     throw new Error(
       "This dashboard capability is still being moved to the paired-agent transport.",
@@ -346,41 +501,7 @@ async function agentRequest<T>(
   if (!response.ok)
     throw new Error(payload.error?.message ?? "The paired Mac request failed.");
   if (path === "/v1/jobs" && (options.method ?? "GET") === "GET")
-    return payload.jobs.map(
-      (job: {
-        id: string;
-        sourcePageURL?: string | null;
-        displayName: string;
-        preferredQualityLabel?: string | null;
-        status: string;
-        progress?: number | null;
-        downloadedBytes?: number | null;
-        totalBytes?: number | null;
-        phase?: string | null;
-        updatedAt: string;
-      }) => ({
-        id: job.id,
-        sourcePageURL: job.sourcePageURL ?? `lustre://job/${job.id}`,
-        preferredQualityLabel: job.preferredQualityLabel ?? undefined,
-        destination: "local",
-        status: job.status,
-        message: `${job.displayName} · synced from paired Mac`,
-        progress: job.progress ?? undefined,
-        downloadedBytes: job.downloadedBytes ?? undefined,
-        totalBytes: job.totalBytes ?? undefined,
-        transferPhase: job.phase ?? undefined,
-        logs: [
-          {
-            timestamp: job.updatedAt,
-            level: ["failed", "verificationRequired"].includes(job.status)
-              ? "error"
-              : "info",
-            message: `${job.status} reported by paired Mac.`,
-          },
-        ],
-        updatedAt: job.updatedAt,
-      }),
-    ) as T;
+    return cloudJobs(payload) as T;
   if (target === `${base}/commands`) {
     const result = await waitForCloudCommand(base, payload.command.id);
     if (path === "/v1/feed/queue") {
@@ -395,8 +516,38 @@ async function agentRequest<T>(
       }
       throw new Error("The queued transfer was acknowledged but has not appeared in projected job status.");
     }
-    if (path.startsWith("/v1/feed/") || path === "/v1/destinations")
+    if (cloudGoogleDriveFolderListPath(path))
+      return (result.googleDriveFolders ?? []) as T;
+    if (path === "/v1/destinations/local-folder")
+      return result.localDownloadFolder as T;
+    if (path === "/v1/feed/resolve" || path === "/v1/watchlist/resolve") {
+      const playback = result.playback as {
+        sourcePageURL: string;
+        title?: string;
+        provider: string;
+        qualities: Array<{ label: string; url: string; mediaKind: string; headers: Record<string, string> }>;
+      } | undefined;
+      if (!playback?.qualities?.length) throw new Error("The paired Mac returned no playable sources.");
+      return {
+        sourcePageURL: playback.sourcePageURL,
+        title: playback.title ?? "Lustre extraction",
+        providerAttempts: [{ provider: playback.provider, status: "resolved" }],
+        qualities: playback.qualities.map((quality) => ({
+          label: quality.label,
+          url: quality.url,
+          mediaKind: quality.mediaKind === "hls" ? "hls" : "video",
+          headers: quality.headers,
+          provider: playback.provider,
+          resolutionMethod: "native",
+        })),
+      } as T;
+    }
+    if (path.startsWith("/v1/feed/") || path === "/v1/destinations" || path === "/v1/destinations/google-drive/connect" || path.includes("/google-drive/folder"))
       return (result.sites ?? result.page ?? result.destinations ?? []) as T;
+    if (path.includes("/google-drive/test"))
+      return { message: "Google Drive connection succeeded." } as T;
+    if (path.startsWith("/v1/auth/pornhub"))
+      return cloudPornHubAuthStatus(result.pornHubAuth as PornHubAuthStatus) as T;
     return result as T;
   }
   return (payload.jobs ?? payload) as T;
@@ -462,7 +613,7 @@ function QueueSheet({
         <header>
           <p className="eyebrow">Device command</p>
           <h2 id="queue-title">Queue Transfer: Mission Entry</h2>
-          <p>Send a source to the connected local Lustre agent.</p>
+          <p>Send a PMVHaven, AllPornStream, HQPorner, PornHub, or direct media source to the connected local Lustre agent.</p>
         </header>
         <form onSubmit={submit}>
           <label className="field-label">
@@ -472,7 +623,7 @@ function QueueSheet({
               onChange={(event) => setSourcePageURL(event.target.value)}
               type="url"
               required
-              placeholder="https://…"
+              placeholder="https://pmvhaven.com/video/…"
               autoFocus
             />
           </label>
@@ -493,8 +644,8 @@ function QueueSheet({
               >
                 <option value="local">Local Downloads</option>
                 {destinations.map((item) => (
-                  <option value={`webdav:${item.id}`} key={item.id}>
-                    {item.name} · WebDAV
+                  <option value={`${item.kind === "google_drive" ? "gdrive" : "webdav"}:${item.id}`} key={item.id}>
+                    {item.name} · {item.kind === "google_drive" ? "Google Drive" : "WebDAV"}
                   </option>
                 ))}
               </select>
@@ -674,14 +825,23 @@ export function CloudFullDashboard({
   feedQueueEnabled?: boolean;
   suppressDestinationPolling?: boolean;
 }) {
-  const [activeNav, setActiveNav] = useState("Dashboard");
+  const [activeNav, setActiveNav] = useState("Home");
   const [token, setToken] = useState("");
   const [tokenInput, setTokenInput] = useState("");
   const [jobs, setJobs] = useState<DownloadJob[]>([]);
+  const [jobCounts, setJobCounts] = useState<DashboardCounts>({
+    active: 0,
+    queued: 0,
+    failed: 0,
+    completed: 0,
+  });
   const [destinations, setDestinations] = useState<Destination[]>([]);
   const [connected, setConnected] = useState(false);
   const [loading, setLoading] = useState(false);
   const [showQueue, setShowQueue] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [downloadInitialStatus, setDownloadInitialStatus] = useState<"all" | "active" | "queued" | "failed" | "completed">("all");
+  const [homeDownloadsStatus, setHomeDownloadsStatus] = useState<"active" | "queued" | "failed" | "completed" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [pollingInterval, setPollingInterval] = useState<PollingInterval>(2000);
@@ -691,6 +851,7 @@ export function CloudFullDashboard({
   const [pornHubAuth, setPornHubAuth] = useState<PornHubAuthStatus | null>(
     null,
   );
+  const homeDownloadsModalRef = useRef<HTMLElement | null>(null);
   const authStatusSequence = useRef(new AuthStatusSequence());
   const feedRequests = useRef(new Map<string, Promise<unknown>>());
   const visibleNavigation = useMemo(
@@ -719,7 +880,9 @@ export function CloudFullDashboard({
         if (!device) return;
         window.localStorage.setItem("lustre.cloud.selected-device", device.id);
         setToken(device.id);
-        setConnected(true);
+        const presence = await fetchCloudPresence(device.id);
+        setConnected(cloudDeviceIsOnline(presence));
+        setError(cloudDeviceOfflineMessage(presence));
       } catch {
         setError("Unable to load a paired Mac. Open Devices to pair one.");
       }
@@ -744,19 +907,36 @@ export function CloudFullDashboard({
       }
       const sequence = refreshSequence.current;
       const refreshPaths = cloudDashboardRefreshPaths(suppressDestinationPolling);
+      const historyStatus = homeDownloadsStatus;
+      const needsHistory = historyStatus !== null || ["Downloads", "Activity", "Destinations"].includes(activeNav);
+      const snapshotRequest = fetch(`/api/cloud/v1/devices/${activeToken}/jobs?scope=dashboard`, { cache: "no-store" })
+        .then(async (response) => {
+          const payload = await response.json().catch(() => ({}));
+          if (!response.ok) throw new Error(payload.error?.message ?? "Download status is unavailable.");
+          return payload as { jobs: CloudJobPayload[]; counts: DashboardCounts; presence: CloudDevicePresence };
+        });
+      const historyRequest = needsHistory
+        ? fetch(`/api/cloud/v1/devices/${activeToken}/jobs?limit=100${historyStatus ? `&status=${encodeURIComponent(historyStatus)}` : ""}`, { cache: "no-store" })
+          .then(async (response) => {
+            const payload = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(payload.error?.message ?? "Download history is unavailable.");
+            return cloudJobs(payload);
+          })
+        : Promise.resolve(null);
       const promise = Promise.all([
-        agentRequest<DownloadJob[]>(activeToken, "/v1/jobs"),
+        snapshotRequest,
+        historyRequest,
         refreshPaths.includes("/v1/destinations")
           ? agentRequest<Destination[]>(activeToken, "/v1/destinations")
           : Promise.resolve([]),
-      ]).then(([nextJobs, nextDestinations]) => {
+      ]).then(([snapshot, historyJobs, nextDestinations]) => {
         if (sequence !== refreshSequence.current) return;
-        setJobs(nextJobs);
+        setJobs(historyJobs ?? cloudJobs(snapshot));
+        setJobCounts(snapshot.counts);
         if (refreshPaths.includes("/v1/destinations"))
           setDestinations(nextDestinations);
-        setPornHubAuth(null);
-        setConnected(true);
-        setError(null);
+        setConnected(cloudDeviceIsOnline(snapshot.presence));
+        setError(cloudDeviceOfflineMessage(snapshot.presence));
       });
       refreshInFlight.current = { token: activeToken, promise };
       try {
@@ -769,11 +949,18 @@ export function CloudFullDashboard({
           refreshInFlight.current = null;
       }
     },
-    [suppressDestinationPolling, token],
+    [activeNav, homeDownloadsStatus, suppressDestinationPolling, token],
   );
   useEffect(() => {
     if (!token) return;
-    const poll = () =>
+    let timer: number | undefined;
+    let cancelled = false;
+    const schedule = (immediate = false) => {
+      if (cancelled || document.hidden) return;
+      timer = window.setTimeout(poll, immediate ? 0 : cloudDashboardPollingDelay(jobCounts.active + jobCounts.queued, pollingInterval));
+    };
+    const poll = () => {
+      if (document.hidden) return;
       void refresh(token).catch((reason) => {
         setConnected(false);
         setError(
@@ -781,14 +968,60 @@ export function CloudFullDashboard({
             ? reason.message
             : "The local agent connection failed.",
         );
-      });
-    const firstPoll = window.setTimeout(poll, 0);
-    const timer = window.setInterval(poll, pollingInterval);
-    return () => {
-      window.clearTimeout(firstPoll);
-      window.clearInterval(timer);
+      }).finally(() => schedule());
     };
-  }, [token, refresh, pollingInterval]);
+    const visibilityChanged = () => {
+      if (timer !== undefined) window.clearTimeout(timer);
+      if (!document.hidden) schedule(true);
+    };
+    document.addEventListener("visibilitychange", visibilityChanged);
+    schedule(true);
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+      document.removeEventListener("visibilitychange", visibilityChanged);
+    };
+  }, [jobCounts.active, jobCounts.queued, token, refresh, pollingInterval]);
+  useEffect(() => {
+    if (!homeDownloadsStatus) return;
+    const previous = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    requestAnimationFrame(() => homeDownloadsModalRef.current?.querySelector<HTMLElement>(".home-downloads-close")?.focus());
+    const close = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setHomeDownloadsStatus(null);
+      if (event.key !== "Tab" || !homeDownloadsModalRef.current) return;
+      const focusable = [...homeDownloadsModalRef.current.querySelectorAll<HTMLElement>("button:not(:disabled), a[href], input:not(:disabled), select:not(:disabled), [tabindex]:not([tabindex='-1'])")];
+      if (!focusable.length) return;
+      const first = focusable[0]!;
+      const last = focusable.at(-1)!;
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    };
+    window.addEventListener("keydown", close);
+    return () => {
+      document.body.style.overflow = previous;
+      window.removeEventListener("keydown", close);
+    };
+  }, [homeDownloadsStatus]);
+  useEffect(() => {
+    if (activeNav !== "Home") setHomeDownloadsStatus(null);
+  }, [activeNav]);
+  useEffect(() => {
+    if (!token || !connected || activeNav !== "Settings" || (pornHubAuth && pornHubAuth.state !== "signingIn")) return;
+    let active = true;
+    const timer = window.setTimeout(async () => {
+      try {
+        const status = await agentRequest<PornHubAuthStatus>(token, "/v1/auth/pornhub");
+        if (active) setPornHubAuth(status);
+      } catch (reason) {
+        if (active) setError(reason instanceof Error ? reason.message : "Unable to load PornHub sign-in status.");
+      }
+    }, pornHubAuth?.state === "signingIn" ? 5_000 : 0);
+    return () => {
+      active = false;
+      window.clearTimeout(timer);
+    };
+  }, [activeNav, connected, pornHubAuth, token]);
   const connect = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const nextToken = tokenInput.trim();
@@ -832,7 +1065,7 @@ export function CloudFullDashboard({
     }
   };
   const saveDestination = async (
-    input: Omit<DestinationProfile, "id"> & { password: string },
+    input: { name: string; baseURL: string; username: string; remotePath: string; allowInvalidCertificate: boolean; password: string },
   ) => {
     await agentRequest<DestinationProfile>(token, "/v1/destinations/webdav", {
       method: "POST",
@@ -841,10 +1074,39 @@ export function CloudFullDashboard({
     await refresh(token, true);
     notify(`${input.name} saved to the local agent.`);
   };
+  const connectGoogleDrive = async () => {
+    const next = await agentRequest<DestinationProfile[]>(token, "/v1/destinations/google-drive/connect", { method: "POST" });
+    setDestinations(next);
+    notify("Google Drive connected through the paired Mac.");
+  };
+  const loadGoogleDriveFolders = (id: string, path: string) =>
+    agentRequest<GoogleDriveFolder[]>(token, `/v1/destinations/${id}/google-drive/folders?path=${encodeURIComponent(path)}`);
+  const selectGoogleDriveFolder = async (id: string, path: string) => {
+    const next = await agentRequest<DestinationProfile[]>(token, `/v1/destinations/${id}/google-drive/folder`, { method: "POST", body: JSON.stringify({ path }) });
+    setDestinations(next);
+    notify(`Google Drive uploads will use ${path}.`);
+  };
+  const createGoogleDriveFolder = async (id: string, path: string) => {
+    await agentRequest<Record<string, unknown>>(token, `/v1/destinations/${id}/google-drive/folders`, { method: "POST", body: JSON.stringify({ path }) });
+    notify(`Created ${path.split("/").at(-1)} in Google Drive.`);
+  };
+  const loadLocalDownloadFolder = () =>
+    agentRequest<{ mode: "default" | "custom"; folderName: string }>(token, "/v1/destinations/local-folder");
+  const chooseLocalDownloadFolder = async () => {
+    const status = await agentRequest<{ mode: "default" | "custom"; folderName: string }>(token, "/v1/destinations/local-folder", { method: "POST" });
+    notify(`Local downloads will be saved in ${status.folderName}.`);
+    return status;
+  };
+  const resetLocalDownloadFolder = async () => {
+    const status = await agentRequest<{ mode: "default" | "custom"; folderName: string }>(token, "/v1/destinations/local-folder", { method: "DELETE" });
+    notify("Local downloads reset to Lustre’s default Downloads folder.");
+    return status;
+  };
   const testDestination = async (id: string) => {
+    const profile = destinations.find((item) => item.id === id);
     const result = await agentRequest<{ message: string }>(
       token,
-      `/v1/destinations/${id}/test`,
+      profile?.kind === "google_drive" ? `/v1/destinations/${id}/google-drive/test` : `/v1/destinations/${id}/test`,
       { method: "POST" },
     );
     notify(result.message);
@@ -876,6 +1138,8 @@ export function CloudFullDashboard({
   const signInWithPornHub = async () => {
     const sequence = authStatusSequence.current.beginAction();
     try {
+      const presence = await fetchCloudPresence(token);
+      if (!cloudDeviceIsOnline(presence)) throw new Error(cloudDeviceOfflineMessage(presence)!);
       const status = await agentRequest<PornHubAuthStatus>(
         token,
         "/v1/auth/pornhub/login",
@@ -992,12 +1256,51 @@ export function CloudFullDashboard({
           itemID: item.id,
           siteID: item.siteID,
           sourcePageURL: item.sourcePageURL,
+          title: item.title,
           destination,
         }),
       });
     },
     [token],
   );
+  const resolveFeedItem = useCallback(
+    (item: WatchFeedItem) =>
+      agentRequest<WatchPlaybackResolution>(token, "/v1/feed/resolve", {
+        method: "POST",
+        body: JSON.stringify({
+          itemID: item.id,
+          siteID: item.siteID,
+          sourcePageURL: item.sourcePageURL,
+        }),
+      }),
+    [token],
+  );
+  const resolveWatchlistItem = useCallback(
+    (item: WatchlistEntry) =>
+      agentRequest<WatchPlaybackResolution>(token, "/v1/watchlist/resolve", {
+        method: "POST",
+        body: JSON.stringify({ watchlistID: item.id }),
+      }),
+    [token],
+  );
+  const saveFeedItem = useCallback(async (item: FeedItem) => {
+    const response = await fetch("/api/cloud/v1/watchlist", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sourcePageURL: item.sourcePageURL,
+        title: item.title,
+        provider: item.studio ?? item.siteID,
+        thumbnailURL: item.thumbnailURL ?? null,
+      }),
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error?.message ?? "Unable to save this video.");
+  }, []);
+  const queueWatchItem = useCallback(async (item: WatchFeedItem) => {
+    await queueFeedItem(item as FeedItem, "local", crypto.randomUUID());
+    if (token) await refresh(token, true);
+  }, [queueFeedItem, refresh, token]);
   const loadFeedAsset = useCallback(async (url: string, kind: "image" | "video") => {
     if (!token || !feedMediaEnabled) throw new Error("Feed media is unavailable.");
     const ticketResponse = await fetch(`/api/cloud/v1/devices/${token}/feed-assets/ticket`, {
@@ -1022,13 +1325,6 @@ export function CloudFullDashboard({
   const refreshAfterFeedQueue = useCallback(async () => {
     await refresh(token, true);
   }, [refresh, token]);
-  const activeJobs = useMemo(
-    () =>
-      jobs.filter(
-        (job) => !["completed", "failed", "cancelled"].includes(job.status),
-      ),
-    [jobs],
-  );
   const latestLogs = useMemo(
     () =>
       jobs
@@ -1042,128 +1338,12 @@ export function CloudFullDashboard({
     [jobs],
   );
   return (
-    <main className="app-shell">
-      <aside className="sidebar">
-        <a className="brand" href="#workspace" aria-label="Lustre Cloud home">
-          <span className="brand-mark">
-            <Glyph name="cloud" />
-          </span>
-          <span>
-            <strong>
-              LUSTRE
-              <br />
-              CLOUD
-            </strong>
-            <small>Local agent bridge</small>
-          </span>
-        </a>
-        <nav aria-label="Primary navigation">
-          {visibleNavigation.map(([label, icon]) => (
-            <button
-              key={label}
-              className={`nav-item ${activeNav === label ? "active" : ""}`}
-              onClick={() => setActiveNav(label)}
-            >
-              <Glyph name={icon} />
-              <span>{label}</span>
-            </button>
-          ))}
-        </nav>
-        <div className="sidebar-bottom">
-          <button className="nav-item">
-            <Glyph name="support" />
-            <span>Support</span>
-          </button>
-          <button className="nav-item">
-            <Glyph name="account" />
-            <span>Account</span>
-          </button>
-        </div>
-      </aside>
-      <section className="workspace" id="workspace">
-        <header className="topbar">
-          <div className="device-heading">
-            <span className="device-icon">
-              <Glyph name="computer" />
-            </span>
-            <div>
-              <h1>
-                Local Lustre Agent{" "}
-                <span className={`online ${connected ? "" : "offline"}`}>
-                  <i />
-                  {connected ? "ONLINE" : "NOT CONNECTED"}
-                </span>
-              </h1>
-              <p>
-                {connected
-                  ? `${activeJobs.length} active transfer${activeJobs.length === 1 ? "" : "s"} · ${jobs.length} durable job${jobs.length === 1 ? "" : "s"}`
-                  : "Connect with the token from `lustre token`"}
-              </p>
-            </div>
-          </div>
-          <div className="top-actions">
-            <button className="connect-button" onClick={disconnect}>
-              {connected ? "Disconnect" : "Connect agent"}
-            </button>
-            <button className="icon-button" aria-label="Notifications">
-              <Glyph name="bell" />
-            </button>
-            <UserButton appearance={{ elements: { avatarBox: "avatar" } }} />
-          </div>
-        </header>
-        {false ? (
-          <section className="connection-screen">
-            <div className="connection-card glass-panel">
-              <span className="connection-mark">
-                <Glyph name="key" size={24} />
-              </span>
-              <p className="eyebrow">Local bridge</p>
-              <h2>Connect your Lustre agent</h2>
-              <p>
-                Enter the one-time local token printed by{" "}
-                <code>lustre token</code>. It stays only in this browser tab and
-                is sent through the local Next.js bridge.
-              </p>
-              <form onSubmit={connect}>
-                <label>
-                  Agent token
-                  <input
-                    value={tokenInput}
-                    onChange={(event) => setTokenInput(event.target.value)}
-                    type="password"
-                    autoComplete="off"
-                    placeholder="Paste the token from lustre token"
-                  />
-                </label>
-                {error && (
-                  <p className="form-error" role="alert">
-                    {error}
-                  </p>
-                )}
-                <button className="initiate-button" disabled={loading}>
-                  {loading ? "Connecting…" : "Connect local agent"}
-                </button>
-              </form>
-              <small>
-                Requires <code>lustre-agent</code> running at 127.0.0.1:63406.
-              </small>
-            </div>
-          </section>
-        ) : activeNav === "Devices" ? (
+    <main className={`studio-shell ${activeNav === "Feed" || activeNav === "Watchlist" ? "watch-mode" : activeNav === "Home" ? "home-mode" : activeNav === "Downloads" ? "download-mode" : ""}`}>
+      <section className="studio-shell-workspace" id="workspace">
+        {activeNav === "Devices" ? (
           <DevicesView />
         ) : feedEnabled && activeNav === "Feed" ? (
-          <FeedView
-            destinations={destinations}
-            jobs={jobs}
-            loadSites={loadFeedSites}
-            loadPage={loadFeedPage}
-            queueItem={queueFeedItem}
-            loadAsset={loadFeedAsset}
-            onQueued={refreshAfterFeedQueue}
-            mediaEnabled={feedMediaEnabled}
-            destinationsEnabled={feedDestinationsEnabled}
-            queueEnabled={feedQueueEnabled}
-          />
+          <WatchApp activeTab="feed" canQueue={connected && feedQueueEnabled} canAgentResolve={connected} onQueue={queueWatchItem} onAgentResolveFeed={resolveFeedItem} onAgentResolveWatchlist={resolveWatchlistItem} onTabChange={(tab) => setActiveNav(tab === "feed" ? "Feed" : "Watchlist")} onExit={() => setActiveNav("Home")} />
         ) : activeNav === "Downloads" ? (
           <DownloadsView
             jobs={jobs}
@@ -1173,7 +1353,24 @@ export function CloudFullDashboard({
             onSelectJob={setSelectedDownloadId}
             onQueue={() => setShowQueue(true)}
             onAction={apply}
+            initialStatus={downloadInitialStatus}
           />
+        ) : activeNav === "Library" ? (
+          <LibraryView
+            deviceID={token}
+            connected={connected}
+            destinations={destinations}
+            onJobsChanged={() => refresh(token, true)}
+            onReExtract={(url) => {
+              const key = `lustre.home.workspace.${token}`;
+              let current: Record<string, unknown> = {};
+              try { current = JSON.parse(sessionStorage.getItem(key) ?? "{}"); } catch {}
+              sessionStorage.setItem(key, JSON.stringify({ ...current, draft: url }));
+              setActiveNav("Home");
+            }}
+          />
+        ) : activeNav === "Watchlist" ? (
+          <WatchApp activeTab="watchlist" canQueue={connected && feedQueueEnabled} canAgentResolve={connected} onQueue={queueWatchItem} onAgentResolveFeed={resolveFeedItem} onAgentResolveWatchlist={resolveWatchlistItem} onTabChange={(tab) => setActiveNav(tab === "feed" ? "Feed" : "Watchlist")} onExit={() => setActiveNav("Home")} />
         ) : activeNav === "Destinations" ? (
           <DestinationsView
             destinations={destinations}
@@ -1182,6 +1379,13 @@ export function CloudFullDashboard({
             onSave={saveDestination}
             onTest={testDestination}
             onDelete={deleteDestination}
+            onConnectGoogleDrive={connectGoogleDrive}
+            onLoadGoogleDriveFolders={loadGoogleDriveFolders}
+            onSelectGoogleDriveFolder={selectGoogleDriveFolder}
+            onCreateGoogleDriveFolder={createGoogleDriveFolder}
+            onLoadLocalDownloadFolder={loadLocalDownloadFolder}
+            onChooseLocalDownloadFolder={chooseLocalDownloadFolder}
+            onResetLocalDownloadFolder={resetLocalDownloadFolder}
           />
         ) : activeNav === "Activity" ? (
           <ActivityView
@@ -1208,130 +1412,67 @@ export function CloudFullDashboard({
             onPornHubSignOut={signOutOfPornHub}
           />
         ) : (
-          <div className="content-grid">
-            <section className="operations glass-panel">
-              <div className="panel-heading">
-                <div>
-                  <p className="eyebrow">Live workspace</p>
-                  <h2>
-                    Active Operations <span>{activeJobs.length}</span>
-                  </h2>
-                </div>
-                <button
-                  className="queue-button"
-                  onClick={() => setShowQueue(true)}
-                >
-                  <Glyph name="plus" size={16} /> Queue download
-                </button>
-              </div>
-              {error && (
-                <p className="inline-error" role="alert">
-                  {error}
-                </p>
-              )}
-              <div className="transfer-list">
-                {activeJobs.map((job) => (
-                  <TransferCard
-                    key={job.id}
-                    job={job}
-                    destinations={destinations}
-                    onAction={(action) => apply(job, action)}
-                  />
-                ))}
-              </div>
-              {activeJobs.length === 0 && (
-                <div className="empty-state">
-                  <Glyph name="downloads" size={24} />
-                  <h3>Queue is clear</h3>
-                  <p>
-                    Your local agent is online and ready for its next transfer.
-                  </p>
-                  <button
-                    className="queue-button"
-                    onClick={() => setShowQueue(true)}
-                  >
-                    Queue download
-                  </button>
-                </div>
-              )}
-            </section>
-            <aside className="health-panel glass-panel">
-              <div className="panel-heading">
-                <div>
-                  <p className="eyebrow">Agent telemetry</p>
-                  <h2>Agent Health</h2>
-                </div>
-                <span className="health-dot" />
-              </div>
-              <section className="agent-summary">
-                <div>
-                  <span>Connection</span>
-                  <strong>Protected loopback</strong>
-                </div>
-                <div>
-                  <span>Remote profiles</span>
-                  <strong>{destinations.length}</strong>
-                </div>
-                <div>
-                  <span>Last sync</span>
-                  <strong>Live · {pollingInterval / 1000}s polling</strong>
-                </div>
-              </section>
-              <dl className="health-list">
-                <div>
-                  <dt>Queued</dt>
-                  <dd>
-                    {jobs.filter((job) => job.status === "queued").length}
-                  </dd>
-                </div>
-                <div>
-                  <dt>Running</dt>
-                  <dd className="connection">
-                    {jobs.filter((job) => job.status === "running").length}
-                  </dd>
-                </div>
-                <div>
-                  <dt>Paused</dt>
-                  <dd>
-                    {jobs.filter((job) => job.status === "paused").length}
-                  </dd>
-                </div>
-                <div>
-                  <dt>Completed</dt>
-                  <dd>
-                    {jobs.filter((job) => job.status === "completed").length}
-                  </dd>
-                </div>
-              </dl>
-              <section className="event-log">
-                <div className="log-heading">
-                  <span>Agent event log</span>
-                  <i>LIVE</i>
-                </div>
-                {latestLogs.length ? (
-                  <ol>
-                    {latestLogs.map((entry, index) => (
-                      <li key={`${entry.timestamp}-${index}`}>
-                        <time>
-                          {new Date(
-                            agentDateMilliseconds(entry.timestamp),
-                          ).toLocaleTimeString()}
-                        </time>
-                        <b className={entry.level === "error" ? "warn" : ""}>
-                          {entry.level}
-                        </b>{" "}
-                        {entry.message}
-                      </li>
-                    ))}
-                  </ol>
-                ) : (
-                  <p className="no-events">No worker events yet.</p>
-                )}
-              </section>
-            </aside>
-          </div>
+          <>
+            <HomeWorkspaceView
+              deviceID={token}
+              connected={connected}
+              jobCounts={jobCounts}
+              destinations={destinations}
+              onJobsChanged={() => refresh(token, true)}
+              onOpenDownloads={(status) => {
+                setSelectedDownloadId(null);
+                setJobs([]);
+                setHomeDownloadsStatus(status);
+              }}
+            />
+          </>
         )}
       </section>
+      {activeNav === "Home" && homeDownloadsStatus && (
+        <div className="home-downloads-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setHomeDownloadsStatus(null); }}>
+          <section ref={homeDownloadsModalRef} className="home-downloads-modal download-mode" role="dialog" aria-modal="true" aria-label={`${homeDownloadsStatus} downloads`}>
+            <button className="home-downloads-close" aria-label="Close downloads" onClick={() => setHomeDownloadsStatus(null)}>×</button>
+            <DownloadsView
+              jobs={jobs}
+              destinations={destinations}
+              error={error}
+              selectedJobId={selectedDownloadId}
+              onSelectJob={setSelectedDownloadId}
+              onQueue={() => setShowQueue(true)}
+              onAction={apply}
+              fixedStatus={homeDownloadsStatus}
+              variant="modal"
+            />
+          </section>
+        </div>
+      )}
+      <div className="studio-bottom-navigation">
+        <div className={`studio-nav-menu ${menuOpen ? "open" : ""}`}>
+          {(["Watchlist", "Downloads", "Destinations", "Activity", "Devices"] as const).map((label) => (
+            <button key={label} onClick={() => { setActiveNav(label); setMenuOpen(false); }}>
+              <Glyph name={label === "Watchlist" ? "archive" : label === "Downloads" ? "downloads" : label === "Destinations" ? "folder" : label === "Activity" ? "activity" : "computer"} />
+              {label}
+            </button>
+          ))}
+          <span className="studio-account"><UserButton appearance={{ elements: { avatarBox: "avatar" } }} /> Account</span>
+        </div>
+        <nav aria-label="Primary navigation">
+          <button className="studio-menu-toggle" aria-expanded={menuOpen} aria-label="More pages" onClick={() => setMenuOpen((value) => !value)}><Glyph name="menu" size={22} /></button>
+          <span className="studio-nav-divider" aria-hidden="true" />
+          {([
+            ["Home", "home"],
+            ...(feedEnabled ? [["Feed", "broadcast"]] : []),
+            ["Library", "books"],
+            ["Settings", "settings"],
+          ] as Array<[string, string]>).map(([label, icon]) => (
+            <button key={label} className={activeNav === label ? "active" : ""} onClick={() => { setActiveNav(label); setMenuOpen(false); }}>
+              <Glyph name={icon} size={22} />
+              <span>{label}</span>
+              {label === "Home" && jobCounts.active > 0 && <b>{jobCounts.active}</b>}
+            </button>
+          ))}
+        </nav>
+      </div>
       {showQueue && (
         <QueueSheet
           destinations={destinations}

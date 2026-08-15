@@ -1,13 +1,13 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { agentDateMilliseconds } from "@/lib/agent-date";
 import { filterAndSortJobs, jobStatusCounts, type DownloadFilterStatus } from "@/lib/download-filters";
 import { downloadProgressDisplay, formatBytes, formatETA, formatJobStatus, formatSpeed } from "@/lib/download-progress";
 import type { DownloadJob } from "@/lib/download-job";
 import { availableJobActions, jobActionLabel, type JobAction } from "@/lib/job-actions";
 
-export type Destination = { id: string; name: string; baseURL: string; remotePath: string };
+export type Destination = { id: string; name: string; kind?: "webdav" | "google_drive"; baseURL?: string; remotePath: string };
 
 type DownloadsViewProps = {
   jobs: DownloadJob[];
@@ -17,6 +17,9 @@ type DownloadsViewProps = {
   onSelectJob: (id: string) => void;
   onQueue: () => void;
   onAction: (job: DownloadJob, action: JobAction) => Promise<void>;
+  initialStatus?: DownloadFilterStatus;
+  fixedStatus?: DownloadFilterStatus;
+  variant?: "page" | "modal";
 };
 
 const statusTabs: Array<{ value: DownloadFilterStatus; label: string }> = [
@@ -32,6 +35,7 @@ const statusTabs: Array<{ value: DownloadFilterStatus; label: string }> = [
 ];
 
 function jobTitle(job: DownloadJob) {
+  if (job.displayName?.trim()) return job.displayName;
   try {
     const url = new URL(job.sourcePageURL);
     return decodeURIComponent(url.pathname.split("/").filter(Boolean).at(-1) || url.hostname);
@@ -42,24 +46,26 @@ function jobTitle(job: DownloadJob) {
 
 function destinationName(job: DownloadJob, destinations: Destination[]) {
   if (job.destination === "local") return "Local Downloads";
-  const id = job.destination.replace(/^webdav:/i, "");
-  return destinations.find((destination) => destination.id.toLowerCase() === id.toLowerCase())?.name ?? "Remote WebDAV";
+  const id = job.destination.replace(/^(webdav|gdrive):/i, "");
+  return destinations.find((destination) => destination.id.toLowerCase() === id.toLowerCase())?.name ?? (/^gdrive:/i.test(job.destination) ? "Google Drive" : "Remote WebDAV");
 }
 
 function SearchGlyph() {
   return <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden><circle cx="11" cy="11" r="7" /><path d="m20 20-4-4" /></svg>;
 }
 
-export function DownloadsView({ jobs, destinations, error, selectedJobId, onSelectJob, onQueue, onAction }: DownloadsViewProps) {
-  const [status, setStatus] = useState<DownloadFilterStatus>("all");
+export function DownloadsView({ jobs, destinations, error, selectedJobId, onSelectJob, onQueue, onAction, initialStatus = "all", fixedStatus, variant = "page" }: DownloadsViewProps) {
+  const [status, setStatus] = useState<DownloadFilterStatus>(initialStatus);
   const [query, setQuery] = useState("");
   const [destination, setDestination] = useState("all");
   const [workingAction, setWorkingAction] = useState<{ jobId: string; action: JobAction } | null>(null);
 
-  const filteredJobs = useMemo(() => filterAndSortJobs(jobs, { status, query, destination }), [jobs, status, query, destination]);
+  const effectiveStatus = fixedStatus ?? status;
+  const filteredJobs = useMemo(() => filterAndSortJobs(jobs, { status: effectiveStatus, query, destination }), [jobs, effectiveStatus, query, destination]);
   const counts = useMemo(() => jobStatusCounts(jobs), [jobs]);
   const selectedJob = filteredJobs.find((job) => job.id === selectedJobId) ?? filteredJobs[0] ?? null;
   const selectedProgress = selectedJob ? downloadProgressDisplay(selectedJob) : null;
+  useEffect(() => setStatus(initialStatus), [initialStatus]);
 
 
   const act = async (job: DownloadJob, action: JobAction) => {
@@ -68,19 +74,21 @@ export function DownloadsView({ jobs, destinations, error, selectedJobId, onSele
     finally { setWorkingAction(null); }
   };
 
-  return <div className="downloads-page">
+  const heading = statusTabs.find((tab) => tab.value === effectiveStatus)?.label ?? "Downloads";
+
+  return <div className={`downloads-page ${variant === "modal" ? "downloads-modal-view" : ""}`}>
     <header className="downloads-header">
-      <div><p className="eyebrow">Durable transfer history</p><h2>Downloads</h2><p>Inspect and operate every job owned by this Lustre agent.</p></div>
+      <div><p className="eyebrow">{variant === "modal" ? "Home transfer view" : "Durable transfer history"}</p><h2>{variant === "modal" ? `${heading} downloads` : "Downloads"}</h2><p>{variant === "modal" ? `Inspect and operate ${heading.toLowerCase()} jobs without leaving Home.` : "Inspect and operate every job owned by this Lustre agent."}</p></div>
       <button className="queue-button" onClick={onQueue}>＋ Queue download</button>
     </header>
 
-    <nav className="status-tabs" aria-label="Filter downloads by status">
+    {!fixedStatus && <nav className="status-tabs" aria-label="Filter downloads by status">
       {statusTabs.map((tab) => <button key={tab.value} className={status === tab.value ? "active" : ""} onClick={() => setStatus(tab.value)}>{tab.label}<span>{counts[tab.value]}</span></button>)}
-    </nav>
+    </nav>}
 
     <section className="download-toolbar" aria-label="Download filters">
       <label className="download-search"><SearchGlyph /><span className="sr-only">Search downloads</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search URL, quality, message, or job ID" /></label>
-      <label><span>Destination</span><select value={destination} onChange={(event) => setDestination(event.target.value)}><option value="all">All destinations</option><option value="local">Local Downloads</option>{destinations.map((item) => <option key={item.id} value={`webdav:${item.id}`}>{item.name}</option>)}</select></label>
+      <label><span>Destination</span><select value={destination} onChange={(event) => setDestination(event.target.value)}><option value="all">All destinations</option><option value="local">Local Downloads</option>{destinations.map((item) => <option key={item.id} value={`${item.kind === "google_drive" ? "gdrive" : "webdav"}:${item.id}`}>{item.name}</option>)}</select></label>
       <p>{filteredJobs.length} of {jobs.length} jobs</p>
     </section>
 

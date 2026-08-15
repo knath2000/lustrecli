@@ -13,6 +13,7 @@ export type DownloadFilterStatus = "all" | "active" | "queued" | "running" | "pa
 type FilterableJob = {
   id: string;
   sourcePageURL: string;
+  displayName?: string;
   preferredQualityLabel?: string;
   destination: string;
   status: Exclude<DownloadFilterStatus, "all" | "active">;
@@ -35,7 +36,7 @@ export function filterAndSortJobs<T extends FilterableJob>(jobs: T[], filters: D
   return jobs
     .filter((job) => status === "all" || (status === "active" ? activeStatuses.has(job.status) : job.status === status))
     .filter((job) => !filters.destination || filters.destination === "all" || job.destination === filters.destination)
-    .filter((job) => !query || [job.id, job.sourcePageURL, job.preferredQualityLabel, job.message].some((value) => value?.toLocaleLowerCase().includes(query)))
+    .filter((job) => !query || [job.id, job.sourcePageURL, job.displayName, job.preferredQualityLabel, job.message].some((value) => value?.toLocaleLowerCase().includes(query)))
     .sort((a, b) => agentDateMilliseconds(b.updatedAt) - agentDateMilliseconds(a.updatedAt));
 }
 

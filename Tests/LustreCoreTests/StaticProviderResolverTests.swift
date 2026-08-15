@@ -2,6 +2,67 @@ import LustreCore
 import XCTest
 
 final class StaticProviderResolverTests: XCTestCase {
+    func testResolvesPMVHavenTargetMediaAndExcludesRecommendationPreviews() async throws {
+        let pageURL = URL(string: "https://pmvhaven.com/video/finisher-deluxe_677a811ae84743c58890e792")!
+        let resolver = StaticProviderResolver(
+            fetch: { url, headers in
+                XCTAssertEqual(url, pageURL)
+                XCTAssertEqual(headers["User-Agent"], NetworkConstants.chromeUserAgent)
+                return HTTPPage(
+                    body: #"""
+                    <html><head>
+                    <meta property="og:title" content="Finisher Deluxe by FallenOne - PMVHaven">
+                    <meta property="og:image" content="https://pmvhavencloud.example/target/thumbnail.png">
+                    </head><body><script>
+                    "https:\u002F\u002Fpmvhavencloud.example\u002Ftarget\u002FFinisher_Deluxe.mp4"
+                    "https:\u002F\u002Fpmvhavencloud.example\u002Ftarget\u002FvideoPreview\u002Fpreview.mp4"
+                    "https:\u002F\u002Fpmvhavencloud.example\u002Ftarget\u002F1080p.m3u8"
+                    "https:\u002F\u002Fpmvhavencloud.example\u002Ftarget\u002F720p.m3u8"
+                    "https:\u002F\u002Fpmvhavencloud.example\u002Ftarget\u002Fmaster.m3u8"
+                    "https:\u002F\u002Fpmvhavencloud.example\u002Frecommendation\u002FvideoPreview\u002Fother.mp4"
+                    </script></body></html>
+                    """#,
+                    finalURL: url,
+                    statusCode: 200
+                )
+            },
+            randomSuffix: { "unused" },
+            nowMilliseconds: { "0" }
+        )
+
+        let resolution = try await resolver.resolve(url: pageURL)
+
+        XCTAssertEqual(resolution.provider, .pmvHaven)
+        XCTAssertEqual(resolution.title, "Finisher Deluxe by FallenOne")
+        XCTAssertEqual(resolution.thumbnailURL?.absoluteString, "https://pmvhavencloud.example/target/thumbnail.png")
+        XCTAssertEqual(resolution.qualities.map(\.label), ["MP4", "1080p", "720p", "Master HLS"])
+        XCTAssertEqual(resolution.qualities.map(\.mediaKind), [.direct, .hls, .hls, .hls])
+        XCTAssertTrue(resolution.qualities.allSatisfy {
+            $0.headers["Referer"] == "https://pmvhaven.com/"
+                && $0.headers["User-Agent"] == NetworkConstants.chromeUserAgent
+                && !$0.url.path.contains("videoPreview")
+        })
+    }
+
+    func testRejectsPMVHavenLookalikeHostWithoutFetchingIt() async throws {
+        let resolver = StaticProviderResolver(
+            fetch: { url, _ in
+                XCTFail("Lookalike PMVHaven host must not be fetched.")
+                return HTTPPage(body: "", finalURL: url, statusCode: 200)
+            },
+            randomSuffix: { "unused" },
+            nowMilliseconds: { "0" }
+        )
+
+        do {
+            _ = try await resolver.resolve(url: URL(string: "https://pmvhaven.com.attacker.example/video/test")!)
+            XCTFail("Expected a lookalike host to remain unsupported.")
+        } catch ProviderResolverError.unsupportedProvider {
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+
     func testResolvesExactLiveMyDaddyEscapedSourceShape() async throws {
         let embedURL = URL(string: "https://mydaddy.cc/video/3f5db4343ed074bcca/")!
         let resolver = StaticProviderResolver(

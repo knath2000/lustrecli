@@ -77,6 +77,11 @@ public enum PornHubYtDlp {
 
     public static func metadataArguments(source: URL, cookieFile: URL? = nil) throws -> [String] {
         guard PornHubURL.canonical(source) != nil else { throw PornHubYtDlpError.invalidSource }
+        return try genericMetadataArguments(source: source, cookieFile: cookieFile)
+    }
+
+    static func genericMetadataArguments(source: URL, cookieFile: URL? = nil) throws -> [String] {
+        guard safePublicSource(source) else { throw PornHubYtDlpError.invalidSource }
         var arguments = ["--no-playlist", "--dump-single-json", "--no-download", "--no-warnings", "--socket-timeout", "20"]
         if let cookieFile { arguments.append(contentsOf: ["--cookies", cookieFile.path]) }
         arguments.append(source.absoluteString)
@@ -85,11 +90,16 @@ public enum PornHubYtDlp {
 
     public static func materializationArguments(source: URL, formatSelector: String, directory: URL, cookieFile: URL? = nil) throws -> [String] {
         guard PornHubURL.canonical(source) != nil else { throw PornHubYtDlpError.invalidSource }
+        return try genericMaterializationArguments(source: source, formatSelector: formatSelector, directory: directory, cookieFile: cookieFile, outputPrefix: "lustre-pornhub")
+    }
+
+    static func genericMaterializationArguments(source: URL, formatSelector: String, directory: URL, cookieFile: URL? = nil, outputPrefix: String = "lustre-video") throws -> [String] {
+        guard safePublicSource(source) else { throw PornHubYtDlpError.invalidSource }
         guard safeFormatSelector(formatSelector) else { throw PornHubYtDlpError.invalidFormat }
         var arguments = [
             "--no-playlist", "--no-warnings", "--restrict-filenames",
             "--format", formatSelector, "--merge-output-format", "mp4",
-            "--output", directory.appendingPathComponent("lustre-pornhub.%(ext)s").path,
+            "--output", directory.appendingPathComponent("\(outputPrefix).%(ext)s").path,
             "--newline", "--progress",
             "--progress-template", "download:LUSTRE_PROGRESS:v1\t%(progress.status)s\t%(progress.downloaded_bytes|NA)s\t%(progress.total_bytes|NA)s\t%(progress.total_bytes_estimate|NA)s\t%(progress.speed|NA)s\t%(progress.eta|NA)s\t%(progress.fragment_index|NA)s\t%(progress.fragment_count|NA)s\tmedia"
         ]
@@ -153,8 +163,24 @@ public enum PornHubYtDlp {
 
     public static func parseMetadata(_ data: Data, source: URL) throws -> ProviderResolution {
         guard data.count <= maximumMetadataBytes else { throw PornHubYtDlpError.oversizedOutput }
-        guard PornHubURL.canonical(source) != nil,
-              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+        guard PornHubURL.canonical(source) != nil else { throw PornHubYtDlpError.invalidMetadata }
+        return try parseMetadata(data, source: source, provider: .pornHub, method: "Agent yt-dlp public metadata", trace: [
+            "Resolved anonymous public PornHub metadata with agent-owned yt-dlp.",
+            "Signed media URLs were not persisted or exposed."
+        ])
+    }
+
+    static func parseGenericMetadata(_ data: Data, source: URL) throws -> ProviderResolution {
+        guard data.count <= maximumMetadataBytes else { throw PornHubYtDlpError.oversizedOutput }
+        guard safePublicSource(source) else { throw PornHubYtDlpError.invalidMetadata }
+        return try parseMetadata(data, source: source, provider: .ytDlp, method: "Agent generic yt-dlp metadata", trace: [
+            "Resolved public source metadata with the agent-owned generic yt-dlp fallback.",
+            "Signed media URLs were not persisted or exposed."
+        ])
+    }
+
+    private static func parseMetadata(_ data: Data, source: URL, provider: ProviderKind, method: String, trace: [String]) throws -> ProviderResolution {
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let formats = root["formats"] as? [[String: Any]] else { throw PornHubYtDlpError.invalidMetadata }
         let rootHeaders = try sanitizedHeaders(root["http_headers"])
         var seenSelectors = Set<String>()
@@ -191,7 +217,7 @@ public enum PornHubYtDlp {
                     label: height > 0 ? "\(height)p \(ext.isEmpty ? "Video" : ext.uppercased())" : (ext.isEmpty ? "Video" : ext.uppercased()),
                     url: source,
                     headers: headers,
-                    resolutionMethod: "Agent yt-dlp public metadata",
+                    resolutionMethod: method,
                     mediaKind: .ytDlp,
                     formatSelector: selector
                 )
@@ -207,15 +233,15 @@ public enum PornHubYtDlp {
         }
         return ProviderResolution(
             sourcePageURL: source,
-            provider: .pornHub,
+            provider: provider,
             title: (root["title"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
             thumbnailURL: thumbnail,
             qualities: qualities.map(\.quality),
-            trace: ["Resolved anonymous public PornHub metadata with agent-owned yt-dlp.", "Signed media URLs were not persisted or exposed."]
+            trace: trace
         )
     }
 
-    private static func safeFormatSelector(_ value: String) -> Bool {
+    static func safeFormatSelector(_ value: String) -> Bool {
         guard (1...128).contains(value.count),
               let regex = try? NSRegularExpression(pattern: #"^[A-Za-z0-9._-]+(?:\+[A-Za-z0-9._-]+)?$"#) else { return false }
         return regex.firstMatch(in: value, range: NSRange(value.startIndex..., in: value)) != nil
@@ -263,6 +289,14 @@ public enum PornHubYtDlp {
         return result
     }
 
+    static func safePublicSource(_ source: URL) -> Bool {
+        source.scheme?.lowercased() == "https"
+            && source.host != nil
+            && source.user == nil
+            && source.password == nil
+            && URLSafetyPolicy.isAllowed(source)
+    }
+
     public static func classifiedFailure(_ data: Data) -> PornHubYtDlpError {
         let message = String(decoding: data, as: UTF8.self).lowercased()
         if ["login required", "log in", "sign in", "session expired", "invalid session", "authentication required", "cookies are no longer valid"].contains(where: message.contains) {
@@ -281,13 +315,13 @@ public enum PornHubYtDlp {
         AgentPaths.applicationSupport.appendingPathComponent("pornhub-cookies", isDirectory: true)
     }
 
-    private struct ProcessResult: Sendable {
+    struct ProcessResult: Sendable {
         let status: Int32
         let stdout: Data
         let stderr: Data
     }
 
-    private static func run(executable: URL, arguments: [String], timeout: TimeInterval, stdoutCap: Int, stderrCap: Int, onProgress: @escaping @Sendable (YtDlpProgressSample) async -> Void = { _ in }, allowUnapprovedExecutable: Bool = false) async throws -> ProcessResult {
+    static func run(executable: URL, arguments: [String], timeout: TimeInterval, stdoutCap: Int, stderrCap: Int, onProgress: @escaping @Sendable (YtDlpProgressSample) async -> Void = { _ in }, allowUnapprovedExecutable: Bool = false) async throws -> ProcessResult {
         guard allowUnapprovedExecutable || executableIsAllowed(executable) else { throw PornHubYtDlpError.executableUnavailable }
         do {
             let result = try await StreamingProcessRunner.run(executable: executable, arguments: arguments, timeout: timeout, stdoutCap: stdoutCap, stderrCap: stderrCap, onProgress: onProgress)

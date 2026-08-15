@@ -92,6 +92,7 @@ public struct FeedItem: Codable, Equatable, Identifiable, Sendable {
     public let viewCount: Int
     public let studio: String?
     public let queueCapability: FeedQueueCapability
+    public let downloadedAt: Date?
 
     public init(
         id: String,
@@ -104,7 +105,8 @@ public struct FeedItem: Codable, Equatable, Identifiable, Sendable {
         uploadedAtIsApproximate: Bool = false,
         viewCount: Int,
         studio: String?,
-        queueCapability: FeedQueueCapability
+        queueCapability: FeedQueueCapability,
+        downloadedAt: Date? = nil
     ) {
         self.id = id
         self.siteID = siteID
@@ -117,6 +119,7 @@ public struct FeedItem: Codable, Equatable, Identifiable, Sendable {
         self.viewCount = viewCount
         self.studio = studio
         self.queueCapability = queueCapability
+        self.downloadedAt = downloadedAt
     }
 }
 

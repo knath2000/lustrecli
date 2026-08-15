@@ -2,16 +2,32 @@ import Foundation
 import LustreCore
 import Security
 
+public struct LocalDownloadFolderStatus: Codable, Equatable, Sendable {
+    public let mode: String
+    public let folderName: String
+
+    public init(mode: String, folderName: String) {
+        self.mode = mode
+        self.folderName = folderName
+    }
+}
+
+private struct LocalDownloadFolderConfiguration: Codable {
+    let path: String
+}
+
 public actor AgentService {
     public typealias Downloader = @Sendable (ProviderResolution, ResolvedQuality, URL) async throws -> URL
     public typealias ProgressDownloader = @Sendable (ProviderResolution, ResolvedQuality, URL, @escaping @Sendable (DownloadProgress) async -> Void) async throws -> URL
     public typealias RemoteProgressDownloader = @Sendable (ProviderResolution, ResolvedQuality, WebDAVDestinationProfile, String, @escaping @Sendable (DownloadProgress) async -> Void) async throws -> URL
     public typealias HLSMaterializer = @Sendable (ProviderResolution, ResolvedQuality, URL, @escaping @Sendable (DownloadProgress) async -> Void) async throws -> URL
     public typealias PornHubResolver = @Sendable (URL) async throws -> ProviderResolution
+    public typealias GenericYtDlpResolver = @Sendable (URL) async throws -> ProviderResolution
     public typealias YtDlpMaterializer = @Sendable (ProviderResolution, ResolvedQuality, URL, @escaping @Sendable (DownloadProgress) async -> Void) async throws -> URL
     public typealias StagedRemoteUploader = @Sendable (ProviderResolution, ResolvedQuality, URL, WebDAVDestinationProfile, String, @escaping @Sendable (DownloadProgress) async -> Void) async throws -> URL
     public typealias RemoteDestinationTester = @Sendable (WebDAVDestinationProfile, String) async throws -> RemoteDestinationTestResult
     public typealias FolderPicker = @Sendable () throws -> String
+    public typealias AllPornStreamHTML = @Sendable (URL) async throws -> String
 
     private struct ActiveDownload {
         let token: UUID
@@ -29,22 +45,29 @@ public actor AgentService {
 
     private let jobs: JobStore
     private let resolver: StaticProviderResolver
-    private let downloadsDirectory: URL
+    private var downloadsDirectory: URL
+    private let defaultDownloadsDirectory: URL
+    private let localDownloadConfigurationURL: URL?
     private let automaticallyStartsDownloads: Bool
     private let progressDownloader: ProgressDownloader
     private let remoteDownloader: RemoteProgressDownloader
     private let hlsMaterializer: HLSMaterializer
     private let pornHubResolver: PornHubResolver
+    private let genericYtDlpResolver: GenericYtDlpResolver
     private let ytDlpMaterializer: YtDlpMaterializer
     private let stagedRemoteUploader: StagedRemoteUploader
     private let remoteDestinationTester: RemoteDestinationTester
     private let destinationProfiles: RemoteDestinationProfileStore
     private let destinationSecrets: RemoteDestinationSecretStore
+    private let googleDriveProfiles: GoogleDriveDestinationStore
+    private let googleDriveClient: GoogleDriveClient
     private let folderPicker: FolderPicker
     private let feed: FeedService
     private let feedAssetProxy: FeedAssetProxy
     private let pornHubAuth: PornHubAuthService
     private let allPornStreamCapture: AllPornStreamCaptureCoordinator?
+    private let allPornStreamHTML: AllPornStreamHTML?
+    private let directExtractor: DirectExtractor
     private let maximumConcurrentDownloads: Int
     private var activeDownloadTasks: [UUID: ActiveDownload] = [:]
     private var lastProgressUpdates: [UUID: LastProgressUpdate] = [:]
@@ -58,10 +81,12 @@ public actor AgentService {
         progressDownloader: ProgressDownloader? = nil,
         folderPicker: FolderPicker? = nil,
         destinationProfiles: RemoteDestinationProfileStore? = nil,
+        googleDriveProfiles: GoogleDriveDestinationStore? = nil,
         destinationSecrets: RemoteDestinationSecretStore = KeychainRemoteDestinationSecretStore(),
         remoteDownloader: RemoteProgressDownloader? = nil,
         hlsMaterializer: HLSMaterializer? = nil,
         pornHubResolver: PornHubResolver? = nil,
+        genericYtDlpResolver: GenericYtDlpResolver? = nil,
         ytDlpMaterializer: YtDlpMaterializer? = nil,
         stagedRemoteUploader: StagedRemoteUploader? = nil,
         remoteDestinationTester: RemoteDestinationTester? = nil,
@@ -69,11 +94,14 @@ public actor AgentService {
         feedAssetProxy: FeedAssetProxy = FeedAssetProxy(),
         pornHubAuth: PornHubAuthService = PornHubAuthService(),
         allPornStreamCapture: AllPornStreamCaptureCoordinator? = nil,
+        allPornStreamHTML: AllPornStreamHTML? = nil,
         maximumConcurrentDownloads: Int = 1
     ) throws {
         self.jobs = try JobStore(databaseURL: databaseURL)
         self.resolver = resolver
-        self.downloadsDirectory = downloadsDirectory
+        self.defaultDownloadsDirectory = downloadsDirectory
+        self.localDownloadConfigurationURL = downloadsDirectory.standardizedFileURL == AgentPaths.downloads.standardizedFileURL ? AgentPaths.localDownloadConfiguration : nil
+        self.downloadsDirectory = Self.savedDownloadDirectory(at: self.localDownloadConfigurationURL) ?? downloadsDirectory
         self.automaticallyStartsDownloads = automaticallyStartsDownloads
         if let progressDownloader {
             self.progressDownloader = progressDownloader
@@ -85,11 +113,14 @@ public actor AgentService {
             self.progressDownloader = AgentService.downloadToLocalDirectory
         }
         self.destinationProfiles = try destinationProfiles ?? RemoteDestinationProfileStore(fileURL: AgentPaths.remoteDestinations)
+        self.googleDriveProfiles = try googleDriveProfiles ?? GoogleDriveDestinationStore(fileURL: AgentPaths.googleDriveDestinations)
+        self.googleDriveClient = GoogleDriveClient()
         self.destinationSecrets = destinationSecrets
         self.remoteDownloader = remoteDownloader ?? AgentService.uploadToWebDAV
         self.hlsMaterializer = hlsMaterializer ?? FFmpegHLSMaterializer.materialize
         self.pornHubAuth = pornHubAuth
         self.allPornStreamCapture = allPornStreamCapture
+        self.allPornStreamHTML = allPornStreamHTML
         self.pornHubResolver = pornHubResolver ?? { source in
             let cookies = (try? await pornHubAuth.cookiesForYtDlp()) ?? []
             do { return try await PornHubYtDlp.resolve(source: source, cookies: cookies) }
@@ -98,8 +129,18 @@ public actor AgentService {
                 throw error
             }
         }
+        self.genericYtDlpResolver = genericYtDlpResolver ?? GenericYtDlp.resolve
+        self.directExtractor = DirectExtractor(
+            resolver: resolver,
+            pornHubResolver: self.pornHubResolver,
+            genericResolver: self.genericYtDlpResolver,
+            allPornStreamHTML: allPornStreamHTML
+        )
         self.ytDlpMaterializer = ytDlpMaterializer ?? { resolution, quality, directory, reportProgress in
             guard let selector = quality.formatSelector else { throw PornHubYtDlpError.invalidFormat }
+            if resolution.provider != .pornHub {
+                return try await GenericYtDlp.materialize(source: resolution.sourcePageURL, title: resolution.title, formatSelector: selector, directory: directory, onProgress: reportProgress)
+            }
             let cookies = (try? await pornHubAuth.cookiesForYtDlp()) ?? []
             do { return try await PornHubYtDlp.materialize(source: resolution.sourcePageURL, title: resolution.title, formatSelector: selector, directory: directory, cookies: cookies, onProgress: reportProgress) }
             catch let error as PornHubYtDlpError {
@@ -143,6 +184,7 @@ public actor AgentService {
     }
 
     public func feedPage(site: FeedSiteID, query: String? = nil, page: Int) async throws -> FeedPage {
+        let result: FeedPage
         if site == .allPornStream {
             guard let allPornStreamCapture else { throw BrowserCaptureError.browserExtensionRequired }
             let feedQuery = try FeedQuery(site: site, text: query, page: page)
@@ -152,9 +194,11 @@ public actor AgentService {
             if page > 1 { items.append(URLQueryItem(name: "page", value: String(page))) }
             components.queryItems = items.isEmpty ? nil : items
             guard let url = components.url else { throw FeedError.invalidPage }
-            return try await allPornStreamCapture.capture(url: url, page: page)
+            result = try await allPornStreamCapture.capture(url: url, page: page)
+        } else {
+            result = try await feed.page(FeedQuery(site: site, text: query, page: page))
         }
-        return try await feed.page(FeedQuery(site: site, text: query, page: page))
+        return DownloadedFeedHistory(jobs: try await jobs.allJobs()).decorate(result)
     }
 
     public func verifyAllPornStream() async throws {
@@ -200,78 +244,46 @@ public actor AgentService {
         return try await remoteDestinationTester(profile, password)
     }
 
-    public func extract(url: URL) async throws -> ExtractionResult {
-        guard URLSafetyPolicy.isAllowed(url) else {
-            throw AgentServiceError.invalidURL
-        }
-        if AllPornStreamResolver.isAllPornStreamPostURL(url) {
-            return await extractAllPornStream(url: url)
-        }
-        if let canonical = PornHubURL.canonical(url) {
-            let resolution = try await pornHubResolver(canonical)
-            return ExtractionResult(
-                sourcePageURL: canonical,
-                isDirectMedia: false,
-                resolutionState: "resolved",
-                trace: resolution.trace,
-                resolution: resolution
-            )
-        }
-        do {
-            let resolution = try await resolver.resolve(url: url)
-            return ExtractionResult(
-                sourcePageURL: url,
-                isDirectMedia: resolution.provider == .direct,
-                resolutionState: "resolved",
-                trace: resolution.trace,
-                resolution: resolution
-            )
-        } catch ProviderResolverError.cloudflareChallenge {
-            return ExtractionResult(
-                sourcePageURL: url,
-                isDirectMedia: false,
-                resolutionState: "verificationRequired",
-                trace: ["Provider requires interactive browser verification; no WebKit fallback is installed in the agent."]
-            )
-        } catch ProviderResolverError.unsupportedProvider {
-            return ExtractionResult(
-                sourcePageURL: url,
-                isDirectMedia: false,
-                resolutionState: "pendingProviderResolver",
-                trace: ["Stored original source page URL.", "No static resolver is installed for this provider."]
-            )
-        }
+    public func allGoogleDriveDestinations() async -> [GoogleDriveDestinationProfile] {
+        await googleDriveProfiles.all()
     }
 
-    private func extractAllPornStream(url: URL) async -> ExtractionResult {
-        let resolver = AllPornStreamResolver(fetch: resolver.pageFetch, providerResolver: resolver)
-        do {
-            let aggregate = try await resolver.resolve(postURL: url)
-            let state: String
-            if !aggregate.resolution.qualities.isEmpty {
-                state = "resolved"
-            } else if aggregate.attempts.contains(where: { $0.outcome == .verificationRequired }) {
-                state = "verificationRequired"
-            } else {
-                state = "noProviderResolved"
-            }
-            return ExtractionResult(
-                sourcePageURL: url,
-                isDirectMedia: false,
-                resolutionState: state,
-                trace: aggregate.resolution.trace,
-                resolution: aggregate.resolution,
-                providerAttempts: aggregate.attempts
-            )
-        } catch {
-            return ExtractionResult(
-                sourcePageURL: url,
-                isDirectMedia: false,
-                resolutionState: "staticResolutionFailed",
-                trace: ["AllPornStream post resolution failed: \(error.localizedDescription)"],
-                providerAttempts: []
-            )
-        }
+    public func connectGoogleDrive(remoteName: String? = nil) async throws -> GoogleDriveDestinationProfile {
+        let remotes = try await googleDriveClient.configuredDriveRemotes()
+        let selected = remoteName.flatMap { requested in
+            remotes.first { $0.caseInsensitiveCompare(requested) == .orderedSame }
+        } ?? remotes.first(where: { $0.caseInsensitiveCompare("gdrive") == .orderedSame }) ?? remotes.first
+        guard let selected else { throw GoogleDriveClientError.remoteUnavailable }
+        return try await googleDriveProfiles.save(remoteName: selected, remotePath: "/")
+    }
+
+    public func googleDriveFolders(profileID: UUID, path: String) async throws -> [GoogleDriveFolder] {
+        guard let profile = await googleDriveProfiles.profile(id: profileID) else { throw RemoteDestinationError.notFound }
+        return try await googleDriveClient.folders(remoteName: profile.remoteName, path: path)
+    }
+
+    public func createGoogleDriveFolder(profileID: UUID, path: String) async throws {
+        guard let profile = await googleDriveProfiles.profile(id: profileID) else { throw RemoteDestinationError.notFound }
+        try await googleDriveClient.createFolder(remoteName: profile.remoteName, path: path)
+    }
+
+    public func selectGoogleDriveFolder(profileID: UUID, path: String) async throws -> GoogleDriveDestinationProfile {
+        guard let profile = await googleDriveProfiles.profile(id: profileID) else { throw RemoteDestinationError.notFound }
+        _ = try await googleDriveClient.folders(remoteName: profile.remoteName, path: path)
+        return try await googleDriveProfiles.save(name: profile.name, remoteName: profile.remoteName, remotePath: path, id: profile.id)
+    }
+
+    public func testGoogleDriveDestination(id: UUID) async throws -> RemoteDestinationTestResult {
+        guard let profile = await googleDriveProfiles.profile(id: id) else { throw RemoteDestinationError.notFound }
+        return try await googleDriveClient.test(profile: profile)
+    }
+
+    public func removeGoogleDriveDestination(id: UUID) async throws {
+        try await googleDriveProfiles.remove(id: id)
+    }
+
+    public func extract(url: URL) async throws -> ExtractionResult {
+        try await directExtractor.extract(url: url)
     }
 
     public func createJob(_ request: CreateJobRequest) async throws -> DownloadJob {
@@ -281,13 +293,23 @@ public actor AgentService {
         let destination = try await normalizedDestination(request.destination)
         let preferredQualityLabel = request.preferredQualityLabel?
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        let title = request.title?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let boundedTitle = title.flatMap { $0.isEmpty ? nil : String($0.prefix(512)) }
         var job = DownloadJob(
             id: request.id ?? UUID(),
             sourcePageURL: request.sourcePageURL,
+            title: boundedTitle,
             preferredQualityLabel: preferredQualityLabel?.isEmpty == false ? preferredQualityLabel : nil,
             destination: destination
         )
-        record(&job, level: .info, message: RemoteDestination.webDAVProfileID(from: destination) == nil ? "Queued for local download." : "Queued for remote WebDAV download.")
+        let queueMessage = if RemoteDestination.googleDriveProfileID(from: destination) != nil {
+            "Queued for Google Drive upload."
+        } else if RemoteDestination.webDAVProfileID(from: destination) != nil {
+            "Queued for remote WebDAV download."
+        } else {
+            "Queued for local download."
+        }
+        record(&job, level: .info, message: queueMessage)
         try await jobs.create(job)
         if automaticallyStartsDownloads { await enqueueDownload(job.id) }
         return job
@@ -304,7 +326,24 @@ public actor AgentService {
     public func selectDownloadFolder() async throws -> String {
         let picker = folderPicker
         let selectedPath = try await Task.detached(operation: picker).value
-        return try await normalizedDestination(selectedPath)
+        let normalized = try await normalizedDestination(selectedPath)
+        downloadsDirectory = URL(fileURLWithPath: normalized).standardizedFileURL
+        try saveDownloadDirectory()
+        return normalized
+    }
+
+    public func resetDownloadFolder() throws {
+        downloadsDirectory = defaultDownloadsDirectory
+        if let localDownloadConfigurationURL {
+            try? FileManager.default.removeItem(at: localDownloadConfigurationURL)
+        }
+    }
+
+    public func localDownloadFolderStatus() -> LocalDownloadFolderStatus {
+        LocalDownloadFolderStatus(
+            mode: downloadsDirectory.standardizedFileURL == defaultDownloadsDirectory.standardizedFileURL ? "default" : "custom",
+            folderName: String(downloadsDirectory.lastPathComponent.prefix(128))
+        )
     }
 
     private static func chooseDownloadFolder() throws -> String {
@@ -322,6 +361,25 @@ public actor AgentService {
             throw AgentServiceError.folderSelectionCancelled
         }
         return path
+    }
+
+    private static func savedDownloadDirectory(at fileURL: URL?) -> URL? {
+        guard let fileURL,
+              let data = try? Data(contentsOf: fileURL),
+              let configuration = try? JSONDecoder().decode(LocalDownloadFolderConfiguration.self, from: data)
+        else { return nil }
+        let directory = URL(fileURLWithPath: configuration.path).standardizedFileURL
+        guard directory.path.hasPrefix("/"),
+              (try? directory.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+        else { return nil }
+        return directory
+    }
+
+    private func saveDownloadDirectory() throws {
+        guard let localDownloadConfigurationURL else { return }
+        try FileManager.default.createDirectory(at: localDownloadConfigurationURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let data = try JSONEncoder().encode(LocalDownloadFolderConfiguration(path: downloadsDirectory.path))
+        try data.write(to: localDownloadConfigurationURL, options: .atomic)
     }
 
     public func apply(_ action: JobAction, to id: UUID) async throws -> DownloadJob {
@@ -364,7 +422,7 @@ public actor AgentService {
                 try await jobs.update(active)
                 return
             }
-            guard let resolution = extraction.resolution else {
+            guard var resolution = extraction.resolution else {
                 throw AgentServiceError.noProviderResolved
             }
             guard !resolution.qualities.isEmpty else {
@@ -373,13 +431,23 @@ public actor AgentService {
             guard let quality = selectedQuality(in: resolution, preferredLabel: active.preferredQualityLabel) else {
                 throw AgentServiceError.noSelectedQuality
             }
+            let resolvedTitle = active.title ?? resolution.title
+            active.title = resolvedTitle
+            resolution = ProviderResolution(
+                sourcePageURL: resolution.sourcePageURL,
+                provider: resolution.provider,
+                title: resolvedTitle,
+                thumbnailURL: resolution.thumbnailURL,
+                qualities: resolution.qualities,
+                trace: resolution.trace
+            )
 
             guard ownsDownload(id, taskID: taskID) else { return }
             record(&active, level: .info, message: "Downloading \(quality.label).")
             active.progress = nil
             active.downloadedBytes = 0
             active.totalBytes = nil
-            active.transferPhase = .resolving
+            active.transferPhase = quality.mediaKind == .direct ? .downloading : .materializing
             active.updatedAt = .now
             try await jobs.update(active)
             guard !Task.isCancelled,
@@ -391,7 +459,42 @@ public actor AgentService {
                 await self.updateProgress(progress, for: id, taskID: taskID)
             }
             let output: URL
-            if quality.mediaKind != .direct, let profileID = RemoteDestination.webDAVProfileID(from: current.destination) {
+            if let profileID = RemoteDestination.googleDriveProfileID(from: current.destination) {
+                guard let profile = await googleDriveProfiles.profile(id: profileID) else { throw RemoteDestinationError.notFound }
+                record(&active, level: .info, message: "Preparing \(quality.label) for \(profile.name).")
+                active.transferPhase = .materializing
+                active.phaseProgress = nil
+                active.phaseBytes = 0
+                active.phaseTotalBytes = nil
+                active.progress = nil
+                active.downloadedBytes = 0
+                active.totalBytes = nil
+                try await jobs.update(active)
+                let staging = FileManager.default.temporaryDirectory.appending(path: "lustre-gdrive-\(UUID().uuidString)", directoryHint: .isDirectory)
+                defer { try? FileManager.default.removeItem(at: staging) }
+                let media: URL
+                switch quality.mediaKind {
+                case .direct:
+                    media = try await progressDownloader(resolution, quality, staging, reportProgress)
+                case .hls:
+                    media = try await hlsMaterializer(resolution, quality, staging, reportProgress)
+                case .ytDlp:
+                    media = try await ytDlpMaterializer(resolution, quality, staging, reportProgress)
+                }
+                guard var uploading = try await jobs.job(id: id), uploading.status == .running else { return }
+                let size = (try? media.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init)
+                uploading.transferPhase = .uploading
+                uploading.phaseProgress = 0
+                uploading.phaseBytes = 0
+                uploading.phaseTotalBytes = size
+                uploading.progress = 0
+                uploading.downloadedBytes = 0
+                uploading.totalBytes = size
+                record(&uploading, level: .info, message: "Uploading \(quality.label) to \(profile.name).")
+                uploading.updatedAt = .now
+                try await jobs.update(uploading)
+                output = try await googleDriveClient.upload(file: media, profile: profile, onProgress: reportProgress)
+            } else if quality.mediaKind != .direct, let profileID = RemoteDestination.webDAVProfileID(from: current.destination) {
                 guard let profile = await destinationProfiles.profile(id: profileID) else { throw RemoteDestinationError.notFound }
                 guard let password = try destinationSecrets.password(for: profileID), !password.isEmpty else {
                     throw RemoteDestinationError.missingCredentials
@@ -603,6 +706,10 @@ public actor AgentService {
         if let profileID = RemoteDestination.webDAVProfileID(from: value) {
             guard await destinationProfiles.profile(id: profileID) != nil else { throw RemoteDestinationError.notFound }
             return RemoteDestination.webDAV(profileID)
+        }
+        if let profileID = RemoteDestination.googleDriveProfileID(from: value) {
+            guard await googleDriveProfiles.profile(id: profileID) != nil else { throw RemoteDestinationError.notFound }
+            return RemoteDestination.googleDrive(profileID)
         }
         guard value.hasPrefix("/") else { throw AgentServiceError.unsupportedDestination }
         let directory = URL(fileURLWithPath: value).standardizedFileURL

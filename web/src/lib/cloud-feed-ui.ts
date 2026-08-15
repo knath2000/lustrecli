@@ -1,4 +1,13 @@
 export type CloudFeedCommandKind = "feed_sites" | "feed_page" | "destinations_list";
+export type CloudDevicePresence = { state: "online" | "offline" | "neverConnected" | "revoked"; lastSeenAt: string | null; agentVersion: string | null };
+
+export function cloudDeviceIsOnline(presence: CloudDevicePresence): boolean {
+  return presence.state === "online";
+}
+
+export function cloudDeviceOfflineMessage(presence: CloudDevicePresence): string | null {
+  return cloudDeviceIsOnline(presence) ? null : "Paired Mac is offline. Mount MyPassport and start Lustre Agent, then retry.";
+}
 
 export function cloudFeedEnabled(value: string | undefined): boolean {
   return value === "true";
@@ -28,8 +37,16 @@ export function cloudDashboardRefreshPaths(suppressDestinationPolling: boolean):
   return suppressDestinationPolling ? ["/v1/jobs"] : ["/v1/jobs", "/v1/destinations"];
 }
 
+export function cloudDashboardPollingDelay(activeJobs: number, activeInterval: number): number {
+  return activeJobs > 0 ? activeInterval : 30_000;
+}
+
 export function cloudDestinationViewNeedsRefresh(activeNav: string, feedEnabled: boolean): boolean {
   return activeNav === "Destinations" || (feedEnabled && activeNav === "Feed");
+}
+
+export function cloudGoogleDriveFolderListPath(path: string): boolean {
+  return /^\/v1\/destinations\/[^/]+\/google-drive\/folders\?path=/.test(path);
 }
 
 export function normalizeCloudFeedQuery(value: string | undefined): string {
@@ -68,5 +85,5 @@ export function coalesceCloudFeedRequest<T>(
 }
 
 export function cloudFeedCapabilities(mediaEnabled: boolean, destinationsEnabled: boolean, queueEnabled: boolean) {
-  return { loadMedia: mediaEnabled, chooseDestination: destinationsEnabled, selectItems: false, queueItems: queueEnabled };
+  return { loadMedia: mediaEnabled, chooseDestination: destinationsEnabled, selectItems: queueEnabled, queueItems: queueEnabled };
 }

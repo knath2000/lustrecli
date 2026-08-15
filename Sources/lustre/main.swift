@@ -21,16 +21,55 @@ struct LustreCLI {
                 guard arguments.count >= 2 else { throw CLIError.usage }
                 switch arguments[1] {
                 case "install":
-                    guard arguments.dropFirst(2).contains("--chrome") else { throw CLIError.usage }
-                    let status = try BrowserIntegration.installChrome()
-                    BrowserIntegration.openChromeExtensions()
-                    try printJSON(status)
-                    print("Load unpacked extension: \(status.extensionDirectory)")
+                    if arguments.dropFirst(2).contains("--chrome") {
+                        let status = try BrowserIntegration.installChrome()
+                        BrowserIntegration.openChromeExtensions()
+                        try printJSON(status)
+                        print("Load unpacked extension: \(status.extensionDirectory)")
+                    } else if arguments.dropFirst(2).contains("--firefox") {
+                        let status = try BrowserIntegration.installFirefox()
+                        try printJSON(status)
+                        print("In Firefox, open about:debugging#/runtime/this-firefox, choose Load Temporary Add-on, and select: \(status.extensionDirectory)/manifest.json")
+                    } else {
+                        throw CLIError.usage
+                    }
                 case "status":
-                    try printJSON(BrowserIntegration.status())
+                    if arguments.dropFirst(2).contains("--firefox") {
+                        try printJSON(BrowserIntegration.firefoxStatus())
+                    } else {
+                        try printJSON(BrowserIntegration.status())
+                    }
                 default:
                     throw CLIError.usage
                 }
+                return
+            }
+            if command == "extract" {
+                guard arguments.count == 2, let url = URL(string: arguments[1]) else { throw CLIError.usage }
+                try AgentPaths.prepare()
+                let browserCapture = AllPornStreamCaptureCoordinator()
+                let captureReady = BrowserIntegration.selectedIntegrationIsReady()
+                if captureReady { try await browserCapture.start() }
+                defer {
+                    if captureReady { Task { await browserCapture.stop() } }
+                }
+                let pornHubAuth = PornHubAuthService()
+                let allPornStreamHTML: DirectExtractor.AllPornStreamHTML?
+                if captureReady {
+                    allPornStreamHTML = { source in
+                        try await browserCapture.capturePost(url: source)
+                    }
+                } else {
+                    allPornStreamHTML = nil
+                }
+                let extractor = DirectExtractor(
+                    pornHubResolver: { source in
+                        let cookies = (try? await pornHubAuth.cookiesForYtDlp()) ?? []
+                        return try await PornHubYtDlp.resolve(source: source, cookies: cookies)
+                    },
+                    allPornStreamHTML: allPornStreamHTML
+                )
+                try printJSON(try await extractor.extract(url: url))
                 return
             }
             let client = try AgentClient()
@@ -46,10 +85,6 @@ struct LustreCLI {
                 case "logout": try printJSON(try await client.signOutOfPornHub())
                 default: throw CLIError.usage
                 }
-            case "extract":
-                guard arguments.count == 2, let url = URL(string: arguments[1]) else { throw CLIError.usage }
-                let result = try await client.extract(url: url)
-                try printJSON(result)
             case "feed":
                 guard arguments.count >= 2 else { throw CLIError.usage }
                 if arguments[1] == "sites" {
@@ -141,7 +176,8 @@ private enum CLIError: Error, LocalizedError {
           lustre cloud status
           lustre cloud disconnect
           lustre browser install --chrome
-          lustre browser status
+          lustre browser install --firefox
+          lustre browser status [--firefox]
           lustre extract <url>
           lustre feed sites
           lustre feed verify --site allpornstream

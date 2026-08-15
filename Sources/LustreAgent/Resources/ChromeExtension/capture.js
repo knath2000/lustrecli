@@ -1,7 +1,10 @@
 (() => {
-  const marker = new URL(location.href).hash.match(/(?:^#|&)lustre-feed-capture=([0-9a-f-]{36})(?:&|$)/i);
+  const extensionAPI = globalThis.browser ?? globalThis.chrome;
+  const fragment = new URL(location.href).hash;
+  const marker = fragment.match(/(?:^#|&)lustre-(feed|post)-capture=([0-9a-f-]{36})(?:&|$)/i);
   if (!marker) return;
-  const requestID = marker[1].toLowerCase();
+  const captureKind = marker[1].toLowerCase();
+  const requestID = marker[2].toLowerCase();
   const startedAt = Date.now();
   let sending = false;
 
@@ -36,6 +39,7 @@
       bodyText: document.body?.innerText?.slice(0, 1000) ?? "",
       origin: location.origin,
       scripts: [...document.querySelectorAll('script[type="application/ld+json"]')].map((script) => script.textContent),
+      metadataScripts: [...document.scripts].map((script) => script.textContent ?? "").filter((source) => /video_urls|hosting_provider/i.test(source)),
       previews
     };
   }
@@ -45,18 +49,21 @@
       if (Date.now() - startedAt > 5 * 60 * 1000) clearInterval(timer);
       return;
     }
-    const result = globalThis.LustreAllPornStreamExtractor.extract(snapshot());
+    const result = captureKind === "post"
+      ? globalThis.LustreAllPornStreamExtractor.extractPost(snapshot())
+      : globalThis.LustreAllPornStreamExtractor.extract(snapshot());
     if (!result) return;
     sending = true;
-    const response = await chrome.runtime.sendMessage({
-      type: "feed_capture_v1",
+    const response = await extensionAPI.runtime.sendMessage({
+      type: captureKind === "post" ? "post_capture_v1" : "feed_capture_v1",
       version: 1,
       requestID,
       siteID: "allpornstream",
       pageURL: location.href.split("#")[0],
       capturedAt: new Date().toISOString(),
-      cards: result.cards,
-      hasMore: result.hasMore
+      ...(captureKind === "post"
+        ? { metadataSources: result.metadataSources }
+        : { cards: result.cards, hasMore: result.hasMore })
     }).catch(() => null);
     if (response?.type !== "capture_accepted") sending = false;
   }, 1000);

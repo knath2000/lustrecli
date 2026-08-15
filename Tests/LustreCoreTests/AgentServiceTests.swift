@@ -48,6 +48,40 @@ final class AgentServiceTests: XCTestCase {
         XCTAssertEqual(result.resolution?.qualities.first?.url.absoluteString, "https://cdn.mxcontent.net/video.mp4")
     }
 
+    func testExtractFallsBackToGenericYtDlpOnlyForUnsupportedStaticProvider() async throws {
+        let database = FileManager.default.temporaryDirectory.appending(path: "lustre-agent-generic-ytdlp-\(UUID().uuidString).sqlite3")
+        defer { try? FileManager.default.removeItem(at: database) }
+        let source = URL(string: "https://www.eporner.com/video-example")!
+        let expected = ProviderResolution(
+            sourcePageURL: source,
+            provider: .ytDlp,
+            title: "Generic video",
+            qualities: [
+                ResolvedQuality(
+                    label: "1080p MP4",
+                    url: source,
+                    resolutionMethod: "Agent generic yt-dlp metadata",
+                    mediaKind: .ytDlp,
+                    formatSelector: "v1080+a1"
+                )
+            ],
+            trace: ["Generic fallback used."]
+        )
+        let service = try AgentService(
+            databaseURL: database,
+            automaticallyStartsDownloads: false,
+            genericYtDlpResolver: { url in
+                XCTAssertEqual(url, source)
+                return expected
+            }
+        )
+
+        let result = try await service.extract(url: source)
+
+        XCTAssertEqual(result.resolutionState, "resolved")
+        XCTAssertEqual(result.resolution, expected)
+    }
+
     func testExtractReturnsAggregateAllPornStreamResolution() async throws {
         let postURL = URL(string: "https://allpornstream.com/post/example")!
         let resolver = StaticProviderResolver(
@@ -149,6 +183,41 @@ final class AgentServiceTests: XCTestCase {
         XCTAssertEqual(result.resolutionState, "verificationRequired")
         XCTAssertEqual(result.providerAttempts.map(\.outcome), [.verificationRequired, .failed])
         XCTAssertTrue(result.trace.contains { $0.contains("requires verification") })
+    }
+
+    func testExtractRetriesChallengedAllPornStreamPostWithVerifiedRenderedHTML() async throws {
+        let postURL = URL(string: "https://allpornstream.com/post/rendered")!
+        let providerURL = URL(string: "https://mixdrop.co/e/rendered")!
+        let renderer = AllPornStreamRenderTracker(html: #"{"video_urls":[{"hosting_provider":"MIXDROP","iframe":"https://mixdrop.co/e/rendered"}]}"#)
+        let resolver = StaticProviderResolver(
+            fetch: { url, _ in
+                if url == postURL {
+                    return HTTPPage(body: "<html>cf-mitigated: challenge</html>", finalURL: url, statusCode: 403)
+                }
+                XCTAssertEqual(url, providerURL)
+                return HTTPPage(
+                    body: #"<script>MDCore.wurl = "https://cdn.mxcontent.net/rendered.mp4"</script>"#,
+                    finalURL: url,
+                    statusCode: 200
+                )
+            },
+            randomSuffix: { "unused" },
+            nowMilliseconds: { "0" }
+        )
+        let database = FileManager.default.temporaryDirectory.appending(path: "lustre-agent-rendered-\(UUID().uuidString).sqlite3")
+        defer { try? FileManager.default.removeItem(at: database) }
+        let service = try AgentService(
+            databaseURL: database,
+            resolver: resolver,
+            allPornStreamHTML: { url in await renderer.render(url: url) }
+        )
+
+        let result = try await service.extract(url: postURL)
+        let requestedURLs = await renderer.requestedURLs()
+
+        XCTAssertEqual(result.resolutionState, "resolved")
+        XCTAssertEqual(result.resolution?.qualities.first?.url.absoluteString, "https://cdn.mxcontent.net/rendered.mp4")
+        XCTAssertEqual(requestedURLs, [postURL])
     }
 
     func testExtractReturnsStaticFailureDiagnosticsWhenNoAllPornStreamProviderWorks() async throws {
@@ -749,8 +818,11 @@ final class AgentServiceTests: XCTestCase {
     func testFolderSelectionDoesNotBlockTheAgentActor() async throws {
         let database = FileManager.default.temporaryDirectory.appending(path: "lustre-agent-folder-picker-\(UUID().uuidString).sqlite3")
         defer { try? FileManager.default.removeItem(at: database) }
+        let defaultDirectory = FileManager.default.temporaryDirectory.appending(path: "LustreDefault-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: defaultDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: defaultDirectory) }
         let picker = BlockingFolderPicker(path: FileManager.default.temporaryDirectory.path)
-        let service = try AgentService(databaseURL: database, automaticallyStartsDownloads: false, folderPicker: picker.pick)
+        let service = try AgentService(databaseURL: database, downloadsDirectory: defaultDirectory, automaticallyStartsDownloads: false, folderPicker: picker.pick)
         let selection = Task { try await service.selectDownloadFolder() }
         XCTAssertEqual(picker.started.wait(timeout: .now() + 1), .success)
 
@@ -766,6 +838,11 @@ final class AgentServiceTests: XCTestCase {
         picker.releaseSelection()
         let selectedPath = try await selection.value
         XCTAssertEqual(selectedPath, FileManager.default.temporaryDirectory.path)
+        let customStatus = await service.localDownloadFolderStatus()
+        XCTAssertEqual(customStatus, LocalDownloadFolderStatus(mode: "custom", folderName: FileManager.default.temporaryDirectory.lastPathComponent))
+        try await service.resetDownloadFolder()
+        let defaultStatus = await service.localDownloadFolderStatus()
+        XCTAssertEqual(defaultStatus.mode, "default")
         _ = await health.value
     }
 
@@ -858,6 +935,24 @@ private actor DownloadInvocationTracker {
 
     func invocationCount() -> Int {
         count
+    }
+}
+
+private actor AllPornStreamRenderTracker {
+    private let html: String
+    private var urls: [URL] = []
+
+    init(html: String) {
+        self.html = html
+    }
+
+    func render(url: URL) -> String {
+        urls.append(url)
+        return html
+    }
+
+    func requestedURLs() -> [URL] {
+        urls
     }
 }
 

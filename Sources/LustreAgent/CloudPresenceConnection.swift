@@ -32,12 +32,16 @@ private enum CloudPresenceFailureStage: String {
 
 public actor CloudPresenceConnection {
     public static let heartbeatInterval: TimeInterval = 30
+    static let activeTransferHeartbeatInterval: TimeInterval = 2
     private static let maximumHeartbeatFrameBytes = 131_072
     private static let commandDeliveryCapability = "command-delivery-v1"
     private static let feedPageCapability = "feed-page-v1"
     private static let destinationsListCapability = "destinations-list-v1"
     private static let feedQueueCapability = "feed-queue-v1"
     private static let commandWakeCapability = "command-wake-v1"
+    private static let pornHubAuthCapability = "pornhub-auth-v1"
+    private static let homeWorkspaceCapability = "home-workspace-v1"
+    private static let libraryCapability = "library-v1"
     private let identity: DeviceIdentity
     private let session: URLSession
     private let remoteControl: CloudRemoteControl
@@ -146,7 +150,7 @@ public actor CloudPresenceConnection {
             let hello: CloudWebSocketMessage
             do {
                 fputs("Lustre Cloud gateway: event=realtime_hello_send_started.\n", stderr)
-                try await task.send(.string("{\"version\":1,\"type\":\"gateway_hello\",\"capabilities\":[\"\(Self.commandDeliveryCapability)\",\"\(Self.feedPageCapability)\",\"\(Self.destinationsListCapability)\",\"\(Self.feedQueueCapability)\",\"\(Self.commandWakeCapability)\"]}"))
+                try await task.send(.string("{\"version\":1,\"type\":\"gateway_hello\",\"capabilities\":[\"\(Self.commandDeliveryCapability)\",\"\(Self.feedPageCapability)\",\"\(Self.destinationsListCapability)\",\"\(Self.feedQueueCapability)\",\"\(Self.commandWakeCapability)\",\"\(Self.pornHubAuthCapability)\",\"\(Self.homeWorkspaceCapability)\",\"\(Self.libraryCapability)\"]}"))
                 hello = try await receiveExpected(type: "gateway_hello_ack", from: mailbox, commandWakeV1: false, timeout: 15)
                 fputs("Lustre Cloud gateway: event=realtime_hello_reply_received.\n", stderr)
             } catch {
@@ -162,15 +166,19 @@ public actor CloudPresenceConnection {
             let destinationsListV1 = commandDeliveryV1 && helloFrame.capabilities?.contains(Self.destinationsListCapability) == true
             let feedQueueV1 = commandDeliveryV1 && helloFrame.capabilities?.contains(Self.feedQueueCapability) == true
             let commandWakeV1 = commandDeliveryV1 && helloFrame.capabilities?.contains(Self.commandWakeCapability) == true
-            fputs("Lustre Cloud gateway: event=realtime_hello_accepted commandDelivery=\(commandDeliveryV1) feedPage=\(feedPageV1) destinationsList=\(destinationsListV1) feedQueue=\(feedQueueV1) commandWake=\(commandWakeV1).\n", stderr)
-            try await heartbeatLoop(task: task, mailbox: mailbox, generation: generation, commandDeliveryV1: commandDeliveryV1, feedPageV1: feedPageV1, destinationsListV1: destinationsListV1, feedQueueV1: feedQueueV1, commandWakeV1: commandWakeV1)
+            let pornHubAuthV1 = commandDeliveryV1 && helloFrame.capabilities?.contains(Self.pornHubAuthCapability) == true
+            let homeWorkspaceV1 = commandDeliveryV1 && helloFrame.capabilities?.contains(Self.homeWorkspaceCapability) == true
+            let libraryV1 = commandDeliveryV1 && helloFrame.capabilities?.contains(Self.libraryCapability) == true
+            fputs("Lustre Cloud gateway: event=realtime_hello_accepted commandDelivery=\(commandDeliveryV1) feedPage=\(feedPageV1) destinationsList=\(destinationsListV1) feedQueue=\(feedQueueV1) commandWake=\(commandWakeV1) pornHubAuth=\(pornHubAuthV1) homeWorkspace=\(homeWorkspaceV1) library=\(libraryV1).\n", stderr)
+            try await heartbeatLoop(task: task, mailbox: mailbox, generation: generation, commandDeliveryV1: commandDeliveryV1, feedPageV1: feedPageV1, destinationsListV1: destinationsListV1, feedQueueV1: feedQueueV1, commandWakeV1: commandWakeV1, pornHubAuthV1: pornHubAuthV1, homeWorkspaceV1: homeWorkspaceV1, libraryV1: libraryV1)
             return
         }
-        try await heartbeatLoop(task: task, mailbox: mailbox, generation: generation, commandDeliveryV1: false, feedPageV1: false, destinationsListV1: false, feedQueueV1: false, commandWakeV1: false)
+        try await heartbeatLoop(task: task, mailbox: mailbox, generation: generation, commandDeliveryV1: false, feedPageV1: false, destinationsListV1: false, feedQueueV1: false, commandWakeV1: false, pornHubAuthV1: false, homeWorkspaceV1: false, libraryV1: false)
     }
 
-    private func heartbeatLoop(task: URLSessionWebSocketTask, mailbox: CloudWebSocketMailbox, generation: CloudPresenceReconnectStateMachine.Generation, commandDeliveryV1: Bool, feedPageV1: Bool, destinationsListV1: Bool, feedQueueV1: Bool, commandWakeV1: Bool) async throws {
+    private func heartbeatLoop(task: URLSessionWebSocketTask, mailbox: CloudWebSocketMailbox, generation: CloudPresenceReconnectStateMachine.Generation, commandDeliveryV1: Bool, feedPageV1: Bool, destinationsListV1: Bool, feedQueueV1: Bool, commandWakeV1: Bool, pornHubAuthV1: Bool, homeWorkspaceV1: Bool, libraryV1: Bool) async throws {
         var sequence = 1
+        var lastSentJobUpdates: [UUID: Date] = [:]
         let correlationID = UUID().uuidString.lowercased()
         while !Task.isCancelled {
             _ = await mailbox.consumeWake(allowRemote: commandWakeV1)
@@ -179,7 +187,8 @@ public actor CloudPresenceConnection {
                 return
             }
             let payload = await remoteControl.heartbeatPayload()
-            let data = try heartbeatData(sequence: sequence, correlationID: correlationID, acknowledgements: payload.acks, jobs: payload.jobs)
+            let changedJobs = payload.jobs.filter { lastSentJobUpdates[$0.id] != $0.updatedAt }
+            let data = try heartbeatData(sequence: sequence, correlationID: correlationID, acknowledgements: payload.acks, jobs: changedJobs)
             fputs("Lustre Cloud gateway: event=realtime_heartbeat_send_started sequence=\(sequence) bytes=\(data.count).\n", stderr)
             try await task.send(.data(data))
             let response = try await receiveExpected(type: "heartbeat-accepted", from: mailbox, commandWakeV1: commandWakeV1, timeout: 15)
@@ -196,6 +205,9 @@ public actor CloudPresenceConnection {
                 throw CloudPresenceConnectionError.serverRequestedReconnect
             }
             guard responseFrame.type == "heartbeat-accepted", responseFrame.sequence == sequence else { throw CloudDeviceError.invalidResponse }
+            for job in changedJobs {
+                lastSentJobUpdates[job.id] = job.updatedAt
+            }
             await remoteControl.acknowledgedByCloud(responseFrame.acknowledgedCommandAcks ?? [])
             let command: CloudRemoteCommand?
             if commandDeliveryV1 {
@@ -208,7 +220,7 @@ public actor CloudPresenceConnection {
                       delivery.type == "command-delivery",
                       delivery.sequence == sequence,
                       delivery.correlationID == correlationID,
-                      delivery.command == nil || delivery.command?.kind == "feed_sites" || (feedPageV1 && delivery.command?.kind == "feed_page") || (destinationsListV1 && delivery.command?.kind == "destinations_list") || (feedQueueV1 && delivery.command?.kind == "queue_url")
+                      delivery.command == nil || delivery.command?.kind == "feed_sites" || delivery.command?.kind == "job_action" || (feedPageV1 && delivery.command?.kind == "feed_page") || (destinationsListV1 && (delivery.command?.kind == "destinations_list" || ["gdrive_connect", "gdrive_folders", "gdrive_create_folder", "gdrive_select_folder", "gdrive_test", "local_folder_status", "local_folder_choose", "local_folder_reset"].contains(delivery.command?.kind))) || (feedQueueV1 && delivery.command?.kind == "queue_url") || (pornHubAuthV1 && ["pornhub_auth_status", "pornhub_auth_login", "pornhub_auth_cancel", "pornhub_auth_logout"].contains(delivery.command?.kind)) || (homeWorkspaceV1 && ["home_status", "extract_preview", "feed_resolve"].contains(delivery.command?.kind)) || (libraryV1 && ["library_list", "library_update", "library_remove", "library_verify"].contains(delivery.command?.kind))
                 else { throw CloudDeviceError.invalidResponse }
                 await remoteControl.acknowledgedByCloud(ids: delivery.acknowledgedCommandAckIDs)
                 command = delivery.command
@@ -220,13 +232,19 @@ public actor CloudPresenceConnection {
             if handledCommand { continue }
             if await mailbox.consumeWake(allowRemote: commandWakeV1) { continue }
             do {
-                let message = try await timedMessage(from: mailbox, after: Self.heartbeatInterval)
+                let message = try await timedMessage(from: mailbox, after: Self.nextHeartbeatInterval(for: payload.jobs))
                 guard (message.isLocalCommandCompletion || commandWakeV1), frameType(message) == "command-available" else { throw CloudDeviceError.invalidResponse }
                 _ = await mailbox.consumeWake(allowRemote: commandWakeV1)
             } catch CloudPresenceConnectionError.timedOut {
                 continue
             }
         }
+    }
+
+    static func nextHeartbeatInterval(for jobs: [CloudRemoteJobStatus]) -> TimeInterval {
+        jobs.contains { ["queued", "running", "paused"].contains($0.status) }
+            ? activeTransferHeartbeatInterval
+            : heartbeatInterval
     }
 
     private func receiveExpected(type: String, from mailbox: CloudWebSocketMailbox, commandWakeV1: Bool, timeout: TimeInterval) async throws -> CloudWebSocketMessage {

@@ -66,12 +66,16 @@ public struct FeedAssetProxy: Sendable {
 
     public static func isAllowed(_ url: URL) -> Bool {
         guard url.scheme?.lowercased() == "https", URLSafetyPolicy.isAllowed(url), let host = url.host?.lowercased() else { return false }
-        return ["phncdn.com", "hqporner.com", "fastporndelivery.com"].contains { host == $0 || host.hasSuffix(".\($0)") }
+        return ["phncdn.com", "hqporner.com", "fastporndelivery.com", "pmvhaven.com", "cloud.ovh.net"].contains { host == $0 || host.hasSuffix(".\($0)") }
     }
 
     private func headers(for url: URL, kind: FeedAssetKind) -> [String: String] {
         let host = url.host?.lowercased() ?? ""
-        let referer = (host == "phncdn.com" || host.hasSuffix(".phncdn.com")) ? "https://www.pornhub.com/" : "https://hqporner.com/"
+        let referer = (host == "phncdn.com" || host.hasSuffix(".phncdn.com"))
+            ? "https://www.pornhub.com/"
+            : (host == "pmvhaven.com" || host.hasSuffix(".pmvhaven.com") || host == "cloud.ovh.net" || host.hasSuffix(".cloud.ovh.net"))
+                ? "https://pmvhaven.com/"
+                : "https://hqporner.com/"
         return [
             "User-Agent": NetworkConstants.chromeUserAgent,
             "Referer": referer,

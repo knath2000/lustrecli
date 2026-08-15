@@ -2,8 +2,8 @@ import "server-only";
 import { and, desc, eq, gt, gte, isNotNull, isNull, sql } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { db } from "@/lib/db/client";
-import { lustreDeviceAuditEvents, lustreDeviceCommands, lustreDeviceEnrollments, lustreDeviceJobStatus, lustreDevicePresence, lustreDevices, lustreDeviceSessionChallenges, lustrePairingChallenges } from "@/lib/db/schema";
-import { DeviceContractError, type HeartbeatFrame } from "./device-contract";
+import { lustreDeviceAuditEvents, lustreDeviceCommands, lustreDeviceEnrollments, lustreDeviceJobStatus, lustreDeviceLibrarySnapshots, lustreDevicePresence, lustreDevices, lustreDeviceSessionChallenges, lustrePairingChallenges, lustreWatchlistItems } from "@/lib/db/schema";
+import { DeviceContractError, PRESENCE_FRESHNESS_SECONDS, validLibraryResult, type HeartbeatFrame } from "./device-contract";
 import { randomNonce } from "./device-crypto";
 import { cloudFeedCacheFreshness } from "../cloud-feed-ui";
 
@@ -159,7 +159,10 @@ export async function persistGatewayHeartbeat(input: { deviceID: string; connect
               'provider_verification_required', 'provider_http_error',
               'provider_unreachable', 'provider_changed',
               'authentication_required', 'browser_extension_required',
-              'result_too_large', 'invalid_request'
+              'result_too_large', 'invalid_request', 'signed_out', 'signing_in',
+              'cancelled', 'expired', 'auth_helper_unavailable',
+              'auth_helper_failed', 'auth_timeout', 'invalid_session',
+              'auth_storage_unavailable'
             ) THEN acknowledgement.code ELSE 'unknown' END
           )
           ELSE COALESCE(
@@ -215,7 +218,7 @@ export async function persistGatewayHeartbeat(input: { deviceID: string; connect
         phase = EXCLUDED.phase,
         attempts = EXCLUDED.attempts,
         updated_at = EXCLUDED.updated_at
-      WHERE lustre_device_job_status.updated_at < EXCLUDED.updated_at
+      WHERE lustre_device_job_status.updated_at <= EXCLUDED.updated_at
       RETURNING job_id
     )
     SELECT accepted_presence.device_id,
@@ -234,20 +237,38 @@ export async function presenceForOwnedDevice(accountID: string, deviceID: string
   if (!row) throw new DeviceContractError("device_not_found", "Device not found.");
   return row;
 }
-export async function queueURLCommand(accountID: string, deviceID: string, url: string, preferredQualityLabel?: string, destination?: string) {
-  return createCommand(accountID, deviceID, "queue_url", { url, preferredQualityLabel, destination });
+export async function queueURLCommand(accountID: string, deviceID: string, url: string, title?: string, preferredQualityLabel?: string, destination?: string, requestID?: string) {
+  const payload = { url, title, preferredQualityLabel, destination: destination ?? "local", deliveryProtocol: "gateway-v1" };
+  if (requestID) {
+    const existing = (await db.select().from(lustreDeviceCommands).where(eq(lustreDeviceCommands.id, requestID)).limit(1))[0];
+    if (existing) {
+      const existingPayload = existing.payload as Record<string, unknown>;
+      if (
+        existing.accountID !== accountID ||
+        existing.deviceID !== deviceID ||
+        existing.kind !== "queue_url" ||
+        existingPayload.url !== url ||
+        existingPayload.title !== title ||
+        existingPayload.preferredQualityLabel !== preferredQualityLabel ||
+        existingPayload.destination !== payload.destination ||
+        existingPayload.deliveryProtocol !== "gateway-v1"
+      ) throw new DeviceContractError("conflict", "This request ID was already used with different inputs.");
+      return existing;
+    }
+  }
+  return createCommand(accountID, deviceID, "queue_url", payload, requestID);
 }
-export async function feedQueueCommand(input: { accountID: string; deviceID: string; requestID: string; itemID: string; siteID: string; sourcePageURL: string; destination: string }) {
+export async function feedQueueCommand(input: { accountID: string; deviceID: string; requestID: string; itemID: string; siteID: string; sourcePageURL: string; title: string; destination: string }) {
   const existing = (await db.select().from(lustreDeviceCommands).where(eq(lustreDeviceCommands.id, input.requestID)).limit(1))[0];
-  const payload = { itemID: input.itemID, siteID: input.siteID, url: input.sourcePageURL, destination: input.destination, deliveryProtocol: "gateway-v1" };
+  const payload = { itemID: input.itemID, siteID: input.siteID, url: input.sourcePageURL, title: input.title, destination: input.destination, deliveryProtocol: "gateway-v1" };
   if (existing) {
     const existingPayload = existing.payload as Record<string, unknown>;
-    if (existing.accountID !== input.accountID || existing.deviceID !== input.deviceID || existing.kind !== "queue_url" || Object.keys(existingPayload).sort().join(",") !== "deliveryProtocol,destination,itemID,siteID,url" || existingPayload.itemID !== input.itemID || existingPayload.siteID !== input.siteID || existingPayload.url !== input.sourcePageURL || existingPayload.destination !== input.destination || existingPayload.deliveryProtocol !== "gateway-v1") {
+    if (existing.accountID !== input.accountID || existing.deviceID !== input.deviceID || existing.kind !== "queue_url" || Object.keys(existingPayload).sort().join(",") !== "deliveryProtocol,destination,itemID,siteID,title,url" || existingPayload.itemID !== input.itemID || existingPayload.siteID !== input.siteID || existingPayload.url !== input.sourcePageURL || existingPayload.title !== input.title || existingPayload.destination !== input.destination || existingPayload.deliveryProtocol !== "gateway-v1") {
       throw new DeviceContractError("conflict", "This request ID was already used with different inputs.");
     }
     return existing;
   }
-  const destinationID = input.destination.startsWith("webdav:") ? input.destination.slice(7) : null;
+  const destinationID = /^(webdav|gdrive):/.test(input.destination) ? input.destination.slice(input.destination.indexOf(":") + 1) : null;
   const result = await db.execute(sql`
     WITH eligible_device AS (
       SELECT id FROM lustre_devices
@@ -271,6 +292,25 @@ export async function feedQueueCommand(input: { accountID: string; deviceID: str
             AND item ->> 'queueCapability' = 'supported'
         )
       ORDER BY command.acknowledged_at DESC
+      LIMIT 1
+    ), cloud_feed_provenance AS (
+      SELECT cache.account_id AS id
+      FROM lustre_feed_cache AS cache, eligible_device
+      WHERE cache.account_id = ${input.accountID}::uuid
+        AND cache.updated_at >= now() - interval '1 hour'
+        AND EXISTS (
+          SELECT 1
+          FROM jsonb_array_elements(cache.result -> 'items') AS item
+          WHERE item ->> 'id' = ${input.itemID}
+            AND item ->> 'siteID' = ${input.siteID}
+            AND item ->> 'sourcePageURL' = ${input.sourcePageURL}
+        )
+      ORDER BY cache.updated_at DESC
+      LIMIT 1
+    ), accepted_feed_provenance AS (
+      SELECT id FROM feed_provenance
+      UNION ALL
+      SELECT id FROM cloud_feed_provenance
       LIMIT 1
     ), newest_destination AS (
       SELECT command.result
@@ -299,22 +339,169 @@ export async function feedQueueCommand(input: { accountID: string; deviceID: str
     )
     INSERT INTO lustre_device_commands (id, account_id, device_id, kind, payload)
     SELECT ${input.requestID}::uuid, ${input.accountID}::uuid, ${input.deviceID}::uuid, 'queue_url', ${JSON.stringify(payload)}::jsonb
-    FROM eligible_device, feed_provenance, destination_provenance
+    FROM eligible_device, accepted_feed_provenance, destination_provenance
     RETURNING *
   `);
-  const row = (result as unknown as { rows: typeof lustreDeviceCommands.$inferSelect[] }).rows[0];
+  const row = (result as unknown as { rows: Array<{
+    id: string;
+    account_id: string;
+    device_id: string;
+    kind: string;
+    payload: Record<string, unknown>;
+    status: string;
+    result: Record<string, unknown> | null;
+    created_at: Date | string;
+    acknowledged_at: Date | string | null;
+  }> }).rows[0];
   if (!row) throw new DeviceContractError("invalid_request", "Fresh Feed and destination provenance are required.");
-  return row;
+  return {
+    id: row.id,
+    accountID: row.account_id,
+    deviceID: row.device_id,
+    kind: row.kind,
+    payload: row.payload,
+    status: row.status,
+    result: row.result,
+    createdAt: row.created_at instanceof Date ? row.created_at : new Date(row.created_at),
+    acknowledgedAt: row.acknowledged_at instanceof Date ? row.acknowledged_at : row.acknowledged_at ? new Date(row.acknowledged_at) : null,
+  };
+}
+export async function feedResolveCommand(input: { accountID: string; deviceID: string; itemID: string; siteID: string; sourcePageURL: string }) {
+  const payload = { itemID: input.itemID, siteID: input.siteID, url: input.sourcePageURL, deliveryProtocol: "gateway-v1" };
+  const result = await db.execute(sql`
+    WITH eligible_device AS (
+      SELECT id FROM lustre_devices
+      WHERE id = ${input.deviceID}::uuid
+        AND account_id = ${input.accountID}::uuid
+        AND revoked_at IS NULL
+    ), feed_provenance AS (
+      SELECT command.id
+      FROM lustre_device_commands AS command, eligible_device
+      WHERE command.account_id = ${input.accountID}::uuid
+        AND command.device_id = eligible_device.id
+        AND command.kind = 'feed_page'
+        AND command.status = 'completed'
+        AND command.acknowledged_at >= now() - interval '1 hour'
+        AND EXISTS (
+          SELECT 1
+          FROM jsonb_array_elements(command.result -> 'page' -> 'items') AS item
+          WHERE item ->> 'id' = ${input.itemID}
+            AND item ->> 'siteID' = ${input.siteID}
+            AND item ->> 'sourcePageURL' = ${input.sourcePageURL}
+            AND item ->> 'queueCapability' = 'supported'
+        )
+      ORDER BY command.acknowledged_at DESC
+      LIMIT 1
+    ), cloud_feed_provenance AS (
+      SELECT cache.account_id AS id
+      FROM lustre_feed_cache AS cache, eligible_device
+      WHERE cache.account_id = ${input.accountID}::uuid
+        AND cache.updated_at >= now() - interval '1 hour'
+        AND EXISTS (
+          SELECT 1
+          FROM jsonb_array_elements(cache.result -> 'items') AS item
+          WHERE item ->> 'id' = ${input.itemID}
+            AND item ->> 'siteID' = ${input.siteID}
+            AND item ->> 'sourcePageURL' = ${input.sourcePageURL}
+        )
+      ORDER BY cache.updated_at DESC
+      LIMIT 1
+    ), accepted_feed_provenance AS (
+      SELECT id FROM feed_provenance
+      UNION ALL
+      SELECT id FROM cloud_feed_provenance
+      LIMIT 1
+    )
+    INSERT INTO lustre_device_commands (account_id, device_id, kind, payload)
+    SELECT ${input.accountID}::uuid, ${input.deviceID}::uuid, 'feed_resolve', ${JSON.stringify(payload)}::jsonb
+    FROM eligible_device, accepted_feed_provenance
+    RETURNING *
+  `);
+  const row = (result as unknown as { rows: Array<{
+    id: string;
+    account_id: string;
+    device_id: string;
+    kind: string;
+    payload: Record<string, unknown>;
+    status: string;
+    result: Record<string, unknown> | null;
+    created_at: Date | string;
+    acknowledged_at: Date | string | null;
+  }> }).rows[0];
+  if (!row) throw new DeviceContractError("invalid_request", "Fresh Feed provenance is required.");
+  return {
+    id: row.id,
+    accountID: row.account_id,
+    deviceID: row.device_id,
+    kind: row.kind,
+    payload: row.payload,
+    status: row.status,
+    result: row.result,
+    createdAt: row.created_at instanceof Date ? row.created_at : new Date(row.created_at),
+    acknowledgedAt: row.acknowledged_at instanceof Date ? row.acknowledged_at : row.acknowledged_at ? new Date(row.acknowledged_at) : null,
+  };
+}
+export async function watchlistResolveCommand(accountID: string, deviceID: string, watchlistID: string) {
+  const result = await db.execute(sql`
+    INSERT INTO lustre_device_commands (account_id, device_id, kind, payload)
+    SELECT item.account_id, device.id, 'feed_resolve', jsonb_build_object('url', item.source_page_url, 'deliveryProtocol', 'gateway-v1')
+    FROM lustre_watchlist_items AS item
+    JOIN lustre_devices AS device
+      ON device.id = ${deviceID}::uuid
+      AND device.account_id = item.account_id
+      AND device.revoked_at IS NULL
+    WHERE item.id = ${watchlistID}::uuid
+      AND item.account_id = ${accountID}::uuid
+    RETURNING *
+  `);
+  const row = (result as unknown as { rows: Array<{
+    id: string;
+    account_id: string;
+    device_id: string;
+    kind: string;
+    payload: Record<string, unknown>;
+    status: string;
+    result: Record<string, unknown> | null;
+    created_at: Date | string;
+    acknowledged_at: Date | string | null;
+  }> }).rows[0];
+  if (!row) throw new DeviceContractError("invalid_request", "Watchlist item or paired device not found.");
+  return {
+    id: row.id,
+    accountID: row.account_id,
+    deviceID: row.device_id,
+    kind: row.kind,
+    payload: row.payload,
+    status: row.status,
+    result: row.result,
+    createdAt: row.created_at instanceof Date ? row.created_at : new Date(row.created_at),
+    acknowledgedAt: row.acknowledged_at instanceof Date ? row.acknowledged_at : row.acknowledged_at ? new Date(row.acknowledged_at) : null,
+  };
+}
+export async function watchlistOwnsThumbnail(accountID: string, deviceID: string, thumbnailURL: string) {
+  const row = await db.select({ id: lustreWatchlistItems.id })
+    .from(lustreWatchlistItems)
+    .innerJoin(lustreDevices, and(
+      eq(lustreDevices.id, deviceID),
+      eq(lustreDevices.accountID, lustreWatchlistItems.accountID),
+      isNull(lustreDevices.revokedAt),
+    ))
+    .where(and(
+      eq(lustreWatchlistItems.accountID, accountID),
+      eq(lustreWatchlistItems.thumbnailURL, thumbnailURL),
+    ))
+    .limit(1);
+  return !!row[0];
 }
 export async function jobActionCommand(accountID: string, deviceID: string, jobID: string, action: "pause" | "resume" | "cancel" | "retry") {
-  return createCommand(accountID, deviceID, "job_action", { jobID, action });
+  return createCommand(accountID, deviceID, "job_action", { jobID, action, deliveryProtocol: "gateway-v1" });
 }
-async function createCommand(accountID: string, deviceID: string, kind: string, payload: Record<string, string | undefined>) {
+async function createCommand(accountID: string, deviceID: string, kind: string, payload: Record<string, unknown>, id?: string) {
   const device = (await db.select({ id: lustreDevices.id }).from(lustreDevices).where(and(eq(lustreDevices.id, deviceID), eq(lustreDevices.accountID, accountID), isNull(lustreDevices.revokedAt))).limit(1))[0];
   if (!device) throw new DeviceContractError("device_not_found", "Device not found.");
-  return (await db.insert(lustreDeviceCommands).values({ accountID, deviceID, kind, payload }).returning())[0];
+  return (await db.insert(lustreDeviceCommands).values({ ...(id ? { id } : {}), accountID, deviceID, kind, payload }).returning())[0];
 }
-export async function feedCommand(accountID: string, deviceID: string, kind: "feed_sites" | "feed_page" | "webdav_add" | "destinations_list", payload: Record<string, string | undefined>) {
+export async function feedCommand(accountID: string, deviceID: string, kind: "feed_sites" | "feed_page" | "webdav_add" | "destinations_list" | "gdrive_connect" | "gdrive_folders" | "gdrive_create_folder" | "gdrive_select_folder" | "gdrive_test" | "local_folder_status" | "local_folder_choose" | "local_folder_reset", payload: Record<string, string | undefined>) {
   if (kind === "feed_sites" || kind === "feed_page" || kind === "destinations_list") {
     const pending = (await db.select().from(lustreDeviceCommands).where(and(
       eq(lustreDeviceCommands.accountID, accountID),
@@ -330,7 +517,66 @@ export async function feedCommand(accountID: string, deviceID: string, kind: "fe
     )).orderBy(lustreDeviceCommands.createdAt).limit(1))[0];
     if (pending) return pending;
   }
-  return createCommand(accountID, deviceID, kind, kind === "feed_sites" || kind === "feed_page" || kind === "destinations_list" ? { ...payload, deliveryProtocol: "gateway-v1" } : payload);
+  return createCommand(accountID, deviceID, kind, kind === "feed_sites" || kind === "feed_page" || kind === "destinations_list" || kind.startsWith("gdrive_") || kind.startsWith("local_folder_") ? { ...payload, deliveryProtocol: "gateway-v1" } : payload);
+}
+
+export async function pornHubAuthCommand(accountID: string, deviceID: string, kind: "pornhub_auth_status" | "pornhub_auth_login" | "pornhub_auth_cancel" | "pornhub_auth_logout") {
+  const cutoff = new Date(Date.now() - PRESENCE_FRESHNESS_SECONDS * 1_000);
+  const online = (await db.select({ deviceID: lustreDevicePresence.deviceID }).from(lustreDevicePresence).innerJoin(
+    lustreDevices,
+    and(
+      eq(lustreDevices.id, lustreDevicePresence.deviceID),
+      eq(lustreDevices.accountID, accountID),
+      isNull(lustreDevices.revokedAt),
+    ),
+  ).where(and(
+    eq(lustreDevicePresence.deviceID, deviceID),
+    gte(lustreDevicePresence.lastHeartbeatAt, cutoff),
+  )).limit(1))[0];
+  if (!online) throw new DeviceContractError("agent_offline", "Paired Mac is offline. Mount MyPassport and start Lustre Agent, then retry.");
+  if (kind === "pornhub_auth_status") {
+    const pending = (await db.select().from(lustreDeviceCommands).where(and(
+      eq(lustreDeviceCommands.accountID, accountID),
+      eq(lustreDeviceCommands.deviceID, deviceID),
+      eq(lustreDeviceCommands.kind, kind),
+      sql`${lustreDeviceCommands.status} in ('pending', 'running')`,
+    )).orderBy(lustreDeviceCommands.createdAt).limit(1))[0];
+    if (pending) return pending;
+  }
+  return createCommand(accountID, deviceID, kind, { deliveryProtocol: "gateway-v1" });
+}
+
+export async function homeWorkspaceCommand(accountID: string, deviceID: string, kind: "home_status" | "extract_preview", urls?: string[]) {
+  if (kind === "home_status") {
+    const pending = (await db.select().from(lustreDeviceCommands).where(and(
+      eq(lustreDeviceCommands.accountID, accountID),
+      eq(lustreDeviceCommands.deviceID, deviceID),
+      eq(lustreDeviceCommands.kind, kind),
+      sql`${lustreDeviceCommands.status} in ('pending', 'running')`,
+    )).orderBy(lustreDeviceCommands.createdAt).limit(1))[0];
+    if (pending) return pending;
+  }
+  return createCommand(accountID, deviceID, kind, { ...(urls ? { urls } : {}), deliveryProtocol: "gateway-v1" });
+}
+
+export async function libraryCommand(accountID: string, deviceID: string, kind: "library_list" | "library_update" | "library_remove" | "library_verify", payload: Record<string, unknown>) {
+  if (kind === "library_list") {
+    const pending = (await db.select().from(lustreDeviceCommands).where(and(
+      eq(lustreDeviceCommands.accountID, accountID),
+      eq(lustreDeviceCommands.deviceID, deviceID),
+      eq(lustreDeviceCommands.kind, kind),
+      sql`${lustreDeviceCommands.status} in ('pending', 'running')`,
+      sql`${lustreDeviceCommands.payload} ->> 'page' = ${String(payload.page ?? 1)}`,
+    )).orderBy(lustreDeviceCommands.createdAt).limit(1))[0];
+    if (pending) return pending;
+  }
+  return createCommand(accountID, deviceID, kind, { ...payload, deliveryProtocol: "gateway-v1" });
+}
+
+export async function cachedLibrarySnapshot(accountID: string, deviceID: string) {
+  const device = (await db.select({ id: lustreDevices.id }).from(lustreDevices).where(and(eq(lustreDevices.id, deviceID), eq(lustreDevices.accountID, accountID), isNull(lustreDevices.revokedAt))).limit(1))[0];
+  if (!device) throw new DeviceContractError("device_not_found", "Device not found.");
+  return (await db.select().from(lustreDeviceLibrarySnapshots).where(and(eq(lustreDeviceLibrarySnapshots.accountID, accountID), eq(lustreDeviceLibrarySnapshots.deviceID, deviceID))).limit(1))[0] ?? null;
 }
 
 export async function cachedFeedResult(accountID: string, deviceID: string, kind: "feed_sites" | "feed_page", payload: Record<string, string | undefined>) {
@@ -361,9 +607,19 @@ export async function cachedFeedResult(accountID: string, deviceID: string, kind
     freshness,
   };
 }
-export async function nextGatewayCommand(input: { deviceID: string; connectionID: string; sequence: number; allowFeedPage: boolean; allowDestinationsList: boolean; allowFeedQueue: boolean }) {
+export async function nextGatewayCommand(input: { deviceID: string; connectionID: string; sequence: number; allowFeedPage: boolean; allowDestinationsList: boolean; allowFeedQueue: boolean; allowPornHubAuth: boolean; allowHomeWorkspace: boolean; allowLibrary: boolean }) {
   const result = await db.execute(sql`
-    WITH current_presence AS (
+    WITH expired_auth AS (
+      UPDATE lustre_device_commands
+      SET status = 'failed',
+          result = jsonb_build_object('code', 'command_expired'),
+          acknowledged_at = now()
+      WHERE device_id = ${input.deviceID}::uuid
+        AND kind IN ('pornhub_auth_status', 'pornhub_auth_login', 'pornhub_auth_cancel', 'pornhub_auth_logout')
+        AND status IN ('pending', 'running')
+        AND created_at < now() - interval '90 seconds'
+      RETURNING id
+    ), current_presence AS (
       SELECT device_id
       FROM lustre_device_presence
       WHERE device_id = ${input.deviceID}::uuid
@@ -373,13 +629,19 @@ export async function nextGatewayCommand(input: { deviceID: string; connectionID
       SELECT command.id
       FROM lustre_device_commands AS command
       INNER JOIN current_presence ON current_presence.device_id = command.device_id
+      LEFT JOIN expired_auth ON expired_auth.id = command.id
       WHERE (
           command.kind = 'feed_sites'
           OR (${input.allowFeedPage} AND command.kind = 'feed_page')
-          OR (${input.allowDestinationsList} AND command.kind = 'destinations_list')
+          OR (${input.allowDestinationsList} AND command.kind IN ('destinations_list', 'gdrive_connect', 'gdrive_folders', 'gdrive_create_folder', 'gdrive_select_folder', 'gdrive_test', 'local_folder_status', 'local_folder_choose', 'local_folder_reset'))
           OR (${input.allowFeedQueue} AND command.kind = 'queue_url')
+          OR (${input.allowPornHubAuth} AND command.kind IN ('pornhub_auth_status', 'pornhub_auth_login', 'pornhub_auth_cancel', 'pornhub_auth_logout'))
+          OR (${input.allowHomeWorkspace} AND command.kind IN ('home_status', 'extract_preview', 'feed_resolve'))
+          OR (${input.allowLibrary} AND command.kind IN ('library_list', 'library_update', 'library_remove', 'library_verify'))
+          OR command.kind = 'job_action'
         )
         AND command.status IN ('pending', 'running')
+        AND expired_auth.id IS NULL
         AND command.payload ->> 'deliveryProtocol' = 'gateway-v1'
       ORDER BY command.created_at
       LIMIT 1
@@ -391,32 +653,77 @@ export async function nextGatewayCommand(input: { deviceID: string; connectionID
     WHERE command.id = candidate.id
     RETURNING command.id, command.kind, command.payload
   `);
-  const row = (result as unknown as { rows: Array<{ id: string; kind: "feed_sites" | "feed_page" | "destinations_list" | "queue_url"; payload: Record<string, string> }> }).rows[0];
+  const row = (result as unknown as { rows: Array<{ id: string; kind: "feed_sites" | "feed_page" | "destinations_list" | "gdrive_connect" | "gdrive_folders" | "gdrive_create_folder" | "gdrive_select_folder" | "gdrive_test" | "local_folder_status" | "local_folder_choose" | "local_folder_reset" | "queue_url" | "job_action" | "pornhub_auth_status" | "pornhub_auth_login" | "pornhub_auth_cancel" | "pornhub_auth_logout" | "home_status" | "extract_preview" | "feed_resolve" | "library_list" | "library_update" | "library_remove" | "library_verify"; payload: Record<string, unknown> }> }).rows[0];
   if (!row) return null;
   if (row.kind === "feed_sites") return { id: row.id, kind: "feed_sites" as const, payload: {} };
   if (row.kind === "destinations_list") return { id: row.id, kind: "destinations_list" as const, payload: {} };
-  if (row.kind === "queue_url") return { id: row.id, kind: "queue_url" as const, payload: { url: row.payload.url, destination: row.payload.destination, deliveryProtocol: "gateway-v1" as const } };
-  return { id: row.id, kind: "feed_page" as const, payload: { siteID: row.payload.siteID, page: Number(row.payload.page), ...(row.payload.query ? { query: row.payload.query } : {}) } };
+  if (row.kind === "local_folder_status" || row.kind === "local_folder_choose" || row.kind === "local_folder_reset") return { id: row.id, kind: row.kind, payload: { deliveryProtocol: "gateway-v1" as const } };
+  if (row.kind === "gdrive_connect") return { id: row.id, kind: "gdrive_connect" as const, payload: { deliveryProtocol: "gateway-v1" as const } };
+  if (row.kind === "gdrive_test") return { id: row.id, kind: "gdrive_test" as const, payload: { profileID: row.payload.profileID as string, deliveryProtocol: "gateway-v1" as const } };
+  if (row.kind === "gdrive_folders" || row.kind === "gdrive_create_folder" || row.kind === "gdrive_select_folder") return { id: row.id, kind: row.kind, payload: { profileID: row.payload.profileID as string, path: row.payload.path as string, deliveryProtocol: "gateway-v1" as const } };
+  if (row.kind === "queue_url") return { id: row.id, kind: "queue_url" as const, payload: { url: row.payload.url as string, destination: row.payload.destination as string, ...(typeof row.payload.preferredQualityLabel === "string" ? { preferredQualityLabel: row.payload.preferredQualityLabel } : {}), deliveryProtocol: "gateway-v1" as const } };
+  if (row.kind === "job_action") return { id: row.id, kind: "job_action" as const, payload: { jobID: row.payload.jobID as string, action: row.payload.action as "pause" | "resume" | "cancel" | "retry", deliveryProtocol: "gateway-v1" as const } };
+  if (row.kind === "pornhub_auth_status" || row.kind === "pornhub_auth_login" || row.kind === "pornhub_auth_cancel" || row.kind === "pornhub_auth_logout") {
+    return { id: row.id, kind: row.kind, payload: { deliveryProtocol: "gateway-v1" as const } };
+  }
+  if (row.kind === "home_status") return { id: row.id, kind: "home_status" as const, payload: { deliveryProtocol: "gateway-v1" as const } };
+  if (row.kind === "extract_preview") return { id: row.id, kind: "extract_preview" as const, payload: { urls: row.payload.urls as unknown as string[], deliveryProtocol: "gateway-v1" as const } };
+  if (row.kind === "feed_resolve") return { id: row.id, kind: "feed_resolve" as const, payload: { url: row.payload.url as string, deliveryProtocol: "gateway-v1" as const } };
+  if (row.kind === "library_list") return { id: row.id, kind: "library_list" as const, payload: { page: Number(row.payload.page), deliveryProtocol: "gateway-v1" as const } };
+  if (row.kind === "library_remove" || row.kind === "library_verify") return { id: row.id, kind: row.kind, payload: { itemID: row.payload.itemID as string, deliveryProtocol: "gateway-v1" as const } };
+  if (row.kind === "library_update") return { id: row.id, kind: "library_update" as const, payload: { itemID: row.payload.itemID as string, tags: row.payload.tags as string[], ...(typeof row.payload.collection === "string" ? { collection: row.payload.collection } : {}), ...(typeof row.payload.favorite === "boolean" ? { favorite: row.payload.favorite } : {}), deliveryProtocol: "gateway-v1" as const } };
+  return { id: row.id, kind: "feed_page" as const, payload: { siteID: row.payload.siteID as string, page: Number(row.payload.page), ...(typeof row.payload.query === "string" ? { query: row.payload.query } : {}) } };
 }
 export async function nextPendingCommand(deviceID: string) {
   return (await db.select().from(lustreDeviceCommands).where(and(eq(lustreDeviceCommands.deviceID, deviceID), sql`${lustreDeviceCommands.status} in ('pending', 'running')`)).orderBy(lustreDeviceCommands.createdAt).limit(1))[0] ?? null;
 }
 export async function acknowledgeCommands(deviceID: string, acknowledgements: Array<{ id: string; status: "completed" | "failed"; jobID?: string; result?: Record<string, unknown> }>) {
-  for (const acknowledgement of acknowledgements) await db.update(lustreDeviceCommands).set({ status: acknowledgement.status, result: acknowledgement.result ?? (acknowledgement.jobID ? { jobID: acknowledgement.jobID } : {}), acknowledgedAt: now() }).where(and(eq(lustreDeviceCommands.id, acknowledgement.id), eq(lustreDeviceCommands.deviceID, deviceID), sql`${lustreDeviceCommands.status} in ('pending', 'running')`));
+  for (const acknowledgement of acknowledgements) {
+    const command = (await db.select({ accountID: lustreDeviceCommands.accountID }).from(lustreDeviceCommands).where(and(eq(lustreDeviceCommands.id, acknowledgement.id), eq(lustreDeviceCommands.deviceID, deviceID))).limit(1))[0];
+    await db.update(lustreDeviceCommands).set({ status: acknowledgement.status, result: acknowledgement.result ?? (acknowledgement.jobID ? { jobID: acknowledgement.jobID } : {}), acknowledgedAt: now() }).where(and(eq(lustreDeviceCommands.id, acknowledgement.id), eq(lustreDeviceCommands.deviceID, deviceID), sql`${lustreDeviceCommands.status} in ('pending', 'running')`));
+    if (command && acknowledgement.status === "completed" && acknowledgement.result && validLibraryResult(acknowledgement.result)) {
+      const library = acknowledgement.result.library as { revision: number; page: number; items: unknown[] };
+      if (library.page === 1) {
+        await db.insert(lustreDeviceLibrarySnapshots).values({ deviceID, accountID: command.accountID, revision: library.revision, items: library.items, syncedAt: now() }).onConflictDoUpdate({
+          target: lustreDeviceLibrarySnapshots.deviceID,
+          set: { accountID: command.accountID, revision: library.revision, items: library.items, syncedAt: now() },
+          setWhere: sql`${lustreDeviceLibrarySnapshots.revision} <= ${library.revision}`,
+        });
+      }
+    }
+  }
 }
-export async function commandForOwnedDevice(accountID: string, deviceID: string, commandID: string) { const row = (await db.select().from(lustreDeviceCommands).where(and(eq(lustreDeviceCommands.accountID, accountID), eq(lustreDeviceCommands.deviceID, deviceID), eq(lustreDeviceCommands.id, commandID))).limit(1))[0]; if (!row) throw new DeviceContractError("device_not_found", "Command not found."); return row; }
+export async function commandForOwnedDevice(accountID: string, deviceID: string, commandID: string) {
+  await db.update(lustreDeviceCommands).set({
+    status: "failed",
+    result: { code: "command_expired" },
+    acknowledgedAt: now(),
+  }).where(and(
+    eq(lustreDeviceCommands.accountID, accountID),
+    eq(lustreDeviceCommands.deviceID, deviceID),
+    eq(lustreDeviceCommands.id, commandID),
+    sql`${lustreDeviceCommands.kind} in ('pornhub_auth_status', 'pornhub_auth_login', 'pornhub_auth_cancel', 'pornhub_auth_logout')`,
+    sql`${lustreDeviceCommands.status} in ('pending', 'running')`,
+    sql`${lustreDeviceCommands.createdAt} < now() - interval '90 seconds'`,
+  ));
+  const row = (await db.select().from(lustreDeviceCommands).where(and(eq(lustreDeviceCommands.accountID, accountID), eq(lustreDeviceCommands.deviceID, deviceID), eq(lustreDeviceCommands.id, commandID))).limit(1))[0];
+  if (!row) throw new DeviceContractError("device_not_found", "Command not found.");
+  return row;
+}
 export async function recentCompletedFeedPageResults(accountID: string, deviceID: string, since: Date) {
   const device = (await db.select({ id: lustreDevices.id }).from(lustreDevices).where(and(eq(lustreDevices.id, deviceID), eq(lustreDevices.accountID, accountID), isNull(lustreDevices.revokedAt))).limit(1))[0];
   if (!device) throw new DeviceContractError("device_not_found", "Device not found.");
-  return db.select({ result: lustreDeviceCommands.result }).from(lustreDeviceCommands).where(and(
+  const results = await db.select({ result: lustreDeviceCommands.result }).from(lustreDeviceCommands).where(and(
     eq(lustreDeviceCommands.accountID, accountID),
     eq(lustreDeviceCommands.deviceID, deviceID),
-    eq(lustreDeviceCommands.kind, "feed_page"),
+    sql`${lustreDeviceCommands.kind} in ('feed_page', 'extract_preview', 'library_list', 'library_update', 'library_verify')`,
     eq(lustreDeviceCommands.status, "completed"),
     isNotNull(lustreDeviceCommands.result),
     isNotNull(lustreDeviceCommands.acknowledgedAt),
     gte(lustreDeviceCommands.acknowledgedAt, since),
   )).orderBy(desc(lustreDeviceCommands.acknowledgedAt));
+  const snapshot = (await db.select().from(lustreDeviceLibrarySnapshots).where(and(eq(lustreDeviceLibrarySnapshots.accountID, accountID), eq(lustreDeviceLibrarySnapshots.deviceID, deviceID))).limit(1))[0];
+  return snapshot ? [...results, { result: { kind: "library_snapshot", library: { revision: snapshot.revision, page: 1, hasMore: false, items: snapshot.items } } }] : results;
 }
 export async function syncJobStatus(deviceID: string, jobs: Array<{ id: string; sourcePageURL?: string; displayName?: string; preferredQualityLabel?: string; status: string; progress?: number; downloadedBytes?: number; totalBytes?: number; phase?: string; attempts: number; updatedAt?: string }>) {
   for (const job of jobs) {
@@ -424,7 +731,64 @@ export async function syncJobStatus(deviceID: string, jobs: Array<{ id: string; 
     await db.insert(lustreDeviceJobStatus).values({ deviceID, jobID: job.id, sourcePageURL: job.sourcePageURL ?? null, displayName: job.displayName ?? "Download", preferredQualityLabel: job.preferredQualityLabel ?? null, status: job.status, progress: job.progress === undefined ? null : Math.round(job.progress * 10_000), downloadedBytes: job.downloadedBytes ?? null, totalBytes: job.totalBytes ?? null, phase: job.phase ?? null, attempts: job.attempts, updatedAt }).onConflictDoUpdate({ target: [lustreDeviceJobStatus.deviceID, lustreDeviceJobStatus.jobID], set: { sourcePageURL: job.sourcePageURL ?? null, displayName: job.displayName ?? "Download", preferredQualityLabel: job.preferredQualityLabel ?? null, status: job.status, progress: job.progress === undefined ? null : Math.round(job.progress * 10_000), downloadedBytes: job.downloadedBytes ?? null, totalBytes: job.totalBytes ?? null, phase: job.phase ?? null, attempts: job.attempts, updatedAt } });
   }
 }
-export async function jobStatusForOwnedDevice(accountID: string, deviceID: string) {
+export async function jobStatusForOwnedDevice(
+  accountID: string,
+  deviceID: string,
+  options: { status?: string; limit?: number; offset?: number } = {},
+) {
   const device = (await db.select({ id: lustreDevices.id }).from(lustreDevices).where(and(eq(lustreDevices.id, deviceID), eq(lustreDevices.accountID, accountID))).limit(1))[0]; if (!device) throw new DeviceContractError("device_not_found", "Device not found.");
-  return db.select().from(lustreDeviceJobStatus).where(eq(lustreDeviceJobStatus.deviceID, deviceID)).orderBy(desc(lustreDeviceJobStatus.updatedAt));
+  const statusFilter = options.status === "active"
+    ? sql`${lustreDeviceJobStatus.status} IN ('queued', 'running', 'paused')`
+    : options.status === "failed"
+      ? sql`${lustreDeviceJobStatus.status} IN ('failed', 'verificationRequired')`
+      : options.status && options.status !== "all"
+        ? eq(lustreDeviceJobStatus.status, options.status)
+        : undefined;
+  return db.select().from(lustreDeviceJobStatus)
+    .where(and(eq(lustreDeviceJobStatus.deviceID, deviceID), statusFilter))
+    .orderBy(desc(lustreDeviceJobStatus.updatedAt))
+    .limit(Math.min(Math.max(options.limit ?? 100, 1), 100))
+    .offset(Math.max(options.offset ?? 0, 0));
+}
+
+export async function jobDashboardForOwnedDevice(accountID: string, deviceID: string) {
+  const device = (await db.select({ id: lustreDevices.id }).from(lustreDevices).where(and(eq(lustreDevices.id, deviceID), eq(lustreDevices.accountID, accountID))).limit(1))[0];
+  if (!device) throw new DeviceContractError("device_not_found", "Device not found.");
+  const [jobs, countResult, presence] = await Promise.all([
+    db.select().from(lustreDeviceJobStatus)
+      .where(and(
+        eq(lustreDeviceJobStatus.deviceID, deviceID),
+        sql`${lustreDeviceJobStatus.status} IN ('queued', 'running', 'paused')`,
+      ))
+      .orderBy(desc(lustreDeviceJobStatus.updatedAt))
+      .limit(25),
+    db.execute(sql`
+      SELECT
+        count(*) FILTER (WHERE status IN ('running', 'paused'))::integer AS active,
+        count(*) FILTER (WHERE status = 'queued')::integer AS queued,
+        count(*) FILTER (WHERE status IN ('failed', 'verificationRequired'))::integer AS failed,
+        count(*) FILTER (WHERE status = 'completed')::integer AS completed
+      FROM lustre_device_job_status
+      WHERE device_id = ${deviceID}::uuid
+    `),
+    db.select({
+      revokedAt: lustreDevices.revokedAt,
+      lastHeartbeatAt: lustreDevicePresence.lastHeartbeatAt,
+      agentVersion: lustreDevicePresence.agentVersion,
+    }).from(lustreDevices)
+      .leftJoin(lustreDevicePresence, eq(lustreDevicePresence.deviceID, lustreDevices.id))
+      .where(eq(lustreDevices.id, deviceID))
+      .limit(1),
+  ]);
+  const countRow = (countResult as unknown as { rows: Array<{ active: number; queued: number; failed: number; completed: number }> }).rows[0];
+  return {
+    jobs,
+    counts: {
+      active: Number(countRow?.active ?? 0),
+      queued: Number(countRow?.queued ?? 0),
+      failed: Number(countRow?.failed ?? 0),
+      completed: Number(countRow?.completed ?? 0),
+    },
+    presence: presence[0]!,
+  };
 }

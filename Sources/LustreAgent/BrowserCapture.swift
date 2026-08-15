@@ -6,11 +6,14 @@ import LustreCore
 public enum BrowserCaptureConstants {
     public static let extensionID = "bflialnfhbmofpgeigfgpiclhgllfhni"
     public static let extensionOrigin = "chrome-extension://\(extensionID)/"
+    public static let firefoxExtensionID = "lustre-allpornstream@pmvdl.local"
     public static let nativeHostName = "com.pmvdl.lustre_browser_bridge"
     public static let maximumMessageBytes = 256 * 1024
     public static let captureTimeout: TimeInterval = 5 * 60
     public static let socketURL = AgentPaths.applicationSupport.appending(path: "browser-capture.sock")
     public static let extensionURL = AgentPaths.applicationSupport.appending(path: "ChromeExtension", directoryHint: .isDirectory)
+    public static let firefoxExtensionURL = AgentPaths.applicationSupport.appending(path: "FirefoxExtension", directoryHint: .isDirectory)
+    public static let browserPreferenceURL = AgentPaths.applicationSupport.appending(path: "browser-capture-browser")
 }
 
 public enum BrowserCaptureError: Error, LocalizedError, Sendable {
@@ -22,10 +25,10 @@ public enum BrowserCaptureError: Error, LocalizedError, Sendable {
 
     public var errorDescription: String? {
         switch self {
-        case .browserExtensionRequired: "Install and enable the Lustre Chrome extension on the paired Mac."
-        case .timeout: "AllPornStream verification in Chrome timed out."
+        case .browserExtensionRequired: "Install and enable the selected Lustre browser extension on the paired Mac."
+        case .timeout: "AllPornStream browser verification timed out."
         case .cancelled: "AllPornStream capture was cancelled."
-        case .invalidCapture: "Chrome returned invalid AllPornStream Feed metadata."
+        case .invalidCapture: "The browser returned invalid AllPornStream Feed metadata."
         case .browserClosed: "The AllPornStream capture tab was closed before verification completed."
         }
     }
@@ -33,6 +36,14 @@ public enum BrowserCaptureError: Error, LocalizedError, Sendable {
 
 public struct BrowserIntegrationStatus: Codable, Sendable {
     public let chromeIsDefault: Bool
+    public let extensionIsStaged: Bool
+    public let nativeHostIsInstalled: Bool
+    public let extensionID: String
+    public let extensionDirectory: String
+}
+
+public struct FirefoxBrowserIntegrationStatus: Codable, Sendable {
+    public let firefoxIsInstalled: Bool
     public let extensionIsStaged: Bool
     public let nativeHostIsInstalled: Bool
     public let extensionID: String
@@ -47,7 +58,7 @@ public enum BrowserIntegration {
         return BrowserIntegrationStatus(
             chromeIsDefault: chromeIsDefault,
             extensionIsStaged: FileManager.default.fileExists(atPath: BrowserCaptureConstants.extensionURL.appending(path: "manifest.json").path),
-            nativeHostIsInstalled: FileManager.default.fileExists(atPath: nativeHostManifestURL.path),
+            nativeHostIsInstalled: chromiumNativeHostManifestURLs.contains { FileManager.default.fileExists(atPath: $0.path) },
             extensionID: BrowserCaptureConstants.extensionID,
             extensionDirectory: BrowserCaptureConstants.extensionURL.path
         )
@@ -67,7 +78,6 @@ public enum BrowserIntegration {
         guard let executable = runningExecutable else { throw BrowserCaptureError.browserExtensionRequired }
         let bridge = executable.deletingLastPathComponent().appending(path: "lustre-browser-bridge")
         guard fileManager.isExecutableFile(atPath: bridge.path) else { throw BrowserCaptureError.browserExtensionRequired }
-        try fileManager.createDirectory(at: nativeHostManifestURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         let manifest: [String: Any] = [
             "name": BrowserCaptureConstants.nativeHostName,
             "description": "Lustre AllPornStream browser capture bridge",
@@ -75,19 +85,98 @@ public enum BrowserIntegration {
             "type": "stdio",
             "allowed_origins": [BrowserCaptureConstants.extensionOrigin]
         ]
-        try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys]).write(to: nativeHostManifestURL, options: .atomic)
+        let manifestData = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+        for manifestURL in chromiumNativeHostManifestURLs {
+            try fileManager.createDirectory(at: manifestURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try manifestData.write(to: manifestURL, options: .atomic)
+        }
+        try Data("chrome".utf8).write(to: BrowserCaptureConstants.browserPreferenceURL, options: .atomic)
         return status()
+    }
+
+    public static func firefoxStatus() -> FirefoxBrowserIntegrationStatus {
+        FirefoxBrowserIntegrationStatus(
+            firefoxIsInstalled: NSWorkspace.shared.urlForApplication(withBundleIdentifier: "org.mozilla.firefox") != nil,
+            extensionIsStaged: FileManager.default.fileExists(atPath: BrowserCaptureConstants.firefoxExtensionURL.appending(path: "manifest.json").path),
+            nativeHostIsInstalled: FileManager.default.fileExists(atPath: firefoxNativeHostManifestURL.path),
+            extensionID: BrowserCaptureConstants.firefoxExtensionID,
+            extensionDirectory: BrowserCaptureConstants.firefoxExtensionURL.path
+        )
+    }
+
+    public static func installFirefox(runningExecutable: URL? = Bundle.main.executableURL) throws -> FirefoxBrowserIntegrationStatus {
+        try AgentPaths.prepare()
+        guard let extensionResource = Bundle.module.url(forResource: "ChromeExtension", withExtension: nil),
+              let manifestResource = Bundle.module.url(forResource: "FirefoxManifest", withExtension: "json")
+        else { throw BrowserCaptureError.browserExtensionRequired }
+        let fileManager = FileManager.default
+        if fileManager.fileExists(atPath: BrowserCaptureConstants.firefoxExtensionURL.path) {
+            try fileManager.removeItem(at: BrowserCaptureConstants.firefoxExtensionURL)
+        }
+        try fileManager.copyItem(at: extensionResource, to: BrowserCaptureConstants.firefoxExtensionURL)
+        let stagedManifest = BrowserCaptureConstants.firefoxExtensionURL.appending(path: "manifest.json")
+        try fileManager.removeItem(at: stagedManifest)
+        try fileManager.copyItem(at: manifestResource, to: stagedManifest)
+
+        guard let executable = runningExecutable else { throw BrowserCaptureError.browserExtensionRequired }
+        let bridge = executable.deletingLastPathComponent().appending(path: "lustre-browser-bridge")
+        guard fileManager.isExecutableFile(atPath: bridge.path) else { throw BrowserCaptureError.browserExtensionRequired }
+        try fileManager.createDirectory(at: firefoxNativeHostManifestURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let manifest: [String: Any] = [
+            "name": BrowserCaptureConstants.nativeHostName,
+            "description": "Lustre AllPornStream browser capture bridge",
+            "path": bridge.path,
+            "type": "stdio",
+            "allowed_extensions": [BrowserCaptureConstants.firefoxExtensionID]
+        ]
+        try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys]).write(to: firefoxNativeHostManifestURL, options: .atomic)
+        try Data("firefox".utf8).write(to: BrowserCaptureConstants.browserPreferenceURL, options: .atomic)
+        return firefoxStatus()
+    }
+
+    public static func preferredApplication() -> URL? {
+        let preference = (try? String(contentsOf: BrowserCaptureConstants.browserPreferenceURL, encoding: .utf8)) ?? "chrome"
+        if preference == "firefox" {
+            return NSWorkspace.shared.urlForApplication(withBundleIdentifier: "org.mozilla.firefox")
+        }
+        let workspace = NSWorkspace.shared
+        if let selected = workspace.urlForApplication(toOpen: URL(string: "https://allpornstream.com")!),
+           ["com.google.Chrome", "com.brave.Browser", "com.kagi.kagimacOS"].contains(Bundle(url: selected)?.bundleIdentifier) {
+            return selected
+        }
+        return ["com.google.Chrome", "com.brave.Browser", "com.kagi.kagimacOS"]
+            .lazy.compactMap(workspace.urlForApplication(withBundleIdentifier:)).first
+    }
+
+    public static func selectedIntegrationIsReady() -> Bool {
+        let preference = (try? String(contentsOf: BrowserCaptureConstants.browserPreferenceURL, encoding: .utf8)) ?? "chrome"
+        if preference == "firefox" {
+            let status = firefoxStatus()
+            return status.firefoxIsInstalled && status.extensionIsStaged && status.nativeHostIsInstalled
+        }
+        let chrome = status()
+        return chrome.extensionIsStaged && chrome.nativeHostIsInstalled
     }
 
     public static func openChromeExtensions() {
         guard let chrome = NSWorkspace.shared.urlForApplication(toOpen: URL(string: "https://allpornstream.com")!),
-              chrome.lastPathComponent == "Google Chrome.app" else { return }
-        NSWorkspace.shared.open([URL(string: "chrome://extensions")!], withApplicationAt: chrome, configuration: NSWorkspace.OpenConfiguration())
+              let identifier = Bundle(url: chrome)?.bundleIdentifier,
+              ["com.google.Chrome", "com.brave.Browser", "com.kagi.kagimacOS"].contains(identifier) else { return }
+        let scheme = identifier == "com.brave.Browser" ? "brave" : identifier == "com.kagi.kagimacOS" ? "orion" : "chrome"
+        NSWorkspace.shared.open([URL(string: "\(scheme)://extensions")!], withApplicationAt: chrome, configuration: NSWorkspace.OpenConfiguration())
     }
 
-    private static var nativeHostManifestURL: URL {
+    private static var chromiumNativeHostManifestURLs: [URL] {
+        let applicationSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        return [
+            applicationSupport.appending(path: "Google/Chrome/NativeMessagingHosts/\(BrowserCaptureConstants.nativeHostName).json"),
+            applicationSupport.appending(path: "BraveSoftware/Brave-Browser/NativeMessagingHosts/\(BrowserCaptureConstants.nativeHostName).json")
+        ]
+    }
+
+    private static var firefoxNativeHostManifestURL: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appending(path: "Google/Chrome/NativeMessagingHosts/\(BrowserCaptureConstants.nativeHostName).json")
+            .appending(path: "Mozilla/NativeMessagingHosts/\(BrowserCaptureConstants.nativeHostName).json")
     }
 }
 
@@ -112,10 +201,29 @@ struct BrowserFeedCard: Codable, Sendable {
     let studio: String?
 }
 
+struct BrowserPostCapture: Codable, Sendable {
+    let type: String
+    let version: Int
+    let requestID: UUID
+    let siteID: String
+    let pageURL: URL
+    let capturedAt: Date
+    let metadataSources: [String]
+}
+
 struct BrowserCaptureResponse: Codable, Sendable {
     let type: String
     let requestID: UUID?
     let code: String?
+}
+
+private struct BrowserPornHubAuthCapture: Codable, Sendable {
+    let type: String
+    let version: Int
+    let requestID: UUID
+    let pageURL: URL
+    let capturedAt: Date
+    let cookies: [PornHubCookieRecord]
 }
 
 public actor AllPornStreamCaptureCoordinator {
@@ -125,9 +233,21 @@ public actor AllPornStreamCaptureCoordinator {
         let continuation: CheckedContinuation<FeedPage, Error>
     }
 
+    private struct PendingPost {
+        let expectedURL: URL
+        let continuation: CheckedContinuation<String, Error>
+    }
+
+    private struct PendingPornHubAuth {
+        let continuation: CheckedContinuation<[PornHubCookieRecord], Error>
+    }
+
     private var server: BrowserCaptureSocketServer?
     private var pending: [UUID: Pending] = [:]
+    private var pendingPosts: [UUID: PendingPost] = [:]
+    private var pendingPornHubAuth: [UUID: PendingPornHubAuth] = [:]
     private var inFlight: [String: Task<FeedPage, Error>] = [:]
+    private var inFlightPosts: [String: Task<String, Error>] = [:]
     private let openPage: @Sendable (URL) async throws -> Void
     private let timeout: TimeInterval
 
@@ -135,14 +255,12 @@ public actor AllPornStreamCaptureCoordinator {
         self.timeout = timeout
         self.openPage = openPage ?? { url in
             try await MainActor.run {
-                let status = BrowserIntegration.status()
-                guard status.chromeIsDefault, status.extensionIsStaged, status.nativeHostIsInstalled,
-                      let chrome = NSWorkspace.shared.urlForApplication(toOpen: url),
-                      chrome.lastPathComponent == "Google Chrome.app"
+                guard BrowserIntegration.selectedIntegrationIsReady(),
+                      let browser = BrowserIntegration.preferredApplication()
                 else { throw BrowserCaptureError.browserExtensionRequired }
                 let configuration = NSWorkspace.OpenConfiguration()
                 configuration.activates = true
-                NSWorkspace.shared.open([url], withApplicationAt: chrome, configuration: configuration)
+                NSWorkspace.shared.open([url], withApplicationAt: browser, configuration: configuration)
             }
         }
     }
@@ -161,9 +279,16 @@ public actor AllPornStreamCaptureCoordinator {
         server?.stop()
         server = nil
         let continuations = pending.values.map(\.continuation)
+        let postContinuations = pendingPosts.values.map(\.continuation)
+        let pornHubAuthContinuations = pendingPornHubAuth.values.map(\.continuation)
         pending.removeAll()
+        pendingPosts.removeAll()
+        pendingPornHubAuth.removeAll()
         inFlight.removeAll()
+        inFlightPosts.removeAll()
         continuations.forEach { $0.resume(throwing: BrowserCaptureError.cancelled) }
+        postContinuations.forEach { $0.resume(throwing: BrowserCaptureError.cancelled) }
+        pornHubAuthContinuations.forEach { $0.resume(throwing: BrowserCaptureError.cancelled) }
     }
 
     public func capture(url: URL, page: Int) async throws -> FeedPage {
@@ -173,6 +298,41 @@ public actor AllPornStreamCaptureCoordinator {
         inFlight[key] = task
         defer { inFlight[key] = nil }
         return try await task.value
+    }
+
+    public func capturePost(url: URL) async throws -> String {
+        let key = url.absoluteString
+        if let task = inFlightPosts[key] { return try await task.value }
+        let task = Task { try await performPostCapture(url: url) }
+        inFlightPosts[key] = task
+        defer { inFlightPosts[key] = nil }
+        return try await task.value
+    }
+
+    public func authenticatePornHub() async throws -> [PornHubCookieRecord] {
+        let requestID = UUID()
+        var components = URLComponents(string: "https://www.pornhub.com/login")!
+        components.fragment = "lustre-pornhub-auth=\(requestID.uuidString.lowercased())"
+        guard let url = components.url else { throw BrowserCaptureError.invalidCapture }
+        let captureTimeout = timeout
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                pendingPornHubAuth[requestID] = PendingPornHubAuth(continuation: continuation)
+                Task {
+                    do {
+                        try await openPage(url)
+                    } catch {
+                        failPornHubAuth(requestID: requestID, error: error)
+                    }
+                }
+                Task {
+                    try? await Task.sleep(for: .seconds(captureTimeout))
+                    failPornHubAuth(requestID: requestID, error: PornHubAuthError.timeout)
+                }
+            }
+        } onCancel: {
+            Task { await self.cancelPornHubAuth(requestID: requestID) }
+        }
     }
 
     private func performCapture(url: URL, page: Int) async throws -> FeedPage {
@@ -202,6 +362,33 @@ public actor AllPornStreamCaptureCoordinator {
         }
     }
 
+    private func performPostCapture(url: URL) async throws -> String {
+        guard trustedPage(url), url.path.hasPrefix("/post/") else { throw BrowserCaptureError.invalidCapture }
+        let requestID = UUID()
+        var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        components?.fragment = "lustre-post-capture=\(requestID.uuidString.lowercased())"
+        guard let markedURL = components?.url else { throw BrowserCaptureError.invalidCapture }
+        let captureTimeout = timeout
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                pendingPosts[requestID] = PendingPost(expectedURL: url, continuation: continuation)
+                Task {
+                    do {
+                        try await openPage(markedURL)
+                    } catch {
+                        failPost(requestID: requestID, error: error)
+                    }
+                }
+                Task {
+                    try? await Task.sleep(for: .seconds(captureTimeout))
+                    failPost(requestID: requestID, error: BrowserCaptureError.timeout)
+                }
+            }
+        } onCancel: {
+            Task { await self.cancelPost(requestID: requestID) }
+        }
+    }
+
     private func register(requestID: UUID, url: URL, page: Int, continuation: CheckedContinuation<FeedPage, Error>) {
         pending[requestID] = Pending(expectedURL: url, page: page, continuation: continuation)
     }
@@ -210,16 +397,43 @@ public actor AllPornStreamCaptureCoordinator {
         pending.removeValue(forKey: requestID)?.continuation.resume(throwing: BrowserCaptureError.cancelled)
     }
 
+    private func cancelPost(requestID: UUID) {
+        pendingPosts.removeValue(forKey: requestID)?.continuation.resume(throwing: BrowserCaptureError.cancelled)
+    }
+
     private func fail(requestID: UUID, error: Error) {
         pending.removeValue(forKey: requestID)?.continuation.resume(throwing: error)
     }
 
+    private func failPost(requestID: UUID, error: Error) {
+        pendingPosts.removeValue(forKey: requestID)?.continuation.resume(throwing: error)
+    }
+
+    private func cancelPornHubAuth(requestID: UUID) {
+        pendingPornHubAuth.removeValue(forKey: requestID)?.continuation.resume(throwing: PornHubAuthError.cancelled)
+    }
+
+    private func failPornHubAuth(requestID: UUID, error: Error) {
+        pendingPornHubAuth.removeValue(forKey: requestID)?.continuation.resume(throwing: error)
+    }
+
     private func receive(_ data: Data) -> Data {
         if let closed = try? JSONDecoder().decode(BrowserCaptureClosed.self, from: data),
-           closed.type == "capture_closed_v1", closed.version == 1,
-           let request = pending.removeValue(forKey: closed.requestID) {
-            request.continuation.resume(throwing: BrowserCaptureError.browserClosed)
+           closed.type == "pornhub_auth_closed_v1", closed.version == 1,
+           let request = pendingPornHubAuth.removeValue(forKey: closed.requestID) {
+            request.continuation.resume(throwing: PornHubAuthError.cancelled)
             return encode(BrowserCaptureResponse(type: "capture_rejected", requestID: closed.requestID, code: "browser_closed"))
+        }
+        if let closed = try? JSONDecoder().decode(BrowserCaptureClosed.self, from: data),
+           closed.type == "capture_closed_v1", closed.version == 1 {
+            if let request = pending.removeValue(forKey: closed.requestID) {
+                request.continuation.resume(throwing: BrowserCaptureError.browserClosed)
+                return encode(BrowserCaptureResponse(type: "capture_rejected", requestID: closed.requestID, code: "browser_closed"))
+            }
+            if let request = pendingPosts.removeValue(forKey: closed.requestID) {
+                request.continuation.resume(throwing: BrowserCaptureError.browserClosed)
+                return encode(BrowserCaptureResponse(type: "capture_rejected", requestID: closed.requestID, code: "browser_closed"))
+            }
         }
         let decoder = JSONDecoder()
         let fractionalDateStrategy = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
@@ -248,6 +462,14 @@ public actor AllPornStreamCaptureCoordinator {
             fputs("Lustre browser capture: rejected oversized message.\n", stderr)
             return encode(BrowserCaptureResponse(type: "capture_rejected", requestID: nil, code: "invalid_capture"))
         }
+        if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           object["type"] as? String == "post_capture_v1" {
+            return receivePost(data, decoder: decoder)
+        }
+        if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           object["type"] as? String == "pornhub_auth_v1" {
+            return receivePornHubAuth(data, decoder: decoder)
+        }
         let capture: BrowserFeedCapture
         do {
             capture = try decoder.decode(BrowserFeedCapture.self, from: data)
@@ -265,6 +487,56 @@ public actor AllPornStreamCaptureCoordinator {
         }
         pending.removeValue(forKey: capture.requestID)
         request.continuation.resume(returning: page)
+        return encode(BrowserCaptureResponse(type: "capture_accepted", requestID: capture.requestID, code: nil))
+    }
+
+    private func receivePornHubAuth(_ data: Data, decoder: JSONDecoder) -> Data {
+        guard let capture = try? decoder.decode(BrowserPornHubAuthCapture.self, from: data),
+              capture.type == "pornhub_auth_v1", capture.version == 1,
+              let pending = pendingPornHubAuth[capture.requestID],
+              capture.pageURL.scheme?.lowercased() == "https",
+              capture.pageURL.host.map(PornHubCookieSanitizer.isAllowedDomain) == true,
+              abs(capture.capturedAt.timeIntervalSinceNow) <= BrowserCaptureConstants.captureTimeout,
+              PornHubAuthenticationValidation.isAuthenticated(PornHubAuthenticationMarkers(
+                hasSessionCookie: PornHubHelperCookieCandidatePolicy.hasSessionProofCandidate(capture.cookies),
+                pageReportsAuthenticatedUser: true
+              )),
+              let cookies = try? PornHubHelperCookieCandidatePolicy.sanitizeTrustedCookies(capture.cookies),
+              PornHubHelperCookieCandidatePolicy.hasSessionProofCandidate(cookies)
+        else {
+            return encode(BrowserCaptureResponse(type: "capture_rejected", requestID: nil, code: "invalid_capture"))
+        }
+        pendingPornHubAuth.removeValue(forKey: capture.requestID)
+        pending.continuation.resume(returning: cookies)
+        return encode(BrowserCaptureResponse(type: "capture_accepted", requestID: capture.requestID, code: nil))
+    }
+
+    private func receivePost(_ data: Data, decoder: JSONDecoder) -> Data {
+        guard let capture = try? decoder.decode(BrowserPostCapture.self, from: data),
+              let request = pendingPosts[capture.requestID],
+              capture.type == "post_capture_v1", capture.version == 1,
+              capture.siteID == FeedSiteID.allPornStream.rawValue,
+              samePage(capture.pageURL, request.expectedURL),
+              trustedPage(capture.pageURL), capture.pageURL.path.hasPrefix("/post/"),
+              abs(capture.capturedAt.timeIntervalSinceNow) <= BrowserCaptureConstants.captureTimeout,
+              !capture.metadataSources.isEmpty, capture.metadataSources.count <= 16
+        else {
+            return encode(BrowserCaptureResponse(type: "capture_rejected", requestID: nil, code: "invalid_capture"))
+        }
+        var totalBytes = 0
+        for source in capture.metadataSources {
+            let bytes = source.utf8.count
+            guard bytes > 0, bytes <= 32 * 1024, totalBytes + bytes <= 128 * 1024,
+                  source.localizedCaseInsensitiveContains("video_urls")
+                    || source.localizedCaseInsensitiveContains("hosting_provider")
+            else {
+                return encode(BrowserCaptureResponse(type: "capture_rejected", requestID: capture.requestID, code: "invalid_capture"))
+            }
+            totalBytes += bytes
+        }
+        let html = capture.metadataSources.map { "<script>\($0)</script>" }.joined(separator: "\n")
+        pendingPosts.removeValue(forKey: capture.requestID)
+        request.continuation.resume(returning: html)
         return encode(BrowserCaptureResponse(type: "capture_accepted", requestID: capture.requestID, code: nil))
     }
 

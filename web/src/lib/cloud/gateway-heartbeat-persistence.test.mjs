@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { gatewayHeartbeatHandler } from "./gateway-heartbeat-persistence.ts";
 
@@ -66,4 +67,9 @@ test("acceptance failure switch rejects only heartbeats carrying command acknowl
   assert.equal(ordinary.status, 200);
   assert.equal(calls, 1);
   delete process.env.LUSTRE_GATEWAY_ACCEPTANCE_FAIL_COMMAND_ACK_PERSISTENCE;
+});
+
+test("a current heartbeat may replace a job state with the same serialized timestamp", () => {
+  const repository = readFileSync(new URL("./device-repository.ts", import.meta.url), "utf8");
+  assert.match(repository, /lustre_device_job_status\.updated_at <= EXCLUDED\.updated_at/);
 });

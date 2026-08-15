@@ -1,5 +1,24 @@
 # Session Log
 
+## 2026-08-09 — Feed pagination, direct extraction, and modal Watchlist
+
+- Repaired HQPorner protected thumbnail delivery on the Cloud Feed and retained the device-bound asset-ticket boundary.
+- Replaced the append-only Feed experience with numbered previous/next pagination per provider. Selection controls were moved into a more integrated floating action surface so they no longer interrupt the middle of the card grid.
+- Added a Feed-card Extract action that resolves current downloadable playback candidates without queueing or downloading. The result includes copyable direct-media URLs and required safe headers for external network players such as VLC or Infuse.
+- Added the experimental account-backed Watchlist through Drizzle migration `0008_lustre_watchlist`. Users can retain Feed source pages, mark items watched or unwatched, remove items, extract current playback candidates, and refresh expired candidates. Thirty August 9 queued/completed source items seeded the initial Watchlist.
+- Diagnosed repeated generic `Unable to process the device request` failures across the actual browser-to-agent flow. After separating Extract and Refresh and returning results on the same Watchlist surface, the remaining failure was traced to `watchlistResolveCommand` casting a raw Drizzle/Neon snake-case row as a camel-case domain object. Normalizing the returned row at the repository boundary fixed the false 500 while preserving the successful command.
+- Removed the 26 paused jobs from the durable queue by cancelling their exact IDs. Final SQLite state contained no queued, running, or paused jobs; the managed per-user agent remained healthy.
+- Reworked the Watchlist presentation into uniform compact cards. Extraction results now open in a responsive modal with quality, media kind, full URL, Copy URL, Copy headers, source, and Refresh actions. Cached results reopen through View links; Escape and backdrop click close the modal.
+- Final modal validation passed all 85 frontend tests and the Next.js production build. Production deployment `dpl_Bg8d5geh8NLtJHyAy5WYsb4wqVZN` reached `READY`, aliased to `https://lustrecli.vercel.app`, and returned HTTP `200`. The LaunchAgent remained running as PID 2134 with zero active jobs.
+
+## 2026-08-09 — Generic yt-dlp fallback and release activation
+
+- Added an agent-owned generic yt-dlp resolver for validated public HTTPS sources that specialized static providers do not recognize. Existing direct, PMVHaven, AllPornStream, PornHub, and other provider-specific paths retain priority, and fallback occurs only for `unsupportedProvider`.
+- Kept the Cloud boundary source-based: preview results contain bounded safe metadata and quality labels/media kinds only, durable jobs retain the public source URL plus a safe chosen selector, and transfer re-runs extraction in a private single-output workspace. Raw media URLs, headers, cookies, traces, and filesystem paths are not persisted or projected.
+- Reused the bounded yt-dlp process runner, progress protocol, cancellation/timeout behavior, output validation, unique naming, and staging cleanup. Generic jobs are intentionally isolated from the PornHub Keychain session and never receive PornHub cookies.
+- Added focused generic metadata, selector, fallback-order, and cookie-isolation coverage. Debug and release builds and `git diff --check` passed. Focused XCTest execution was blocked because Command Line Tools lacks XCTest and the external-volume Xcode installation is still waiting for license acceptance.
+- Confirmed zero queued or active jobs before activation. The first rebuilt unsigned launch paused in `SecKeyCreateSignature` while macOS updated the existing Keychain key ACL; the same device identity was preserved. After foreground completion, resetting only the penalty-boxed per-user LaunchAgent with `bootout`/`bootstrap` produced one healthy managed process, a passing loopback health response, and accepted negotiated Cloud heartbeats.
+
 ## 2026-07-26 — Chrome-assisted AllPornStream Feed capture
 
 - Replaced the failing AllPornStream embedded-WebKit Feed path with a fixed-ID unpacked Chrome MV3 extension restricted to exact AllPornStream HTTPS hosts. Permissions are limited to native messaging, tabs, session storage, and the exact site; cookie, history, proxy, and general web-request access are absent.

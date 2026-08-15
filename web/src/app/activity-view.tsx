@@ -18,9 +18,9 @@ const filters: Array<{ value: ActivityFilter; label: string }> = [
 ];
 
 function destinationName(event: ActivityEvent, destinations: ActivityDestination[]) {
-  if (!/^webdav:/i.test(event.destination)) return "Local Downloads";
-  const id = event.destination.replace(/^webdav:/i, "");
-  return destinations.find((item) => item.id.toLowerCase() === id.toLowerCase())?.name ?? "Removed WebDAV profile";
+  if (!/^(webdav|gdrive):/i.test(event.destination)) return "Local Downloads";
+  const id = event.destination.replace(/^(webdav|gdrive):/i, "");
+  return destinations.find((item) => item.id.toLowerCase() === id.toLowerCase())?.name ?? (/^gdrive:/i.test(event.destination) ? "Removed Google Drive profile" : "Removed WebDAV profile");
 }
 
 function dayLabel(milliseconds: number) {

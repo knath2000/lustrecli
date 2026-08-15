@@ -4,9 +4,10 @@ import test from "node:test";
 import vm from "node:vm";
 
 const source = fs.readFileSync(new URL("../../Sources/LustreAgent/Resources/ChromeExtension/extractor.js", import.meta.url), "utf8");
-const context = vm.createContext({ URL });
+const context = vm.createContext({ URL, TextEncoder });
 vm.runInContext(source, context);
 const extract = context.LustreAllPornStreamExtractor.extract;
+const extractPost = context.LustreAllPornStreamExtractor.extractPost;
 
 function snapshot(itemListElement, overrides = {}) {
   return {
@@ -57,6 +58,22 @@ test("returns no capture for challenged, malformed, or empty pages", () => {
   assert.equal(extract(snapshot([{ ...video("one"), name: "\u0000\u0085" }])), null);
 });
 
+test("extracts only bounded AllPornStream post provider metadata", () => {
+  const result = extractPost({
+    title: "Post",
+    bodyText: "Ready",
+    origin: "https://allpornstream.com",
+    metadataScripts: [
+      "self.__next_f.push([1, 'unrelated'])",
+      `self.__next_f.push([1, ${JSON.stringify('{"video_urls":[{"hosting_provider":"MIXDROP","iframe":"https://mixdrop.co/e/example"}]}')}])`,
+      "x".repeat(40_000)
+    ]
+  });
+  assert.equal(result.metadataSources.length, 1);
+  assert.match(result.metadataSources[0], /hosting_provider/);
+  assert.equal(extractPost({ title: "Just a moment", bodyText: "", origin: "https://allpornstream.com", metadataScripts: [] }), null);
+});
+
 test("caps oversized pages at fifty and reports more", () => {
   const result = extract(snapshot(Array.from({ length: 75 }, (_, index) => video(index))));
   assert.equal(result.cards.length, 50);
@@ -68,11 +85,45 @@ test("preserves searched and paginated page metadata outside extracted cards", (
   assert.equal(result.cards[0].sourcePageURL, "https://allpornstream.com/post/search");
 });
 
-test("manifest has only narrow permissions and exact AllPornStream hosts", () => {
+test("manifest limits browser access to capture and local Pornhub authentication", () => {
   const manifest = JSON.parse(fs.readFileSync(new URL("../../Sources/LustreAgent/Resources/ChromeExtension/manifest.json", import.meta.url), "utf8"));
-  assert.deepEqual(manifest.permissions.sort(), ["nativeMessaging", "storage", "tabs"]);
-  assert.deepEqual(manifest.host_permissions.sort(), ["https://allpornstream.com/*", "https://www.allpornstream.com/*"]);
-  for (const forbidden of ["cookies", "history", "proxy", "webRequest"]) assert.equal(manifest.permissions.includes(forbidden), false);
+  assert.deepEqual(manifest.permissions.sort(), ["cookies", "nativeMessaging", "storage", "tabs"]);
+  assert.deepEqual(manifest.host_permissions.sort(), ["https://allpornstream.com/*", "https://pornhub.com/*", "https://www.allpornstream.com/*", "https://www.pornhub.com/*"]);
+  for (const forbidden of ["history", "proxy", "webRequest"]) assert.equal(manifest.permissions.includes(forbidden), false);
+});
+
+test("Firefox manifest keeps narrow permissions and a stable local native-messaging ID", () => {
+  const manifest = JSON.parse(fs.readFileSync(new URL("../../Sources/LustreAgent/Resources/FirefoxManifest.json", import.meta.url), "utf8"));
+  assert.deepEqual(manifest.permissions.sort(), ["cookies", "nativeMessaging", "storage", "tabs"]);
+  assert.deepEqual(manifest.host_permissions.sort(), ["https://allpornstream.com/*", "https://pornhub.com/*", "https://www.allpornstream.com/*", "https://www.pornhub.com/*"]);
+  assert.deepEqual(manifest.background.scripts, ["service.js"]);
+  assert.equal(manifest.browser_specific_settings.gecko.id, "lustre-allpornstream@pmvdl.local");
+  assert.deepEqual(manifest.browser_specific_settings.gecko.data_collection_permissions.required, ["websiteContent"]);
+  assert.equal("key" in manifest, false);
+  for (const forbidden of ["history", "proxy", "webRequest"]) assert.equal(manifest.permissions.includes(forbidden), false);
+});
+
+test("Pornhub authentication forwards browser cookies locally without credential fields", () => {
+  const service = fs.readFileSync(new URL("../../Sources/LustreAgent/Resources/ChromeExtension/service.js", import.meta.url), "utf8");
+  const auth = fs.readFileSync(new URL("../../Sources/LustreAgent/Resources/ChromeExtension/pornhub-auth.js", import.meta.url), "utf8");
+  assert.match(auth, /pornhub_auth_probe_v1/);
+  assert.match(service, /extensionAPI\.cookies\.getAll\(\{ domain: "pornhub\.com" \}\)/);
+  assert.match(service, /cookie\.name === "il"/);
+  assert.match(service, /type: "pornhub_auth_v1"/);
+  assert.match(service, /type: "pornhub_auth_closed_v1"/);
+  assert.doesNotMatch(auth, /isLoggedInUser|users\/logout/);
+  for (const forbidden of ["localStorage", "document.cookie", "password", "username"]) {
+    assert.equal(auth.includes(forbidden), false);
+    assert.equal(service.includes(forbidden), false);
+  }
+});
+
+test("shared extension scripts select Firefox or Chrome APIs without browser-specific payloads", () => {
+  const service = fs.readFileSync(new URL("../../Sources/LustreAgent/Resources/ChromeExtension/service.js", import.meta.url), "utf8");
+  const capture = fs.readFileSync(new URL("../../Sources/LustreAgent/Resources/ChromeExtension/capture.js", import.meta.url), "utf8");
+  assert.match(service, /globalThis\.browser \?\? globalThis\.chrome/);
+  assert.match(capture, /globalThis\.browser \?\? globalThis\.chrome/);
+  assert.doesNotMatch(service, /allowed_extensions|allowed_origins/);
 });
 
 test("capture reads authoritative embedded card images before mounted media fallbacks", () => {

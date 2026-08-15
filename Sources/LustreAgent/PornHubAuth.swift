@@ -225,7 +225,7 @@ public protocol PornHubAuthHelping: Sendable {
     func logout() async throws
 }
 
-public enum PornHubAuthError: Error, LocalizedError, Equatable, Sendable {
+public enum PornHubAuthError: Error, LocalizedError, Equatable, Sendable, CaseIterable {
     case signedOut, signingIn, cancelled, expired, helperUnavailable, helperFailed, timeout, invalidCookieState, storageUnavailable
     public var errorDescription: String? {
         switch self {

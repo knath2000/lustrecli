@@ -76,5 +76,21 @@ globalThis.LustreAllPornStreamExtractor = (() => {
     return cards.length ? { cards, hasMore: list.itemListElement.length > cards.length } : null;
   }
 
-  return { extract };
+  function extractPost(snapshot) {
+    if (/just a moment|verify you are human|checking your browser/i.test(`${snapshot.title} ${snapshot.bodyText}`)) return null;
+    const metadataSources = [];
+    let totalBytes = 0;
+    for (const source of snapshot.metadataScripts ?? []) {
+      if (typeof source !== "string" || source.length > 32_768) continue;
+      if (!/video_urls|hosting_provider/i.test(source)) continue;
+      const bytes = new TextEncoder().encode(source).length;
+      if (bytes > 32_768 || totalBytes + bytes > 128 * 1024) break;
+      metadataSources.push(source);
+      totalBytes += bytes;
+      if (metadataSources.length === 16) break;
+    }
+    return metadataSources.length ? { metadataSources } : null;
+  }
+
+  return { extract, extractPost };
 })();
