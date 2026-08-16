@@ -161,6 +161,11 @@ export function WatchApp({
   const [queueingSource, setQueueingSource] = useState("");
   const [selection, setSelection] = useState<Set<string>>(new Set());
   const [watchSelection, setWatchSelection] = useState<Set<string>>(new Set());
+  const [watchQuery, setWatchQuery] = useState("");
+  const [watchStatus, setWatchStatus] = useState<"all" | "unwatched" | "watched">("all");
+  const [watchProvider, setWatchProvider] = useState("all");
+  const [watchSort, setWatchSort] = useState<"newest" | "oldest" | "title" | "provider">("newest");
+  const [watchGroup, setWatchGroup] = useState<"none" | "provider" | "status">("none");
   const [batchAction, setBatchAction] = useState<"download" | "extract" | "watchlist" | "">("");
   const [batchResolutions, setBatchResolutions] = useState<BatchResolution[]>([]);
   const [showBatchResults, setShowBatchResults] = useState(false);
@@ -563,6 +568,32 @@ export function WatchApp({
   const displayedAttempts = resolution?.providerAttempts ?? partialAttempts;
   const displayTitle = resolution?.title ?? activeSource?.title ?? "Resolving scene";
   const displayThumbnail = resolution?.thumbnailURL ?? activeSource?.thumbnailURL;
+  const watchProviders = useMemo(() => [...new Set(watchlist.map((item) => item.provider))].sort((a, b) => a.localeCompare(b)), [watchlist]);
+  const visibleWatchlist = useMemo(() => {
+    const normalizedQuery = watchQuery.trim().toLocaleLowerCase();
+    return watchlist
+      .filter((item) => watchStatus === "all" || item.watched === (watchStatus === "watched"))
+      .filter((item) => watchProvider === "all" || item.provider === watchProvider)
+      .filter((item) => !normalizedQuery || `${item.title} ${item.provider}`.toLocaleLowerCase().includes(normalizedQuery))
+      .toSorted((a, b) => {
+        if (watchSort === "oldest") return Date.parse(a.createdAt) - Date.parse(b.createdAt);
+        if (watchSort === "title") return a.title.localeCompare(b.title);
+        if (watchSort === "provider") return a.provider.localeCompare(b.provider) || a.title.localeCompare(b.title);
+        return Date.parse(b.createdAt) - Date.parse(a.createdAt);
+      });
+  }, [watchProvider, watchQuery, watchSort, watchStatus, watchlist]);
+  const watchGroups = useMemo(() => {
+    if (watchGroup === "none") return [{ key: "all", label: "", items: visibleWatchlist }];
+    const grouped = new Map<string, WatchlistItem[]>();
+    for (const item of visibleWatchlist) {
+      const key = watchGroup === "provider" ? item.provider : item.watched ? "Watched" : "Unwatched";
+      grouped.set(key, [...(grouped.get(key) ?? []), item]);
+    }
+    return [...grouped].map(([label, items]) => ({ key: label.toLocaleLowerCase(), label, items }));
+  }, [visibleWatchlist, watchGroup]);
+  const watchedCount = watchlist.filter((item) => item.watched).length;
+  const visibleWatchIDs = new Set(visibleWatchlist.map((item) => item.id));
+  const allVisibleSelected = visibleWatchlist.length > 0 && visibleWatchlist.every((item) => watchSelection.has(item.id));
 
   return <LayoutGroup><div className="lustre-watch">
     <div className="workspace">
@@ -600,21 +631,37 @@ export function WatchApp({
       <footer className="pagination"><button disabled={page.page <= 1 || busy} onClick={() => void loadFeed(page.page - 1)}>← Previous</button><span>Page {page.page}</span><button disabled={!page.hasMore || busy} onClick={() => void loadFeed(page.page + 1)}>Next →</button></footer>
     </> : <>
       <section className="section-heading watch-heading"><div><p className="eyebrow">Your collection</p><h1>Your void</h1></div><p>A private collection of scenes waiting to be explored.</p></section>
+      <section className="watch-metrics" aria-label="Watchlist metrics">
+        <button className={watchStatus === "all" ? "active" : ""} onClick={() => setWatchStatus("all")}><span>All scenes</span><strong>{watchlist.length}</strong></button>
+        <button className={watchStatus === "unwatched" ? "active" : ""} onClick={() => setWatchStatus("unwatched")}><span>Unwatched</span><strong>{watchlist.length - watchedCount}</strong></button>
+        <button className={watchStatus === "watched" ? "active" : ""} onClick={() => setWatchStatus("watched")}><span>Watched</span><strong>{watchedCount}</strong></button>
+        <div><span>Providers</span><strong>{watchProviders.length}</strong></div>
+      </section>
+      <section className="watch-controls" aria-label="Watchlist organization">
+        <label className="watch-search"><span aria-hidden="true">⌕</span><input value={watchQuery} onChange={(event) => setWatchQuery(event.target.value)} placeholder="Search your collection..." aria-label="Search Watchlist" /></label>
+        <label><span>Provider</span><select value={watchProvider} onChange={(event) => setWatchProvider(event.target.value)}><option value="all">All providers</option>{watchProviders.map((provider) => <option value={provider} key={provider}>{provider}</option>)}</select></label>
+        <label><span>Sort</span><select value={watchSort} onChange={(event) => setWatchSort(event.target.value as typeof watchSort)}><option value="newest">Newest added</option><option value="oldest">Oldest added</option><option value="title">Title A–Z</option><option value="provider">Provider</option></select></label>
+        <label><span>Group</span><select value={watchGroup} onChange={(event) => setWatchGroup(event.target.value as typeof watchGroup)}><option value="none">No grouping</option><option value="provider">Provider</option><option value="status">Watch status</option></select></label>
+      </section>
       <section className="batch-toolbar" aria-label="Watchlist batch actions">
-        <button onClick={() => setWatchSelection(watchSelection.size === watchlist.length ? new Set() : new Set(watchlist.map((item) => item.id)))}>{watchSelection.size === watchlist.length && watchlist.length ? "Clear all" : "Select all"}</button>
-        <span>{watchSelection.size ? `${watchSelection.size} selected` : "Select saved scenes for batch actions"}</span>
+        <button disabled={!visibleWatchlist.length} onClick={() => setWatchSelection((current) => { const next = new Set(current); if (allVisibleSelected) visibleWatchIDs.forEach((id) => next.delete(id)); else visibleWatchIDs.forEach((id) => next.add(id)); return next; })}>{allVisibleSelected ? "Clear visible" : "Select visible"}</button>
+        <span>{watchSelection.size ? `${watchSelection.size} selected` : `${visibleWatchlist.length} scene${visibleWatchlist.length === 1 ? "" : "s"} shown`}</span>
         <div>
           <button disabled={!selectedWatchItems.length || !!batchAction || !canQueue || !onQueueWatchlist} onClick={() => void downloadWatchlistSelected()}>{batchAction === "download" ? "Queueing…" : "↓ Download all"}</button>
           <button disabled={!selectedWatchItems.length || !!batchAction || !canAgentResolve} onClick={() => void extractWatchlistSelected()}>{batchAction === "extract" ? "Extracting…" : "▶ Extract all"}</button>
           {watchSelection.size > 0 && <button onClick={() => setWatchSelection(new Set())}>Clear</button>}
         </div>
       </section>
-      <motion.section layout className="watchlist">{watchlist.map((item) => <motion.article layout initial={{ opacity: 0, scale: reducedMotion ? 1 : .97 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: .94 }} className={`watch-row ${item.watched ? "watched" : ""} ${watchSelection.has(item.id) ? "selected" : ""}`} key={item.id}>
-        <button className="watch-select" onClick={() => setWatchSelection((current) => { const next = new Set(current); if (next.has(item.id)) next.delete(item.id); else next.add(item.id); return next; })} aria-pressed={watchSelection.has(item.id)} aria-label={`${watchSelection.has(item.id) ? "Deselect" : "Select"} ${item.title}`}>{watchSelection.has(item.id) ? "✓" : ""}</button>
-        <div className="watch-art">{item.thumbnailURL ? <AssetImage url={item.thumbnailURL} /> : <div className="placeholder">No preview</div>}<div className="card-scrim" />{item.watched && <div className="watched-badge"><span>✓</span> Watched</div>}<p className="provider">{item.provider}</p></div>
-        <div className="watch-content"><h2>{item.title}</h2><div className="actions"><button className="card-play" onClick={() => void resolve(item.sourcePageURL, item.title, item.thumbnailURL ?? undefined, onAgentResolveWatchlist ? () => onAgentResolveWatchlist(item) : undefined)}>▶ <span>Extract</span></button>{onQueueWatchlist && <button disabled={!canQueue || queueingSource === item.sourcePageURL} onClick={() => void queueWatchlist(item)}>↓ <span>{queueingSource === item.sourcePageURL ? "Queuing…" : "Download"}</span></button>}<button onClick={() => void copyValue(`source:${item.id}`, item.sourcePageURL, "Source URL")} aria-label={`Copy source URL for ${item.title}`}>{copied === `source:${item.id}` ? "Copied ✓" : "Copy source URL"}</button><button onClick={() => void toggleWatched(item)}>{item.watched ? "Mark unwatched" : "Mark watched"}</button><button className="danger" onClick={() => void removeWatchlist(item)}>Remove</button></div></div>
-      </motion.article>)}</motion.section>
+      <div className="watch-groups">{watchGroups.map((group) => <section className="watch-group" key={group.key}>
+        {group.label && <header><h2>{group.label}</h2><span>{group.items.length} scene{group.items.length === 1 ? "" : "s"}</span></header>}
+        <motion.div layout className="watchlist">{group.items.map((item) => <motion.article layout initial={{ opacity: 0, scale: reducedMotion ? 1 : .97 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: .94 }} className={`watch-row ${item.watched ? "watched" : ""} ${watchSelection.has(item.id) ? "selected" : ""}`} key={item.id}>
+          <button className="watch-select" onClick={() => setWatchSelection((current) => { const next = new Set(current); if (next.has(item.id)) next.delete(item.id); else next.add(item.id); return next; })} aria-pressed={watchSelection.has(item.id)} aria-label={`${watchSelection.has(item.id) ? "Deselect" : "Select"} ${item.title}`}>{watchSelection.has(item.id) ? "✓" : ""}</button>
+          <div className="watch-art">{item.thumbnailURL ? <AssetImage url={item.thumbnailURL} /> : <div className="placeholder">No preview</div>}<div className="card-scrim" />{item.watched && <div className="watched-badge"><span>✓</span> Watched</div>}<p className="provider">{item.provider}</p></div>
+          <div className="watch-content"><p className="watch-added">Added {formatDate(item.createdAt)}</p><h2>{item.title}</h2><div className="actions"><button className="card-play" onClick={() => void resolve(item.sourcePageURL, item.title, item.thumbnailURL ?? undefined, onAgentResolveWatchlist ? () => onAgentResolveWatchlist(item) : undefined)}>▶ <span>Extract</span></button>{onQueueWatchlist && <button disabled={!canQueue || queueingSource === item.sourcePageURL} onClick={() => void queueWatchlist(item)}>↓ <span>{queueingSource === item.sourcePageURL ? "Queuing…" : "Download"}</span></button>}<button onClick={() => void copyValue(`source:${item.id}`, item.sourcePageURL, "Source URL")} aria-label={`Copy source URL for ${item.title}`}>{copied === `source:${item.id}` ? "Copied ✓" : "Copy source URL"}</button><button onClick={() => void toggleWatched(item)}>{item.watched ? "Mark unwatched" : "Mark watched"}</button><button className="danger" onClick={() => void removeWatchlist(item)}>Remove</button></div></div>
+        </motion.article>)}</motion.div>
+      </section>)}</div>
       {!watchlist.length && <div className="empty">Your void is empty. Save a scene from the Feed to begin.</div>}
+      {!!watchlist.length && !visibleWatchlist.length && <div className="empty">No saved scenes match these filters.</div>}
     </>}
     <AnimatePresence>
       {showBatchResults && <motion.div className="modal-backdrop batch-backdrop" onClick={() => setShowBatchResults(false)} initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
