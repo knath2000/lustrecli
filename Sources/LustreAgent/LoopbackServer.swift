@@ -185,6 +185,8 @@ public final class LoopbackServer: @unchecked Sendable {
                 return json(status: 200, value: try await service.apply(input.action, to: id))
             }
             return .text(status: 404, "Not found.")
+        } catch JobStoreError.jobNotFound(let id) {
+            return json(status: 404, value: ErrorResponse(error: JobStoreError.jobNotFound(id).localizedDescription))
         } catch {
             return json(status: 400, value: ErrorResponse(error: error.localizedDescription))
         }
