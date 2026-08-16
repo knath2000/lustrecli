@@ -2,7 +2,8 @@
 /* eslint-disable react-hooks/set-state-in-effect */
 
 import { AnimatePresence, LayoutGroup, motion, useReducedMotion } from "motion/react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { feedPreviewDelay, feedPreviewFrames } from "@/lib/feed-model";
 import type { FeedItem, FeedPage, FeedPlaybackResolution, FeedSite, ResolutionProgressEvent, WatchlistItem } from "@/lib/lustre-watch/contracts";
 import { copyText } from "@/lib/lustre-watch/clipboard";
 import { resolveClientBoundSources } from "@/lib/lustre-watch/client-bound-resolution";
@@ -83,6 +84,34 @@ function AssetImage({ url }: { url: string }) {
   if (failed) return <span>No preview</span>;
   if (!ticketURL && !direct) return <span>No preview</span>;
   return <img src={direct ? url : ticketURL} alt="" loading="lazy" crossOrigin={direct ? undefined : "anonymous"} referrerPolicy="no-referrer" onError={() => direct ? setFailed(true) : setDirect(true)} />;
+}
+
+function FeedArtwork({ item }: { item: FeedItem }) {
+  const frames = useMemo(
+    () => item.siteID === "allpornstream" ? feedPreviewFrames(item) : item.thumbnailURL ? [item.thumbnailURL] : [],
+    [item],
+  );
+  const [hovered, setHovered] = useState(false);
+  const [frameIndex, setFrameIndex] = useState(0);
+
+  useEffect(() => {
+    const delay = feedPreviewDelay(hovered, frames.length);
+    if (delay === null) return;
+    const timer = window.setInterval(() => setFrameIndex((current) => (current + 1) % frames.length), delay);
+    return () => window.clearInterval(timer);
+  }, [frames.length, hovered]);
+
+  const stop = () => {
+    setHovered(false);
+    setFrameIndex(0);
+  };
+
+  return <div className="thumb rotating-thumb" onMouseEnter={() => setHovered(true)} onMouseLeave={stop}>
+    {frames.length ? frames.map((url, index) => (
+      <span className={`thumb-frame ${index === frameIndex ? "active" : ""}`} key={url}><AssetImage url={url} /></span>
+    )) : <span className="no-preview">No preview</span>}
+    {hovered && frames.length > 1 && <span className="thumb-progress" aria-hidden="true">{frames.map((url, index) => <i className={index === frameIndex ? "active" : ""} key={url} />)}</span>}
+  </div>;
 }
 
 function formatViews(value: number): string {
@@ -557,7 +586,7 @@ export function WatchApp({
       {busy && !page.items.length
         ? <section className="grid skeleton-grid" aria-label="Loading feed">{Array.from({ length: 6 }, (_, index) => <div className="skeleton-card" key={index} />)}</section>
         : <motion.section className="grid" initial="hidden" animate="shown" variants={{ shown: { transition: { staggerChildren: reducedMotion ? 0 : .035 } } }}>{page.items.map((item, index) => <motion.article layout className={`card card-${index % 7} ${selection.has(itemKey(item)) ? "selected" : ""}`} key={`${item.siteID}:${item.id}`} variants={{ hidden: { opacity: 0, y: reducedMotion ? 0 : 18, scale: reducedMotion ? 1 : .985 }, shown: { opacity: 1, y: 0, scale: 1 } }} transition={{ duration: reducedMotion ? .12 : .34 }}>
-          <div className="thumb">{item.thumbnailURL ? <AssetImage url={item.thumbnailURL} /> : <span className="no-preview">No preview</span>}</div>
+          <FeedArtwork item={item} />
           <div className="card-scrim" />
           <button className="card-select" onClick={() => toggleSelection(item)} aria-pressed={selection.has(itemKey(item))} aria-label={`${selection.has(itemKey(item)) ? "Deselect" : "Select"} ${item.title}`}>{selection.has(itemKey(item)) ? "✓" : ""}</button>
           <div className="card-badge"><span />{sites.find((value) => value.id === item.siteID)?.displayName ?? item.siteID}</div>

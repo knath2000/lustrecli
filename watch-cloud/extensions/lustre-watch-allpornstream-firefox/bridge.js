@@ -1,5 +1,5 @@
 const api = globalThis.browser;
-const origin = "https://lustre-watch.vercel.app";
+const origin = "https://lustrecli.vercel.app";
 const providerHosts = ["allpornstream.com", "luluvid.com", "luluvdo.com", "lulustream.com", "playmogo.com", "ds2play.com", "doodstream.com", "dood.wf", "vide0.net", "dooodster.com"];
 
 window.postMessage({ source: "lustre-watch-extension", type: "ready" }, origin);

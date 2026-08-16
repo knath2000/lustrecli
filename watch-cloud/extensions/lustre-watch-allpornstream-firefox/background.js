@@ -1,5 +1,5 @@
 const api = globalThis.browser;
-const appOrigin = "https://lustre-watch.vercel.app";
+const appOrigin = "https://lustrecli.vercel.app";
 const captures = new Map();
 const providerHosts = ["allpornstream.com", "luluvid.com", "luluvdo.com", "lulustream.com", "playmogo.com", "ds2play.com", "doodstream.com", "dood.wf", "vide0.net", "dooodster.com"];
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));

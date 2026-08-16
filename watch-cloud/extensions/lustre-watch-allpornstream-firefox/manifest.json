@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Lustre Watch Provider Capture",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "Provides browser-assisted feeds and playback sources for Lustre Watch.",
   "permissions": ["tabs", "scripting", "webRequest"],
   "host_permissions": ["<all_urls>"],
@@ -9,7 +9,7 @@
     "scripts": ["media-candidate.js", "background.js"]
   },
   "content_scripts": [{
-    "matches": ["https://lustre-watch.vercel.app/*"],
+    "matches": ["https://lustrecli.vercel.app/*"],
     "js": ["bridge.js"],
     "run_at": "document_start"
   }],
