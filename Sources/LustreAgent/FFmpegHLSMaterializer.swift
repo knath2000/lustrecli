@@ -23,7 +23,7 @@ enum FFmpegHLSMaterializer {
             }
         }
 
-        let arguments = try arguments(for: quality, partial: partial)
+        let arguments = try arguments(for: quality, partial: partial, provider: resolution.provider)
         let estimatedDuration = await playlistDuration(for: quality)
         var status: Int32 = -1
         for attempt in 1...3 {
@@ -49,7 +49,7 @@ enum FFmpegHLSMaterializer {
         return destination
     }
 
-    static func arguments(for quality: ResolvedQuality, partial: URL) throws -> [String] {
+    static func arguments(for quality: ResolvedQuality, partial: URL, provider: ProviderKind? = nil) throws -> [String] {
         guard quality.headers.allSatisfy({
             $0.key.rangeOfCharacter(from: .newlines) == nil
                 && $0.value.rangeOfCharacter(from: .newlines) == nil
@@ -62,6 +62,13 @@ enum FFmpegHLSMaterializer {
             .map { "\($0.key): \($0.value)" }
         if !headerLines.isEmpty {
             arguments += ["-headers", headerLines.joined(separator: "\r\n") + "\r\n"]
+        }
+        if provider == .vidara {
+            arguments += [
+                "-allowed_segment_extensions",
+                "3gp,aac,avi,ac3,eac3,flac,mkv,m3u8,m4a,m4s,m4v,mpg,mov,mp2,mp3,mp4,mpeg,mpegts,ogg,ogv,oga,ts,vob,vtt,wav,webvtt,cmfv,cmfa,ec3,fmp4,html,woff2",
+                "-extension_picky", "0"
+            ]
         }
         arguments += [
             "-rw_timeout", "30000000", "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "10", "-reconnect_max_retries", "5", "-reconnect_delay_total_max", "30",

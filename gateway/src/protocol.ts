@@ -183,7 +183,7 @@ export type GatewayCommand =
   | { id: string; kind: "gdrive_folders" | "gdrive_create_folder" | "gdrive_select_folder"; payload: { profileID: string; path: string; deliveryProtocol: "gateway-v1" } }
   | { id: string; kind: "gdrive_test"; payload: { profileID: string; deliveryProtocol: "gateway-v1" } }
   | { id: string; kind: "local_folder_status" | "local_folder_choose" | "local_folder_reset"; payload: { deliveryProtocol: "gateway-v1" } }
-  | { id: string; kind: "queue_url"; payload: { url: string; destination: string; preferredQualityLabel?: string; deliveryProtocol: "gateway-v1" } }
+  | { id: string; kind: "queue_url"; payload: { url: string; title?: string; destination: string; preferredQualityLabel?: string; deliveryProtocol: "gateway-v1" } }
   | { id: string; kind: "job_action"; payload: { jobID: string; action: "pause" | "resume" | "cancel" | "retry"; deliveryProtocol: "gateway-v1" } }
   | { id: string; kind: "pornhub_auth_status" | "pornhub_auth_login" | "pornhub_auth_cancel" | "pornhub_auth_logout"; payload: { deliveryProtocol: "gateway-v1" } }
   | { id: string; kind: "home_status"; payload: { deliveryProtocol: "gateway-v1" } }
@@ -282,11 +282,13 @@ export function selectedGatewayCommand(value: unknown, sequence: number, correla
   }
   if (command.kind === "queue_url") {
     const keys = Object.keys(payload).sort().join(",");
-    if (!allowFeedQueue || !uuidPattern.test(command.id) || !["deliveryProtocol,destination,url", "deliveryProtocol,destination,preferredQualityLabel,url"].includes(keys) || payload.deliveryProtocol !== "gateway-v1") return undefined;
+    if (!allowFeedQueue || !uuidPattern.test(command.id) || !["deliveryProtocol,destination,url", "deliveryProtocol,destination,preferredQualityLabel,url", "deliveryProtocol,destination,title,url", "deliveryProtocol,destination,preferredQualityLabel,title,url"].includes(keys) || payload.deliveryProtocol !== "gateway-v1") return undefined;
     if (!httpsURL(payload.url, 2_048) || typeof payload.destination !== "string" || !/^local$|^(webdav|gdrive):[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(payload.destination)) return undefined;
+    const title = payload.title;
+    if (title !== undefined && (typeof title !== "string" || !boundedString(title, 512))) return undefined;
     const preferredQualityLabel = payload.preferredQualityLabel;
     if (preferredQualityLabel !== undefined && (typeof preferredQualityLabel !== "string" || !boundedString(preferredQualityLabel, 80))) return undefined;
-    const normalized = { id: command.id, kind: "queue_url" as const, payload: { url: new URL(payload.url as string).toString(), destination: payload.destination, ...(preferredQualityLabel ? { preferredQualityLabel } : {}), deliveryProtocol: "gateway-v1" as const } };
+    const normalized = { id: command.id, kind: "queue_url" as const, payload: { url: new URL(payload.url as string).toString(), ...(title ? { title } : {}), destination: payload.destination, ...(preferredQualityLabel ? { preferredQualityLabel } : {}), deliveryProtocol: "gateway-v1" as const } };
     return new TextEncoder().encode(JSON.stringify(normalized)).byteLength <= 4_096 ? normalized : undefined;
   }
   if (command.kind === "job_action") {

@@ -117,11 +117,14 @@ test("relay responses are strictly validated", () => {
   assert.deepEqual(selectedGatewayCommand(queue, 7, "j1", true, true, true), queue.command);
   const qualityQueue = { ...queue, command: { ...queue.command, payload: { ...queue.command.payload, preferredQualityLabel: "1080p" } } };
   assert.deepEqual(selectedGatewayCommand(qualityQueue, 7, "j1", true, true, true), qualityQueue.command);
+  const titledQueue = { ...queue, command: { ...queue.command, payload: { ...queue.command.payload, title: "Original video title" } } };
+  assert.deepEqual(selectedGatewayCommand(titledQueue, 7, "j1", true, true, true), titledQueue.command);
   for (const payload of [
     { ...queue.command.payload, url: "https://user:secret@hqporner.com/example" },
     { ...queue.command.payload, url: "http://hqporner.com/example" },
     { ...queue.command.payload, destination: "Seedbox3" },
     { ...queue.command.payload, preferredQualityLabel: "x".repeat(81) },
+    { ...queue.command.payload, title: "x".repeat(513) },
   ]) assert.equal(selectedGatewayCommand({ ...queue, command: { ...queue.command, payload } }, 7, "j1", true, true, true), undefined);
   const action = { version: 1, type: "gateway-command-selected", sequence: 7, correlationID: "j1", command: { id: "f8ca8705-69c4-4c73-81fb-7bb1dc5c1853", kind: "job_action", payload: { jobID: "88e5c12c-43a1-4b17-ae2a-4231c3644ff8", action: "retry", deliveryProtocol: "gateway-v1" } } };
   assert.deepEqual(selectedGatewayCommand(action, 7, "j1", true, true, true), action.command);

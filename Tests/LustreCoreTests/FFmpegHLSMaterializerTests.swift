@@ -27,6 +27,27 @@ final class FFmpegHLSMaterializerTests: XCTestCase {
         XCTAssertFalse(arguments.contains("+faststart"))
     }
 
+    func testVidaraAllowsObfuscatedSegmentsWithoutRelaxingOtherProviders() throws {
+        let quality = ResolvedQuality(
+            label: "720p",
+            url: URL(string: "https://media.example/index_1280x720.m3u8")!,
+            headers: ["Referer": "https://vidara.so/"],
+            resolutionMethod: "Vidara API + HLS",
+            mediaKind: .hls
+        )
+        let partial = URL(fileURLWithPath: "/tmp/fixture.mp4.part")
+
+        let vidara = try FFmpegHLSMaterializer.arguments(for: quality, partial: partial, provider: .vidara)
+        let allowedIndex = try XCTUnwrap(vidara.firstIndex(of: "-allowed_segment_extensions"))
+        XCTAssertTrue(vidara[allowedIndex + 1].split(separator: ",").contains("woff2"))
+        let pickyIndex = try XCTUnwrap(vidara.firstIndex(of: "-extension_picky"))
+        XCTAssertEqual(vidara[pickyIndex + 1], "0")
+
+        let lulu = try FFmpegHLSMaterializer.arguments(for: quality, partial: partial, provider: .luluStream)
+        XCTAssertFalse(lulu.contains("-allowed_segment_extensions"))
+        XCTAssertFalse(lulu.contains("-extension_picky"))
+    }
+
     func testArgumentsRejectHeaderCRLFInjection() {
         let quality = ResolvedQuality(
             label: "HLS",

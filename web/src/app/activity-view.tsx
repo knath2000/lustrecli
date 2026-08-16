@@ -47,7 +47,7 @@ export function ActivityView({ jobs, destinations, error, onOpenDownloads }: Pro
 
 
   return <div className="activity-page">
-    <header className="activity-header"><div><p className="eyebrow">Operational audit trail</p><h2>Activity</h2><p>Follow durable worker events across transfers, providers, and destinations.</p></div><button className="secondary-button" onClick={() => onOpenDownloads()}>Open downloads</button></header>
+    <header className="activity-header"><div><p className="eyebrow">Operational audit trail</p><h2>Activity</h2><p>Follow durable worker events across transfers, providers, and destinations.</p></div><button className="secondary-button" onClick={() => onOpenDownloads()}>Open active downloads</button></header>
     <section className="activity-summary" aria-label="Activity summary"><div><span>Recorded events</span><strong>{events.length}</strong></div><div><span>Needs attention</span><strong className={attentionCount ? "attention" : ""}>{attentionCount}</strong></div><div><span>Tracked jobs</span><strong>{jobs.length}</strong></div><p><i /> Live from bounded agent job logs</p></section>
     <nav className="activity-tabs" aria-label="Filter activity">{filters.map((item) => <button className={filter === item.value ? "active" : ""} key={item.value} onClick={() => setFilter(item.value)}>{item.label}{item.value === "attention" && <span>{attentionCount}</span>}</button>)}</nav>
     <label className="activity-search"><span aria-hidden>⌕</span><span className="sr-only">Search activity</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search event messages, source titles, or job IDs" /><small>{visible.length} event{visible.length === 1 ? "" : "s"}</small></label>

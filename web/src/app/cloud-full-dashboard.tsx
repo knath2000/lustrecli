@@ -75,15 +75,6 @@ type CloudJobPayload = {
   updatedAt: string;
 };
 
-const navigation = [
-  ["Dashboard", "devices"],
-  ["Downloads", "downloads"],
-  ["Destinations", "destinations"],
-  ["Activity", "activity"],
-  ["Settings", "settings"],
-  ["Devices", "computer"],
-] as const;
-const feedNavigation = ["Feed", "feed"] as const;
 const tokenPattern = /^[A-Za-z0-9+/=]+$/;
 
 function cloudJobs(payload: { jobs?: CloudJobPayload[] }): DownloadJob[] {
@@ -850,7 +841,6 @@ export function CloudFullDashboard({
   const [loading, setLoading] = useState(false);
   const [showQueue, setShowQueue] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
-  const [downloadInitialStatus, setDownloadInitialStatus] = useState<"all" | "active" | "queued" | "failed" | "completed">("all");
   const [homeDownloadsStatus, setHomeDownloadsStatus] = useState<"active" | "queued" | "failed" | "completed" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
@@ -864,13 +854,6 @@ export function CloudFullDashboard({
   const homeDownloadsModalRef = useRef<HTMLElement | null>(null);
   const authStatusSequence = useRef(new AuthStatusSequence());
   const feedRequests = useRef(new Map<string, Promise<unknown>>());
-  const visibleNavigation = useMemo(
-    () =>
-      feedEnabled
-        ? [navigation[0], feedNavigation, ...navigation.slice(1)]
-        : navigation,
-    [feedEnabled],
-  );
   useEffect(() => {
     void (async () => {
       try {
@@ -918,7 +901,7 @@ export function CloudFullDashboard({
       const sequence = refreshSequence.current;
       const refreshPaths = cloudDashboardRefreshPaths(suppressDestinationPolling);
       const historyStatus = homeDownloadsStatus;
-      const needsHistory = historyStatus !== null || ["Downloads", "Activity", "Destinations"].includes(activeNav);
+      const needsHistory = historyStatus !== null || ["Activity", "Destinations"].includes(activeNav);
       const snapshotRequest = fetch(`/api/cloud/v1/devices/${activeToken}/jobs?scope=dashboard`, { cache: "no-store" })
         .then(async (response) => {
           const payload = await response.json().catch(() => ({}));
@@ -1358,23 +1341,12 @@ export function CloudFullDashboard({
     [jobs],
   );
   return (
-    <main className={`studio-shell ${activeNav === "Feed" || activeNav === "Watchlist" ? "watch-mode" : activeNav === "Home" ? "home-mode" : activeNav === "Downloads" ? "download-mode" : ""}`}>
+    <main className={`studio-shell ${activeNav === "Feed" || activeNav === "Watchlist" ? "watch-mode" : activeNav === "Home" ? "home-mode" : ""}`}>
       <section className="studio-shell-workspace" id="workspace">
         {activeNav === "Devices" ? (
           <DevicesView />
         ) : feedEnabled && activeNav === "Feed" ? (
           <WatchApp activeTab="feed" canQueue={connected && feedQueueEnabled} canAgentResolve={connected} onQueue={queueWatchItem} onQueueWatchlist={queueWatchlistItem} onAgentResolveFeed={resolveFeedItem} onAgentResolveWatchlist={resolveWatchlistItem} onTabChange={(tab) => setActiveNav(tab === "feed" ? "Feed" : "Watchlist")} onExit={() => setActiveNav("Home")} />
-        ) : activeNav === "Downloads" ? (
-          <DownloadsView
-            jobs={jobs}
-            destinations={destinations}
-            error={error}
-            selectedJobId={selectedDownloadId}
-            onSelectJob={setSelectedDownloadId}
-            onQueue={() => setShowQueue(true)}
-            onAction={apply}
-            initialStatus={downloadInitialStatus}
-          />
         ) : activeNav === "Library" ? (
           <LibraryView
             deviceID={token}
@@ -1413,8 +1385,18 @@ export function CloudFullDashboard({
             destinations={destinations}
             error={error}
             onOpenDownloads={(jobId) => {
-              if (jobId) setSelectedDownloadId(jobId);
-              setActiveNav("Downloads");
+              const job = jobId ? jobs.find((candidate) => candidate.id === jobId) : null;
+              setSelectedDownloadId(job?.id ?? null);
+              setHomeDownloadsStatus(
+                job?.status === "completed"
+                  ? "completed"
+                  : job?.status === "failed" || job?.status === "cancelled" || job?.status === "verificationRequired"
+                    ? "failed"
+                    : job?.status === "queued"
+                      ? "queued"
+                      : "active",
+              );
+              setActiveNav("Home");
             }}
           />
         ) : activeNav === "Settings" ? (
@@ -1468,9 +1450,9 @@ export function CloudFullDashboard({
       )}
       <div className="studio-bottom-navigation">
         <div className={`studio-nav-menu ${menuOpen ? "open" : ""}`}>
-          {(["Watchlist", "Downloads", "Destinations", "Activity", "Devices"] as const).map((label) => (
+          {(["Watchlist", "Destinations", "Activity", "Devices"] as const).map((label) => (
             <button key={label} onClick={() => { setActiveNav(label); setMenuOpen(false); }}>
-              <Glyph name={label === "Watchlist" ? "archive" : label === "Downloads" ? "downloads" : label === "Destinations" ? "folder" : label === "Activity" ? "activity" : "computer"} />
+              <Glyph name={label === "Watchlist" ? "archive" : label === "Destinations" ? "folder" : label === "Activity" ? "activity" : "computer"} />
               {label}
             </button>
           ))}

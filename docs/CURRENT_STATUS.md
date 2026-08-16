@@ -1,6 +1,6 @@
 # Current implementation status
 
-Last updated: 2026-08-09
+Last updated: 2026-08-15
 
 This document records the accepted behavior in the current `main` working tree, including the pieces that are intentionally still incomplete. `ARCHITECTURE.md` remains the component-level design reference; `SESSION_LOG.md` records the delivery chronology.
 
@@ -18,6 +18,7 @@ This document records the accepted behavior in the current `main` working tree, 
 ### Providers and feeds
 
 - Static/direct resolution supports direct media, PMVHaven, AllPornStream, Playmogo/Dood, MixDrop, StreamTape, mydaddy.cc, LuluStream/Vidara HLS, HQPorner, OnlyFan420, and PornHub through agent-owned yt-dlp. PMVHaven resolution recognizes exact HTTPS video-page hosts, decodes current escaped media data, excludes recommendation previews by anchoring candidates to the target master-playlist directory, and preserves required CDN Referer/User-Agent headers.
+- Vidara retains its original source page, resolves fresh stream metadata through `https://vidara.so/api/stream`, preserves its bounded browser request headers, and materializes the selected HLS variant locally. Current Vidara playlists may disguise MPEG-TS segments with `.woff2` names; only trusted `.vidara` resolutions add `woff2` to ffmpeg's explicit segment allowlist and disable format/extension matching. Other HLS providers keep the default strict ffmpeg policy.
 - Public HTTPS sources not recognized by the specialized resolver now fall back to an agent-owned generic yt-dlp path. The fallback is used only for `unsupportedProvider`; it cannot mask verification-required or provider-specific failures from an existing resolver. Preview output remains sanitized and bounded to safe labels/media kinds, while transfer-time resolution stores and reuses only the original source URL plus the chosen safe selector. Generic jobs never receive PornHub cookies.
 - MixDrop remains Foundation-only: original host first, then the known mirror only after transport failure or unusable HTML. The resolver accepts only strict `mxcontent.net` media paths and forwards the resolved page as Referer with the Chrome user agent. The same source has been verified to resolve statically on a compatible VPN route; a home-route TLS failure occurs before HTTP and is reported as an actionable transport failure without weakening TLS.
 - Feed sources include AllPornStream, HQPorner, OnlyFan420, PornHub, and—while authenticated—PornHub Subscriptions, Liked, and Favorites.
@@ -62,9 +63,11 @@ This document records the accepted behavior in the current `main` working tree, 
 - Cloud Feed metadata browsing is enabled in Production. Requests are coalesced by canonical source/query/page keys, stale results cannot replace newer ones, pagination and normalized search preserve existing cards, and destination/selection/queue controls remain gated until the matching live result succeeds.
 - Feed navigation uses numbered previous/next pagination rather than append-only scrolling. The selection action surface is integrated with the floating navigation instead of splitting the card grid, and HQPorner protected thumbnails render through the existing device-bound asset path.
 - Feed cards expose a non-queueing Extract action that asks the paired agent for current playback candidates. Temporary direct-media URLs and required safe headers are returned to the authenticated browser for network playback or copying; they are not added to the download queue.
+- Downloads is no longer a standalone shell destination. Home's Active, Queued, Failed, and Completed counters open focused modals backed by the complete transfer ledger and inspector. Activity's transfer action returns to Home and opens the matching status modal with the selected job retained.
 - The account-backed experimental Watchlist persists source-page metadata and watched state in Neon through migration `0008_lustre_watchlist`. The August 9 seed retained 30 same-day queued/completed source items. Extract and Refresh are separate actions; current resolved links remain browser-session state and can be refreshed after provider expiry.
 - Watchlist cards remain uniform and compact. Resolved qualities, full temporary URLs, copy actions, headers, source navigation, and refresh controls open in a responsive modal that closes by Escape or backdrop click rather than expanding one grid card.
 - Watchlist command resolution normalizes raw Drizzle/Neon snake-case rows at the repository boundary before returning the camel-case application contract. This prevents a successfully persisted resolve command from surfacing as the generic `Unable to process the device request` error.
+- Watchlist single and batch downloads use the same account-owned Watchlist-to-`queue_url` command path. The gateway accepts the optional stored title only when it is non-empty and at most 512 characters, then forwards it to the agent without weakening the existing URL, destination, quality, capability, payload-size, or replay boundaries.
 - The temporary `/feed-acceptance` canary requires an exact Clerk subject plus an explicit kill switch. It is disabled in the final production deployment and returns `404`, including for the previously allowlisted account.
 - Protected Feed media uses short-lived, device-bound Vercel tickets and the separate `lustre-feed-assets` Cloudflare Worker. Tickets bind the exact URL and media kind; the Worker enforces HTTPS provider-host allowlists, exact production CORS, safe redirects, expected content types, 6 MiB image and 16 MiB video limits, a 20-second upstream timeout, no credential forwarding, and `no-store` responses. The browser makes no direct protected-provider request.
 - K2 production acceptance rendered 50 protected HQPorner thumbnails, advanced a four-scene hover preview, and rendered 42 protected PornHub thumbnails. Blocking the asset Worker preserved metadata, agent connectivity, 29 unchanged jobs, and zero active transfers.
@@ -103,6 +106,8 @@ Known follow-up risk: an earlier aggregate strict-concurrency run intermittently
 
 Latest recorded verification:
 
+- The August 15 gateway title-contract fix passed 8 gateway tests, generated types, TypeScript, and a Wrangler dry run before gateway version `e2ee48a9-ea11-4fb1-9313-749c8e7a2816` deployed. Four previously stuck Watchlist commands completed after automatic reconnect and projected their durable jobs.
+- The August 15 Vidara fix passed a Swift release build, `git diff --check`, and an exact live one-second ffmpeg probe. The live source then completed successfully when retried by the user. Focused Swift tests could not start because the selected Command Line Tools SDK did not provide `XCTest`.
 - The last Cloud command-delivery acceptance passed 183 Swift tests. K1 later encountered an intermittent process-fixture aggregate flake; all 8 affected tests passed on immediate rerun. K2 did not change or restart the agent.
 - Frontend: 72 tests passed; TypeScript and the Next.js production build passed.
 - The August 9 Watchlist modal release passed all 85 frontend tests and the Next.js production build. The production alias returned HTTP `200`; the managed agent remained running as PID 2134 and SQLite reported zero queued, running, or paused jobs.
