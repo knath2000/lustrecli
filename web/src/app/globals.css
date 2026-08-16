@@ -806,4 +806,236 @@ button:focus-visible,a:focus-visible { outline:2px solid var(--cyan); outline-of
   }
 }
 
+/* Unified Lustre workspace visual system */
+.studio-shell.unified-mode {
+  --canvas: #0b0b0c;
+  --panel: rgba(21,21,22,.86);
+  --panel-deep: rgba(17,17,19,.94);
+  --line: rgba(255,255,255,.09);
+  --line-strong: rgba(255,255,255,.18);
+  --text: #f4f4f2;
+  --muted: #a6a6aa;
+  --cyan: #f4f4f2;
+  --blue: #ff7472;
+  --violet: #b38ab8;
+  --coral: #ff7472;
+  min-height: 100vh;
+  color: var(--text);
+  background: radial-gradient(circle at 55% -15%, #27272a 0, transparent 31%), #0b0b0c;
+}
+.unified-mode .studio-shell-workspace {
+  min-height: 100vh;
+}
+.unified-mode .glass-panel,
+.unified-mode .devices-panel,
+.unified-mode .cloud-empty,
+.unified-mode .destination-card,
+.unified-mode .destination-summary,
+.unified-mode .activity-summary,
+.unified-mode .activity-tabs,
+.unified-mode .activity-search,
+.unified-mode .settings-index,
+.unified-mode .settings-section {
+  border-color: rgba(255,255,255,.08);
+  background: #151516;
+  box-shadow: 0 22px 70px rgba(0,0,0,.24), inset 0 1px rgba(255,255,255,.025);
+}
+.unified-mode .destinations-page,
+.unified-mode .activity-page,
+.unified-mode .settings-page,
+.unified-mode .cloud-devices {
+  width: min(1280px, calc(100% - 40px));
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 56px 0 130px;
+}
+.unified-mode .destinations-header,
+.unified-mode .activity-header,
+.unified-mode .settings-header,
+.unified-mode .cloud-devices > header {
+  align-items: end;
+  margin-bottom: 34px;
+}
+.unified-mode .destinations-header h2,
+.unified-mode .activity-header h2,
+.unified-mode .settings-header h2,
+.unified-mode .cloud-devices h1,
+.unified-mode .studio-library-panel h1 {
+  margin-top: 8px;
+  color: #f4f4f2;
+  font: 800 clamp(46px,6vw,76px)/.94 var(--font-geist-sans),sans-serif;
+  letter-spacing: -.065em;
+}
+.unified-mode .eyebrow,
+.unified-mode .destinations-header .eyebrow,
+.unified-mode .activity-header .eyebrow,
+.unified-mode .settings-header .eyebrow {
+  color: #c8c8ca;
+  font-family: var(--font-geist-sans),sans-serif;
+  font-weight: 800;
+  letter-spacing: .17em;
+}
+.unified-mode .queue-button,
+.unified-mode .control-button,
+.unified-mode .secondary-button,
+.unified-mode .connect-button,
+.unified-mode .settings-danger,
+.unified-mode .danger-button,
+.unified-mode .destination-actions button,
+.unified-mode .devices-actions button,
+.unified-mode .cloud-device-list button {
+  min-height: 40px;
+  padding: 0 15px;
+  border-color: rgba(255,255,255,.1);
+  border-radius: 999px;
+  color: #c6c6ca;
+  background: #2b2b2d;
+  box-shadow: none;
+}
+.unified-mode .queue-button:hover,
+.unified-mode .secondary-button:hover,
+.unified-mode .control-button:hover {
+  color: #fff;
+  background: #38383b;
+  box-shadow: none;
+}
+.unified-mode .destinations-header .queue-button,
+.unified-mode .devices-actions .queue-button {
+  color: #111;
+  border-color: #fff;
+  background: #fff;
+}
+.unified-mode .destination-card,
+.unified-mode .settings-section,
+.unified-mode .activity-timeline,
+.unified-mode .activity-inspector {
+  border-radius: 16px;
+}
+.unified-mode .settings-navigation-grid button,
+.unified-mode .capability-grid div {
+  border-color: rgba(255,255,255,.08);
+  background: #1b1b1e;
+}
+.unified-mode .settings-navigation-grid span,
+.unified-mode .settings-value,
+.unified-mode .activity-tabs button.active,
+.unified-mode .activity-inspector section a {
+  color: #f4f4f2;
+}
+.unified-mode .settings-navigation-grid b,
+.unified-mode .activity-empty span,
+.unified-mode .activity-inspector-empty span {
+  color: #ff7472;
+}
+.unified-mode .settings-navigation-grid button:hover,
+.unified-mode .activity-tabs button:hover,
+.unified-mode .activity-tabs button.active {
+  border-color: rgba(255,116,114,.34);
+  background: rgba(128,52,59,.26);
+}
+.unified-mode .studio-library {
+  width: min(1280px, calc(100% - 40px));
+  padding: 56px 0 130px;
+}
+.unified-mode .studio-library-panel {
+  border-color: rgba(255,255,255,.08);
+  border-radius: 16px;
+  background: transparent;
+  box-shadow: none;
+}
+.unified-mode .studio-library-pills span,
+.unified-mode .studio-library-sync,
+.unified-mode .studio-library-filters button,
+.unified-mode .studio-library-tools select,
+.unified-mode .studio-library-tools > button {
+  border-color: rgba(255,255,255,.1);
+  color: #c6c6ca;
+  background: #2b2b2d;
+}
+.unified-mode .studio-library-filters button.active,
+.unified-mode .studio-library-mode button.active {
+  color: #111;
+  border-color: #fff;
+  background: #fff;
+}
+.unified-mode .studio-library-tools label,
+.unified-mode .studio-library-mode,
+.unified-mode .studio-library-content article,
+.unified-mode .studio-library-detail-grid > section {
+  border-color: rgba(255,255,255,.08);
+  background: #151516;
+}
+.unified-mode .studio-library-content > section > h2 {
+  background: #0b0b0c;
+}
+.unified-mode .studio-library-thumb {
+  color: #fff;
+  background: linear-gradient(145deg,#222,#101011);
+}
+.unified-mode .studio-library-detail,
+.unified-mode .destination-sheet,
+.unified-mode .queue-sheet {
+  border-color: rgba(255,255,255,.1);
+  border-radius: 22px;
+  color: #f4f4f2;
+  background: #111113;
+  box-shadow: 0 30px 100px rgba(0,0,0,.7);
+}
+.unified-mode .modal-close,
+.unified-mode .home-downloads-close {
+  width: 44px;
+  height: 44px;
+  border-color: rgba(255,255,255,.12);
+  border-radius: 50%;
+  color: #fff;
+  background: #29292c;
+  font-size: 24px;
+}
+.unified-mode .modal-backdrop,
+.unified-mode .home-downloads-backdrop,
+.unified-mode .studio-watchlist-modal-backdrop {
+  background: rgba(8,8,9,.9);
+  backdrop-filter: blur(18px);
+}
+.unified-mode .pairing-code,
+.unified-mode .settings-status,
+.unified-mode .destination-kind,
+.unified-mode .settings-session {
+  border-color: rgba(255,255,255,.1);
+  color: #c6c6ca;
+  background: #202022;
+}
+.unified-mode .danger-button,
+.unified-mode .settings-danger {
+  color: #ffaaa2;
+}
+.unified-mode .toast {
+  border-color: rgba(255,255,255,.1);
+  border-radius: 15px;
+  color: #fff;
+  background: rgba(26,26,28,.94);
+  box-shadow: 0 18px 55px rgba(0,0,0,.6);
+}
+
+@media (max-width:760px) {
+  .unified-mode .destinations-page,
+  .unified-mode .activity-page,
+  .unified-mode .settings-page,
+  .unified-mode .cloud-devices,
+  .unified-mode .studio-library {
+    width: calc(100% - 24px);
+    padding: 30px 0 120px;
+  }
+  .unified-mode .destinations-header h2,
+  .unified-mode .activity-header h2,
+  .unified-mode .settings-header h2,
+  .unified-mode .cloud-devices h1,
+  .unified-mode .studio-library-panel h1 {
+    font-size: 42px;
+  }
+  .unified-mode .studio-library-panel {
+    padding: 0;
+  }
+}
+
 @import "./lustre-watch.css";

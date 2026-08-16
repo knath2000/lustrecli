@@ -1340,12 +1340,12 @@ export function CloudFullDashboard({
     [jobs],
   );
   return (
-    <main className={`studio-shell ${activeNav === "Feed" || activeNav === "Watchlist" ? "watch-mode" : activeNav === "Home" ? "home-mode" : ""}`}>
+    <main className={`studio-shell unified-mode ${activeNav === "Feed" || activeNav === "Watchlist" ? "watch-mode" : activeNav === "Home" ? "home-mode" : ""}`}>
       <section className="studio-shell-workspace" id="workspace">
         {activeNav === "Devices" ? (
           <DevicesView />
         ) : feedEnabled && activeNav === "Feed" ? (
-          <WatchApp activeTab="feed" canQueue={connected && feedQueueEnabled} canAgentResolve={connected} onQueue={queueWatchItem} onQueueWatchlist={queueWatchlistItem} onAgentResolveFeed={resolveFeedItem} onAgentResolveWatchlist={resolveWatchlistItem} onTabChange={(tab) => setActiveNav(tab === "feed" ? "Feed" : "Watchlist")} onExit={() => setActiveNav("Home")} />
+          <WatchApp activeTab="feed" canQueue={connected && feedQueueEnabled} canAgentResolve={connected} onQueue={queueWatchItem} onQueueWatchlist={queueWatchlistItem} onAgentResolveFeed={resolveFeedItem} onAgentResolveWatchlist={resolveWatchlistItem} />
         ) : activeNav === "Library" ? (
           <LibraryView
             deviceID={token}
@@ -1361,7 +1361,7 @@ export function CloudFullDashboard({
             }}
           />
         ) : activeNav === "Watchlist" ? (
-          <WatchApp activeTab="watchlist" canQueue={connected && feedQueueEnabled} canAgentResolve={connected} onQueue={queueWatchItem} onQueueWatchlist={queueWatchlistItem} onAgentResolveFeed={resolveFeedItem} onAgentResolveWatchlist={resolveWatchlistItem} onTabChange={(tab) => setActiveNav(tab === "feed" ? "Feed" : "Watchlist")} onExit={() => setActiveNav("Home")} />
+          <WatchApp activeTab="watchlist" canQueue={connected && feedQueueEnabled} canAgentResolve={connected} onQueue={queueWatchItem} onQueueWatchlist={queueWatchlistItem} onAgentResolveFeed={resolveFeedItem} onAgentResolveWatchlist={resolveWatchlistItem} />
         ) : activeNav === "Destinations" ? (
           <DestinationsView
             destinations={destinations}

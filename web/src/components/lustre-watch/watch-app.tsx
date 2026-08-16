@@ -2,7 +2,6 @@
 /* eslint-disable react-hooks/set-state-in-effect */
 
 import { AnimatePresence, LayoutGroup, motion, useReducedMotion } from "motion/react";
-import { UserButton } from "@clerk/nextjs";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { FeedItem, FeedPage, FeedPlaybackResolution, FeedSite, ResolutionProgressEvent, WatchlistItem } from "@/lib/lustre-watch/contracts";
 import { copyText } from "@/lib/lustre-watch/clipboard";
@@ -103,8 +102,6 @@ export function WatchApp({
   onQueueWatchlist,
   onAgentResolveFeed,
   onAgentResolveWatchlist,
-  onTabChange,
-  onExit,
 }: {
   activeTab: Tab;
   canQueue?: boolean;
@@ -113,8 +110,6 @@ export function WatchApp({
   onQueueWatchlist?: (item: WatchlistItem) => Promise<void>;
   onAgentResolveFeed?: (item: FeedItem) => Promise<FeedPlaybackResolution>;
   onAgentResolveWatchlist?: (item: WatchlistItem) => Promise<FeedPlaybackResolution>;
-  onTabChange?: (tab: Tab) => void;
-  onExit?: () => void;
 }) {
   const reducedMotion = useReducedMotion();
   const tab = activeTab;
@@ -541,15 +536,7 @@ export function WatchApp({
   const displayThumbnail = resolution?.thumbnailURL ?? activeSource?.thumbnailURL;
 
   return <LayoutGroup><div className="lustre-watch">
-    <header className="topbar">
-      <button className="brand watch-brand-button" onClick={onExit} aria-label="Return to Lustre Cloud"><span className="mark">LW</span><strong>Lustre Watch</strong></button>
-      <UserButton />
-    </header>
     <div className="workspace">
-    <nav className="tabs" aria-label="Lustre Watch navigation">
-      <button className={tab === "feed" ? "active" : ""} onClick={() => onTabChange?.("feed")}><span className="nav-icon">◫</span><span>Feed</span>{tab === "feed" && <motion.i layoutId="active-tab" />}</button>
-      <button className={tab === "watchlist" ? "active" : ""} onClick={() => onTabChange?.("watchlist")}><span className="nav-icon">◇</span><span>Watchlist</span><motion.em key={watchlist.length} initial={reducedMotion ? false : { scale: 1.35 }} animate={{ scale: 1 }}>{watchlist.length}</motion.em>{tab === "watchlist" && <motion.i layoutId="active-tab" />}</button>
-    </nav>
     {error && <div className="notice">{error}</div>}
     {tab === "feed" ? <>
       <section className="section-heading"><div><p className="eyebrow">Explore the void</p><h1>Immersive feed</h1></div><p>Fresh scenes from your selected source, arranged for visual discovery.</p></section>
