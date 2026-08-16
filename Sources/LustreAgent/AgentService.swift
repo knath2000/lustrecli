@@ -68,7 +68,7 @@ public actor AgentService {
     private let allPornStreamCapture: AllPornStreamCaptureCoordinator?
     private let allPornStreamHTML: AllPornStreamHTML?
     private let directExtractor: DirectExtractor
-    private let maximumConcurrentDownloads: Int
+    private var maximumConcurrentDownloads: Int
     private var activeDownloadTasks: [UUID: ActiveDownload] = [:]
     private var lastProgressUpdates: [UUID: LastProgressUpdate] = [:]
 
@@ -170,8 +170,19 @@ public actor AgentService {
         }
     }
 
-    public func health() -> [String: String] {
-        ["status": "ok"]
+    public func health() async -> AgentHealth {
+        let storedJobs = try? await jobs.allJobs()
+        return AgentHealth(
+            status: storedJobs == nil ? "degraded" : "ok",
+            runtimeVersion: ProcessInfo.processInfo.environment["LUSTRE_RUNTIME_VERSION"] ?? "development",
+            databaseReady: storedJobs != nil,
+            activeJobs: storedJobs?.filter { $0.status == .running }.count ?? 0
+        )
+    }
+
+    public func setMaximumConcurrentDownloads(_ limit: Int) async {
+        maximumConcurrentDownloads = min(max(limit, 1), 8)
+        await scheduleQueuedDownloads()
     }
 
     public func allJobs() async throws -> [DownloadJob] {
@@ -300,6 +311,8 @@ public actor AgentService {
             sourcePageURL: request.sourcePageURL,
             title: boundedTitle,
             preferredQualityLabel: preferredQualityLabel?.isEmpty == false ? preferredQualityLabel : nil,
+            qualitySelector: request.qualitySelector,
+            assistedResolution: request.assistedResolution,
             destination: destination
         )
         let queueMessage = if RemoteDestination.googleDriveProfileID(from: destination) != nil {
@@ -410,7 +423,7 @@ public actor AgentService {
             job.updatedAt = .now
             try await jobs.update(job)
 
-            let extraction = try await extract(url: job.sourcePageURL)
+            let extraction = try await extractionForJob(job)
             guard !Task.isCancelled,
                   ownsDownload(id, taskID: taskID),
                   var active = try await jobs.job(id: id),
@@ -428,7 +441,7 @@ public actor AgentService {
             guard !resolution.qualities.isEmpty else {
                 throw AgentServiceError.noProviderResolved
             }
-            guard let quality = selectedQuality(in: resolution, preferredLabel: active.preferredQualityLabel) else {
+            guard let quality = selectedQuality(in: resolution, selector: active.qualitySelector, preferredLabel: active.preferredQualityLabel) else {
                 throw AgentServiceError.noSelectedQuality
             }
             let resolvedTitle = active.title ?? resolution.title
@@ -567,6 +580,8 @@ public actor AgentService {
                   completed.status == .running else { return }
             completed.status = .completed
             completed.progress = 1
+            completed.assistedResolution = nil
+            completed.completionArtifact = completionArtifact(output: output, destination: completed.destination)
             completed.phaseBytesPerSecond = nil
             completed.phaseETASeconds = nil
             record(&completed, level: .info, message: "Completed: \(output.lastPathComponent)")
@@ -694,11 +709,62 @@ public actor AgentService {
         }
     }
 
-    private func selectedQuality(in resolution: ProviderResolution, preferredLabel: String?) -> ResolvedQuality? {
+    private func extractionForJob(_ job: DownloadJob) async throws -> ExtractionResult {
+        guard let assisted = job.assistedResolution else {
+            return try await extract(url: job.sourcePageURL)
+        }
+        guard URLSafetyPolicy.isAllowed(assisted.mediaURL),
+              assisted.headers.count <= 16,
+              assisted.headers.allSatisfy({ $0.key.count <= 80 && $0.value.count <= 2_048 }),
+              assisted.resolutionMethod.count <= 120
+        else {
+            throw AgentServiceError.invalidURL
+        }
+        let provider = job.qualitySelector?.provider ?? .direct
+        let quality = ResolvedQuality(
+            label: job.preferredQualityLabel ?? "Assisted video",
+            url: assisted.mediaURL,
+            headers: assisted.headers,
+            resolutionMethod: assisted.resolutionMethod,
+            mediaKind: assisted.mediaKind,
+            formatSelector: job.qualitySelector?.formatSelector
+        )
+        let resolution = ProviderResolution(
+            sourcePageURL: job.sourcePageURL,
+            provider: provider,
+            title: assisted.title ?? job.title,
+            qualities: [quality],
+            trace: ["Accepted loopback browser-assisted resolution."]
+        )
+        return ExtractionResult(
+            sourcePageURL: job.sourcePageURL,
+            isDirectMedia: assisted.mediaKind == .direct,
+            resolutionState: "resolved",
+            trace: resolution.trace,
+            resolution: resolution
+        )
+    }
+
+    private func selectedQuality(in resolution: ProviderResolution, selector: StableQualitySelector?, preferredLabel: String?) -> ResolvedQuality? {
+        if let selector, selector.provider == resolution.provider {
+            let candidates = resolution.qualities.filter { quality in
+                quality.mediaKind == selector.mediaKind &&
+                (selector.formatSelector == nil || quality.formatSelector == selector.formatSelector)
+            }
+            if let exact = candidates.first(where: { $0.label == preferredLabel }) { return exact }
+            if let first = candidates.first { return first }
+        }
         guard let preferredLabel = preferredLabel?.trimmingCharacters(in: .whitespacesAndNewlines), !preferredLabel.isEmpty else {
             return resolution.qualities.first
         }
         return resolution.qualities.first { $0.label == preferredLabel }
+    }
+
+    private func completionArtifact(output: URL, destination: String) -> JobCompletionArtifact {
+        if destination == "local" || destination.hasPrefix("/") {
+            return JobCompletionArtifact(kind: "local", path: output.path, destination: destination, filename: output.lastPathComponent)
+        }
+        return JobCompletionArtifact(kind: "remote", path: nil, destination: destination, filename: output.lastPathComponent)
     }
 
     private func normalizedDestination(_ value: String?) async throws -> String {

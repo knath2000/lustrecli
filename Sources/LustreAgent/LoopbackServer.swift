@@ -73,6 +73,11 @@ public final class LoopbackServer: @unchecked Sendable {
             if request.method == "GET", request.path == "/v1/jobs" {
                 return json(status: 200, value: try await service.allJobs())
             }
+            if request.method == "POST", routePath == "/v1/entitlement" {
+                let input = try decoder.decode(EntitlementProjectionRequest.self, from: request.body)
+                await service.setMaximumConcurrentDownloads(input.maximumConcurrentDownloads)
+                return json(status: 200, value: ["status": "updated"])
+            }
             if request.method == "GET", routePath == "/v1/auth/pornhub" {
                 return json(status: 200, value: await service.pornHubAuthStatus())
             }
@@ -117,6 +122,21 @@ public final class LoopbackServer: @unchecked Sendable {
             }
             if request.method == "GET", request.path == "/v1/destinations" {
                 return json(status: 200, value: await service.allRemoteDestinations())
+            }
+            if request.method == "GET", routePath == "/v1/destinations/google-drive" {
+                return json(status: 200, value: await service.allGoogleDriveDestinations())
+            }
+            if request.method == "POST", routePath == "/v1/destinations/google-drive/connect" {
+                let input = try decoder.decode(GoogleDriveConnectRequest.self, from: request.body)
+                return json(status: 201, value: try await service.connectGoogleDrive(remoteName: input.remoteName))
+            }
+            if request.method == "POST", routePath.hasPrefix("/v1/destinations/google-drive/"), routePath.hasSuffix("/select") {
+                let segments = routePath.split(separator: "/")
+                guard segments.count == 5, let id = UUID(uuidString: String(segments[3])) else {
+                    return json(status: 400, value: ErrorResponse(error: "Invalid Google Drive destination id."))
+                }
+                let input = try decoder.decode(GoogleDrivePathRequest.self, from: request.body)
+                return json(status: 200, value: try await service.selectGoogleDriveFolder(profileID: id, path: input.path))
             }
             if request.method == "POST", request.path == "/v1/destinations/webdav" {
                 let input = try decoder.decode(WebDAVDestinationRequest.self, from: request.body)
@@ -179,12 +199,24 @@ public final class LoopbackServer: @unchecked Sendable {
     }
 }
 
+private struct GoogleDriveConnectRequest: Codable {
+    let remoteName: String?
+}
+
+private struct GoogleDrivePathRequest: Codable {
+    let path: String
+}
+
 private struct ExtractRequest: Decodable {
     let url: URL
 }
 
 private struct ActionRequest: Decodable {
     let action: JobAction
+}
+
+private struct EntitlementProjectionRequest: Decodable {
+    let maximumConcurrentDownloads: Int
 }
 
 private struct FolderSelection: Encodable {

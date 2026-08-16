@@ -33,6 +33,18 @@ public struct AgentClient {
         try await request(path: "/v1/jobs", method: "GET", body: Optional<Data>.none)
     }
 
+    public func googleDriveDestinations() async throws -> [GoogleDriveDestinationProfile] {
+        try await request(path: "/v1/destinations/google-drive", method: "GET", body: Optional<Data>.none)
+    }
+
+    public func connectGoogleDrive(remoteName: String?) async throws -> GoogleDriveDestinationProfile {
+        try await request(path: "/v1/destinations/google-drive/connect", method: "POST", body: try encoder.encode(["remoteName": remoteName]))
+    }
+
+    public func selectGoogleDriveFolder(profileID: UUID, path: String) async throws -> GoogleDriveDestinationProfile {
+        try await request(path: "/v1/destinations/google-drive/\(profileID.uuidString)/select", method: "POST", body: try encoder.encode(["path": path]))
+    }
+
     public func feedSites() async throws -> [FeedSite] {
         try await request(path: "/v1/feed/sites", method: "GET", body: Optional<Data>.none)
     }

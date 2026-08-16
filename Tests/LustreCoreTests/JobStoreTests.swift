@@ -18,6 +18,33 @@ final class JobStoreTests: XCTestCase {
         XCTAssertEqual(retried.attempts, 1)
     }
 
+    func testRetryDiscardsBrowserAssistanceButKeepsStableSelection() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try JobStore(databaseURL: directory.appending(path: "jobs.sqlite3"))
+        let selector = StableQualitySelector(provider: .doodStream, mediaKind: .direct)
+        let assistance = AssistedResolution(
+            mediaURL: URL(string: "https://media.example/temporary.mp4")!,
+            headers: ["Referer": "https://dood.example/"],
+            mediaKind: .direct,
+            title: "Scene",
+            resolutionMethod: "WebView"
+        )
+        let job = DownloadJob(
+            sourcePageURL: URL(string: "https://dood.example/e/scene")!,
+            qualitySelector: selector,
+            assistedResolution: assistance,
+            status: .verificationRequired
+        )
+        try await store.create(job)
+
+        let retried = try await store.apply(.retry, to: job.id)
+
+        XCTAssertNil(retried.assistedResolution)
+        XCTAssertEqual(retried.qualitySelector, selector)
+        XCTAssertEqual(retried.sourcePageURL, job.sourcePageURL)
+    }
+
     func testRejectsActionsThatAreInvalidForTheCurrentJobState() async throws {
         let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
         defer { try? FileManager.default.removeItem(at: directory) }

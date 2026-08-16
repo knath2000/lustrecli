@@ -83,6 +83,7 @@ public actor JobStore {
         case .retry:
             job.status = .queued
             job.attempts += 1
+            job.assistedResolution = nil
             job.message = "Queued for retry."
         case .forceStart:
             job.message = "Force start requested; bypassing normal concurrency limit."

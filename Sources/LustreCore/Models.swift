@@ -29,6 +29,20 @@ public enum JobAction: String, Codable, Sendable {
     case forceStart
 }
 
+public struct AgentHealth: Codable, Equatable, Sendable {
+    public let status: String
+    public let runtimeVersion: String
+    public let databaseReady: Bool
+    public let activeJobs: Int
+
+    public init(status: String, runtimeVersion: String, databaseReady: Bool, activeJobs: Int) {
+        self.status = status
+        self.runtimeVersion = runtimeVersion
+        self.databaseReady = databaseReady
+        self.activeJobs = activeJobs
+    }
+}
+
 public struct JobLogEntry: Codable, Equatable, Sendable {
     public enum Level: String, Codable, Sendable {
         case info
@@ -131,6 +145,48 @@ public struct ResolvedQuality: Codable, Equatable, Sendable {
     }
 }
 
+public struct StableQualitySelector: Codable, Equatable, Sendable {
+    public let provider: ProviderKind
+    public let mediaKind: MediaKind
+    public let formatSelector: String?
+
+    public init(provider: ProviderKind, mediaKind: MediaKind, formatSelector: String? = nil) {
+        self.provider = provider
+        self.mediaKind = mediaKind
+        self.formatSelector = formatSelector
+    }
+}
+
+public struct AssistedResolution: Codable, Equatable, Sendable {
+    public let mediaURL: URL
+    public let headers: [String: String]
+    public let mediaKind: MediaKind
+    public let title: String?
+    public let resolutionMethod: String
+
+    public init(mediaURL: URL, headers: [String: String] = [:], mediaKind: MediaKind, title: String? = nil, resolutionMethod: String) {
+        self.mediaURL = mediaURL
+        self.headers = headers
+        self.mediaKind = mediaKind
+        self.title = title
+        self.resolutionMethod = resolutionMethod
+    }
+}
+
+public struct JobCompletionArtifact: Codable, Equatable, Sendable {
+    public let kind: String
+    public let path: String?
+    public let destination: String
+    public let filename: String
+
+    public init(kind: String, path: String?, destination: String, filename: String) {
+        self.kind = kind
+        self.path = path
+        self.destination = destination
+        self.filename = filename
+    }
+}
+
 public struct ProviderResolution: Codable, Equatable, Sendable {
     public let sourcePageURL: URL
     public let provider: ProviderKind
@@ -186,6 +242,8 @@ public struct DownloadJob: Codable, Identifiable, Equatable, Sendable {
     public let sourcePageURL: URL
     public var title: String?
     public var preferredQualityLabel: String?
+    public var qualitySelector: StableQualitySelector?
+    public var assistedResolution: AssistedResolution?
     public var destination: String
     public var status: JobStatus
     public var message: String
@@ -201,6 +259,7 @@ public struct DownloadJob: Codable, Identifiable, Equatable, Sendable {
     public var phaseETASeconds: Int?
     public var attempts: Int
     public var logs: [JobLogEntry]?
+    public var completionArtifact: JobCompletionArtifact?
     public let createdAt: Date
     public var updatedAt: Date
 
@@ -209,6 +268,8 @@ public struct DownloadJob: Codable, Identifiable, Equatable, Sendable {
         sourcePageURL: URL,
         title: String? = nil,
         preferredQualityLabel: String? = nil,
+        qualitySelector: StableQualitySelector? = nil,
+        assistedResolution: AssistedResolution? = nil,
         destination: String = "local",
         status: JobStatus = .queued,
         message: String = "Waiting for the resolver worker.",
@@ -224,6 +285,7 @@ public struct DownloadJob: Codable, Identifiable, Equatable, Sendable {
         phaseETASeconds: Int? = nil,
         attempts: Int = 0,
         logs: [JobLogEntry]? = nil,
+        completionArtifact: JobCompletionArtifact? = nil,
         createdAt: Date = .now,
         updatedAt: Date = .now
     ) {
@@ -231,6 +293,8 @@ public struct DownloadJob: Codable, Identifiable, Equatable, Sendable {
         self.sourcePageURL = sourcePageURL
         self.title = title
         self.preferredQualityLabel = preferredQualityLabel
+        self.qualitySelector = qualitySelector
+        self.assistedResolution = assistedResolution
         self.destination = destination
         self.status = status
         self.message = message
@@ -246,6 +310,7 @@ public struct DownloadJob: Codable, Identifiable, Equatable, Sendable {
         self.phaseETASeconds = phaseETASeconds
         self.attempts = attempts
         self.logs = logs
+        self.completionArtifact = completionArtifact
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }
@@ -281,13 +346,17 @@ public struct CreateJobRequest: Codable, Sendable {
     public let sourcePageURL: URL
     public let title: String?
     public let preferredQualityLabel: String?
+    public let qualitySelector: StableQualitySelector?
+    public let assistedResolution: AssistedResolution?
     public let destination: String?
 
-    public init(id: UUID? = nil, sourcePageURL: URL, title: String? = nil, preferredQualityLabel: String? = nil, destination: String? = nil) {
+    public init(id: UUID? = nil, sourcePageURL: URL, title: String? = nil, preferredQualityLabel: String? = nil, qualitySelector: StableQualitySelector? = nil, assistedResolution: AssistedResolution? = nil, destination: String? = nil) {
         self.id = id
         self.sourcePageURL = sourcePageURL
         self.title = title
         self.preferredQualityLabel = preferredQualityLabel
+        self.qualitySelector = qualitySelector
+        self.assistedResolution = assistedResolution
         self.destination = destination
     }
 }
