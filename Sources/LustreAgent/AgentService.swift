@@ -410,6 +410,14 @@ public actor AgentService {
         return job
     }
 
+    public func removeJob(id: UUID) async throws {
+        activeDownloadTasks[id]?.task.cancel()
+        activeDownloadTasks[id] = nil
+        lastProgressUpdates[id] = nil
+        try await jobs.delete(id: id)
+        await scheduleQueuedDownloads()
+    }
+
     public func processQueuedJob(id: UUID) async {
         await processQueuedJob(id: id, taskID: nil)
     }

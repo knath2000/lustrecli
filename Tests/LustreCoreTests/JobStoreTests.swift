@@ -97,6 +97,29 @@ final class JobStoreTests: XCTestCase {
             await XCTAssertThrowsErrorAsync(try await store.apply(.forceStart, to: job.id))
         }
     }
+
+    func testDeleteRemovesJob() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try JobStore(databaseURL: directory.appending(path: "jobs.sqlite3"))
+        let job = DownloadJob(sourcePageURL: URL(string: "https://example.com/delete")!)
+        try await store.create(job)
+
+        try await store.delete(id: job.id)
+
+        let deletedJob = try await store.job(id: job.id)
+        let remainingJobs = try await store.allJobs()
+        XCTAssertNil(deletedJob)
+        XCTAssertTrue(remainingJobs.isEmpty)
+    }
+
+    func testDeleteRejectsMissingJob() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try JobStore(databaseURL: directory.appending(path: "jobs.sqlite3"))
+
+        await XCTAssertThrowsErrorAsync(try await store.delete(id: UUID()))
+    }
 }
 
 private func XCTAssertThrowsErrorAsync<T>(

@@ -89,6 +89,10 @@ public struct AgentClient {
         try await request(path: "/v1/jobs/\(id.uuidString)/action", method: "POST", body: try encoder.encode(["action": action.rawValue]))
     }
 
+    public func removeJob(id: UUID) async throws {
+        let _: EmptyAgentResponse = try await request(path: "/v1/jobs/\(id.uuidString)", method: "DELETE", body: Optional<Data>.none)
+    }
+
     private func request<T: Decodable>(path: String, method: String, body: Data?) async throws -> T {
         try await request(url: URL(string: "http://127.0.0.1:\(endpoint.port)\(path)")!, method: method, body: body)
     }

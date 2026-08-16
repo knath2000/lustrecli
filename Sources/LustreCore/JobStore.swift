@@ -97,6 +97,16 @@ public actor JobStore {
         try replace(job)
     }
 
+    public func delete(id: UUID) throws {
+        let statement = try prepare("DELETE FROM jobs WHERE id = ?")
+        defer { sqlite3_finalize(statement) }
+        bind(id.uuidString, to: statement, index: 1)
+        try step(statement)
+        guard sqlite3_changes(handle.database) > 0 else {
+            throw JobStoreError.jobNotFound(id)
+        }
+    }
+
     private func replace(_ job: DownloadJob) throws {
         let payload = try encoder.encode(job)
         let statement = try prepare("UPDATE jobs SET payload = ?, updated_at = ? WHERE id = ?")

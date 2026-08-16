@@ -165,6 +165,14 @@ public final class LoopbackServer: @unchecked Sendable {
                 let input = try decoder.decode(CreateJobRequest.self, from: request.body)
                 return json(status: 201, value: try await service.createJob(input))
             }
+            if request.method == "DELETE", routePath.hasPrefix("/v1/jobs/") {
+                let segments = routePath.split(separator: "/")
+                guard segments.count == 3, let id = UUID(uuidString: String(segments[2])) else {
+                    return json(status: 400, value: ErrorResponse(error: "Invalid job id."))
+                }
+                try await service.removeJob(id: id)
+                return json(status: 200, value: EmptyAgentResponse())
+            }
             if request.method == "POST", request.path == "/v1/folders/select" {
                 return json(status: 200, value: FolderSelection(path: try await service.selectDownloadFolder()))
             }
