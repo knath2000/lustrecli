@@ -18,9 +18,11 @@ type Props = {
   pornHubAuth: PornHubAuthStatus | null;
   onPornHubSignIn: () => Promise<void>;
   onPornHubSignOut: () => Promise<void>;
+  onOpenDestinations?: () => void;
+  onOpenDevices?: () => void;
 };
 
-export function SettingsView({ connected, pollingInterval, jobsCount, destinationsCount, error, onPollingIntervalChange, onRefresh, onDisconnect, pornHubAuth, onPornHubSignIn, onPornHubSignOut }: Props) {
+export function SettingsView({ connected, pollingInterval, jobsCount, destinationsCount, error, onPollingIntervalChange, onRefresh, onDisconnect, pornHubAuth, onPornHubSignIn, onPornHubSignOut, onOpenDestinations, onOpenDevices }: Props) {
   const [refreshing, setRefreshing] = useState(false);
   const [authWorking, setAuthWorking] = useState(false);
   const refresh = async () => { setRefreshing(true); try { await onRefresh(); } finally { setRefreshing(false); } };
@@ -30,8 +32,16 @@ export function SettingsView({ connected, pollingInterval, jobsCount, destinatio
     <header className="settings-header"><div><p className="eyebrow">Local workspace configuration</p><h2>Settings</h2><p>Control this browser tab’s connection behavior and review the agent security boundary.</p></div><span className="settings-session"><i /> Session only</span></header>
     {error && <p className="inline-error" role="alert">{error}</p>}
     <div className="settings-layout">
-      <aside className="settings-index glass-panel" aria-label="Settings sections"><a href="#connection">Connection</a><a href="#pornhub">PornHub</a><a href="#refresh">Live refresh</a><a href="#capabilities">Capabilities</a><a href="#privacy">Privacy & security</a></aside>
+      <aside className="settings-index glass-panel" aria-label="Settings sections"><a href="#workspace-management">Destinations & devices</a><a href="#connection">Connection</a><a href="#pornhub">PornHub</a><a href="#refresh">Live refresh</a><a href="#capabilities">Capabilities</a><a href="#privacy">Privacy & security</a></aside>
       <div className="settings-sections">
+        <section className="settings-section glass-panel" id="workspace-management">
+          <header><div><p className="eyebrow">Workspace management</p><h3>Destinations & devices</h3></div><span className="settings-value">Manage</span></header>
+          <div className="settings-navigation-grid">
+            <button disabled={!onOpenDestinations} onClick={onOpenDestinations}><span>Destinations</span><strong>{destinationsCount} configured</strong><small>Manage local folders, Google Drive, and WebDAV delivery profiles.</small><b aria-hidden="true">→</b></button>
+            <button disabled={!onOpenDevices} onClick={onOpenDevices}><span>Devices</span><strong>Paired Macs</strong><small>View connection status and manage the Macs linked to your account.</small><b aria-hidden="true">→</b></button>
+          </div>
+        </section>
+
         <section className="settings-section glass-panel" id="connection"><header><div><p className="eyebrow">Local agent</p><h3>Connection</h3></div><span className={`settings-status ${connected ? "connected" : ""}`}><i />{connected ? "Connected" : "Disconnected"}</span></header><div className="settings-row"><div><strong>Agent endpoint</strong><p>The development bridge is restricted to the fixed loopback listener.</p></div><code>127.0.0.1:63406</code></div><div className="settings-row"><div><strong>Authenticated session</strong><p>The bearer token remains in React memory and disappears when this tab reloads.</p></div><span>{connected ? "Active" : "Not connected"}</span></div><footer><button className="secondary-button" disabled={!connected || refreshing} onClick={() => void refresh()}>{refreshing ? "Refreshing…" : "Refresh now"}</button><button className="settings-danger" disabled={!connected} onClick={onDisconnect}>Disconnect agent</button></footer></section>
 
         <section className="settings-section glass-panel" id="pornhub">
@@ -46,7 +56,7 @@ export function SettingsView({ connected, pollingInterval, jobsCount, destinatio
 
         <section className="settings-section glass-panel" id="capabilities"><header><div><p className="eyebrow">Detected API surface</p><h3>Agent capabilities</h3></div><span className="settings-value">Live state</span></header><div className="capability-grid"><div><span>Durable jobs</span><strong>{jobsCount}</strong><small>Queue and lifecycle actions</small></div><div><span>WebDAV profiles</span><strong>{destinationsCount}</strong><small>Create, test, and remove</small></div><div><span>Local folders</span><strong>Native</strong><small>macOS folder selection</small></div><div><span>Credentials</span><strong>Keychain</strong><small>Never returned by API</small></div></div><p className="settings-note">Transfer concurrency, bandwidth limits, update channels, and notifications are not shown because the current agent does not expose configuration APIs for them.</p></section>
 
-        <section className="settings-section privacy-section glass-panel" id="privacy"><header><div><p className="eyebrow">Security boundary</p><h3>Privacy & security</h3></div><span className="settings-lock">⌾</span></header><ul><li><i />The browser proxy accepts only normalized <code>/v1/*</code> agent paths.</li><li><i />The Swift listener remains bound to authenticated loopback.</li><li><i />WebDAV passwords and optional PornHub session cookies remain in macOS Keychain and are never returned to the browser.</li><li><i />No Lustre cloud account, device pairing, or public remote-control channel exists in this development build.</li></ul></section>
+        <section className="settings-section privacy-section glass-panel" id="privacy"><header><div><p className="eyebrow">Security boundary</p><h3>Privacy & security</h3></div><span className="settings-lock">⌾</span></header><ul><li><i />The browser proxy accepts only normalized <code>/v1/*</code> agent paths.</li><li><i />The Swift listener remains bound to authenticated loopback.</li><li><i />WebDAV passwords and optional PornHub session cookies remain in macOS Keychain and are never returned to the browser.</li><li><i />Paired devices connect through authenticated, account-scoped requests; destination secrets remain on the Mac.</li></ul></section>
       </div>
     </div>
   </div>;

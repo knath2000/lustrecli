@@ -840,7 +840,6 @@ export function CloudFullDashboard({
   const [connected, setConnected] = useState(false);
   const [loading, setLoading] = useState(false);
   const [showQueue, setShowQueue] = useState(false);
-  const [menuOpen, setMenuOpen] = useState(false);
   const [homeDownloadsStatus, setHomeDownloadsStatus] = useState<"active" | "queued" | "failed" | "completed" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
@@ -1412,6 +1411,8 @@ export function CloudFullDashboard({
             pornHubAuth={pornHubAuth}
             onPornHubSignIn={signInWithPornHub}
             onPornHubSignOut={signOutOfPornHub}
+            onOpenDestinations={() => setActiveNav("Destinations")}
+            onOpenDevices={() => setActiveNav("Devices")}
           />
         ) : (
           <>
@@ -1449,30 +1450,25 @@ export function CloudFullDashboard({
         </div>
       )}
       <div className="studio-bottom-navigation">
-        <div className={`studio-nav-menu ${menuOpen ? "open" : ""}`}>
-          {(["Watchlist", "Destinations", "Activity", "Devices"] as const).map((label) => (
-            <button key={label} onClick={() => { setActiveNav(label); setMenuOpen(false); }}>
-              <Glyph name={label === "Watchlist" ? "archive" : label === "Destinations" ? "folder" : label === "Activity" ? "activity" : "computer"} />
-              {label}
-            </button>
-          ))}
-          <span className="studio-account"><UserButton appearance={{ elements: { avatarBox: "avatar" } }} /> Account</span>
-        </div>
         <nav aria-label="Primary navigation">
-          <button className="studio-menu-toggle" aria-expanded={menuOpen} aria-label="More pages" onClick={() => setMenuOpen((value) => !value)}><Glyph name="menu" size={22} /></button>
-          <span className="studio-nav-divider" aria-hidden="true" />
           {([
             ["Home", "home"],
             ...(feedEnabled ? [["Feed", "broadcast"]] : []),
+            ["Watchlist", "archive"],
             ["Library", "books"],
+            ["Activity", "activity"],
             ["Settings", "settings"],
           ] as Array<[string, string]>).map(([label, icon]) => (
-            <button key={label} className={activeNav === label ? "active" : ""} onClick={() => { setActiveNav(label); setMenuOpen(false); }}>
+            <button key={label} className={activeNav === label ? "active" : ""} onClick={() => setActiveNav(label)}>
               <Glyph name={icon} size={22} />
               <span>{label}</span>
               {label === "Home" && jobCounts.active > 0 && <b>{jobCounts.active}</b>}
             </button>
           ))}
+          <div className="studio-nav-account">
+            <UserButton appearance={{ elements: { avatarBox: "studio-nav-avatar" } }} />
+            <span>Account</span>
+          </div>
         </nav>
       </div>
       {showQueue && (
