@@ -86,31 +86,29 @@ function AssetImage({ url }: { url: string }) {
   return <img src={direct ? url : ticketURL} alt="" loading="lazy" crossOrigin={direct ? undefined : "anonymous"} referrerPolicy="no-referrer" onError={() => direct ? setFailed(true) : setDirect(true)} />;
 }
 
-function FeedArtwork({ item }: { item: FeedItem }) {
+function FeedArtwork({ item, active }: { item: FeedItem; active: boolean }) {
   const frames = useMemo(
     () => item.siteID === "allpornstream" ? feedPreviewFrames(item) : item.thumbnailURL ? [item.thumbnailURL] : [],
     [item],
   );
-  const [hovered, setHovered] = useState(false);
   const [frameIndex, setFrameIndex] = useState(0);
 
   useEffect(() => {
-    const delay = feedPreviewDelay(hovered, frames.length);
+    if (!active) {
+      setFrameIndex(0);
+      return;
+    }
+    const delay = feedPreviewDelay(active, frames.length);
     if (delay === null) return;
     const timer = window.setInterval(() => setFrameIndex((current) => (current + 1) % frames.length), delay);
     return () => window.clearInterval(timer);
-  }, [frames.length, hovered]);
+  }, [active, frames.length]);
 
-  const stop = () => {
-    setHovered(false);
-    setFrameIndex(0);
-  };
-
-  return <div className="thumb rotating-thumb" onMouseEnter={() => setHovered(true)} onMouseLeave={stop}>
+  return <div className="thumb rotating-thumb">
     {frames.length ? frames.map((url, index) => (
       <span className={`thumb-frame ${index === frameIndex ? "active" : ""}`} key={url}><AssetImage url={url} /></span>
     )) : <span className="no-preview">No preview</span>}
-    {hovered && frames.length > 1 && <span className="thumb-progress" aria-hidden="true">{frames.map((url, index) => <i className={index === frameIndex ? "active" : ""} key={url} />)}</span>}
+    {active && frames.length > 1 && <span className="thumb-progress" aria-hidden="true">{frames.map((url, index) => <i className={index === frameIndex ? "active" : ""} key={url} />)}</span>}
   </div>;
 }
 
@@ -160,6 +158,7 @@ export function WatchApp({
   const [savedSource, setSavedSource] = useState("");
   const [queueingSource, setQueueingSource] = useState("");
   const [selection, setSelection] = useState<Set<string>>(new Set());
+  const [hoveredFeedItem, setHoveredFeedItem] = useState("");
   const [watchSelection, setWatchSelection] = useState<Set<string>>(new Set());
   const [watchQuery, setWatchQuery] = useState("");
   const [watchStatus, setWatchStatus] = useState<"all" | "unwatched" | "watched">("all");
@@ -616,8 +615,8 @@ export function WatchApp({
       </section>
       {busy && !page.items.length
         ? <section className="grid skeleton-grid" aria-label="Loading feed">{Array.from({ length: 6 }, (_, index) => <div className="skeleton-card" key={index} />)}</section>
-        : <motion.section className="grid" initial="hidden" animate="shown" variants={{ shown: { transition: { staggerChildren: reducedMotion ? 0 : .035 } } }}>{page.items.map((item, index) => <motion.article layout className={`card card-${index % 7} ${selection.has(itemKey(item)) ? "selected" : ""}`} key={`${item.siteID}:${item.id}`} variants={{ hidden: { opacity: 0, y: reducedMotion ? 0 : 18, scale: reducedMotion ? 1 : .985 }, shown: { opacity: 1, y: 0, scale: 1 } }} transition={{ duration: reducedMotion ? .12 : .34 }}>
-          <FeedArtwork item={item} />
+        : <motion.section className="grid" initial="hidden" animate="shown" variants={{ shown: { transition: { staggerChildren: reducedMotion ? 0 : .035 } } }}>{page.items.map((item, index) => <motion.article layout className={`card card-${index % 7} ${selection.has(itemKey(item)) ? "selected" : ""}`} key={`${item.siteID}:${item.id}`} onMouseEnter={() => setHoveredFeedItem(itemKey(item))} onMouseLeave={() => setHoveredFeedItem((current) => current === itemKey(item) ? "" : current)} onFocusCapture={() => setHoveredFeedItem(itemKey(item))} onBlurCapture={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) setHoveredFeedItem((current) => current === itemKey(item) ? "" : current); }} variants={{ hidden: { opacity: 0, y: reducedMotion ? 0 : 18, scale: reducedMotion ? 1 : .985 }, shown: { opacity: 1, y: 0, scale: 1 } }} transition={{ duration: reducedMotion ? .12 : .34 }}>
+          <FeedArtwork item={item} active={hoveredFeedItem === itemKey(item)} />
           <div className="card-scrim" />
           <button className="card-select" onClick={() => toggleSelection(item)} aria-pressed={selection.has(itemKey(item))} aria-label={`${selection.has(itemKey(item)) ? "Deselect" : "Select"} ${item.title}`}>{selection.has(itemKey(item)) ? "✓" : ""}</button>
           <div className="card-badge"><span />{sites.find((value) => value.id === item.siteID)?.displayName ?? item.siteID}</div>
