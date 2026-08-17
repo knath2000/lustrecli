@@ -307,14 +307,30 @@ public struct StaticProviderResolver: Sendable {
     private func resolveStreamTape(url: URL) async throws -> ProviderResolution {
         let page = try await fetchProviderPage(url, headers: htmlHeaders(referer: URL(string: "https://streamtape.com/")))
         let html = normalize(page.body)
-        guard let candidate = streamTapeCandidate(in: html, relativeTo: page.finalURL) else {
-            throw ProviderResolverError.noMediaFound
+        let candidates = streamTapeCandidates(in: html, relativeTo: page.finalURL)
+        guard !candidates.isEmpty else {
+            throw ProviderResolverError.network(streamTapeCandidateFailure(in: html))
         }
-        let mediaPage = candidate.path.contains("/get_video")
-            ? try await fetchProviderPage(candidate, headers: htmlHeaders(referer: page.finalURL))
-            : nil
-        let mediaURL = mediaPage?.finalURL ?? candidate
-        guard isStreamTapeMediaURL(mediaURL) else { throw ProviderResolverError.noMediaFound }
+
+        var mediaURL: URL?
+        var failures: [String] = []
+        for candidate in candidates {
+            if isTapeContentMediaURL(candidate) {
+                mediaURL = candidate
+                break
+            }
+            do {
+                mediaURL = try await resolveStreamTapeRedirect(candidate, referer: page.finalURL)
+                break
+            } catch {
+                failures.append(error.localizedDescription)
+            }
+        }
+        guard let mediaURL else {
+            throw ProviderResolverError.network(
+                failures.last ?? "StreamTape token response did not redirect to approved media."
+            )
+        }
         let headers = ["User-Agent": NetworkConstants.chromeUserAgent, "Referer": page.finalURL.absoluteString]
         return ProviderResolution(
             sourcePageURL: url,
@@ -324,6 +340,45 @@ public struct StaticProviderResolver: Sendable {
             qualities: [ResolvedQuality(label: "Video", url: mediaURL, headers: headers, resolutionMethod: "Static StreamTape resolver")],
             trace: ["Fetched \(page.finalURL.host ?? "StreamTape") static page.", "Resolved static StreamTape media configuration."]
         )
+    }
+
+    private func resolveStreamTapeRedirect(_ candidate: URL, referer: URL) async throws -> URL {
+        guard isStreamTapeGetVideoURL(candidate) else {
+            throw ProviderResolverError.network("StreamTape candidate used a rejected host or path.")
+        }
+        let requestURL = streamTapeStreamingURL(candidate)
+        let headers = mediaHeaders(referer: referer)
+
+        do {
+            return try await probeStreamTapeRedirect(
+                ProviderHTTPRequest(url: requestURL, method: "HEAD", headers: headers)
+            )
+        } catch {
+            var rangedHeaders = headers
+            rangedHeaders["Range"] = "bytes=0-0"
+            do {
+                return try await probeStreamTapeRedirect(
+                    ProviderHTTPRequest(url: requestURL, headers: rangedHeaders)
+                )
+            } catch {
+                throw ProviderResolverError.network("StreamTape redirect failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func probeStreamTapeRedirect(_ request: ProviderHTTPRequest) async throws -> URL {
+        guard URLSafetyPolicy.isAllowed(request.url) else { throw ProviderResolverError.invalidURL }
+        let page = try await requestFetch(request)
+        guard (200...299).contains(page.statusCode) else {
+            throw ProviderResolverError.network("StreamTape token request returned HTTP \(page.statusCode).")
+        }
+        guard URLSafetyPolicy.isAllowed(page.finalURL), isTapeContentMediaURL(page.finalURL) else {
+            if page.finalURL == request.url {
+                throw ProviderResolverError.network("StreamTape token response did not redirect to media.")
+            }
+            throw ProviderResolverError.network("StreamTape redirect resolved to a rejected host.")
+        }
+        return page.finalURL
     }
 
     private func fetchProviderPage(_ url: URL, headers: [String: String]) async throws -> HTTPPage {
@@ -391,10 +446,14 @@ public struct StaticProviderResolver: Sendable {
         do {
             let (data, response) = try await session.data(for: request)
             guard let http = response as? HTTPURLResponse,
-                  URLSafetyPolicy.isAllowed(http.url ?? url),
-                  let body = String(data: data, encoding: .utf8) else {
+                  URLSafetyPolicy.isAllowed(http.url ?? url) else {
                 throw ProviderResolverError.network("Provider returned an invalid response.")
             }
+            let isProbe = providerRequest.method == "HEAD" || providerRequest.headers["Range"] == "bytes=0-0"
+            guard isProbe || String(data: data, encoding: .utf8) != nil else {
+                throw ProviderResolverError.network("Provider returned an invalid response.")
+            }
+            let body = isProbe ? "" : String(data: data, encoding: .utf8)!
             return HTTPPage(body: body, finalURL: http.url ?? url, statusCode: http.statusCode)
         } catch let error as ProviderResolverError {
             throw error
@@ -553,7 +612,8 @@ private func mixDropFallbackMirrorURL(for url: URL) -> URL? {
 
 private func isStreamTapeHost(_ host: String?) -> Bool {
     guard let host = host?.lowercased() else { return false }
-    return host == "streamtape.com" || host == "streamtape.net" || host.hasSuffix(".streamtape.com") || host.hasSuffix(".streamtape.net")
+    return host == "streamtape.com" || host == "streamtape.net" || host == "streamta.pe"
+        || host.hasSuffix(".streamtape.com") || host.hasSuffix(".streamtape.net") || host.hasSuffix(".streamta.pe")
 }
 
 private func isCloudAtaMediaURL(_ url: URL) -> Bool {
@@ -772,20 +832,228 @@ private func isMixDropMediaURL(_ url: URL) -> Bool {
     return segments.count >= 3 && segments[0] == "d" && !segments[1].isEmpty && !segments[2].isEmpty
 }
 
-private func streamTapeCandidate(in html: String, relativeTo pageURL: URL) -> URL? {
-    let patterns = [
-        #"sources\s*:\s*\[\{file\s*:\s*['\"]([^'\"]+)['\"]"#,
-        #"data-src\s*=\s*['\"]([^'\"]+)['\"]"#,
-        #"(?:video_url|url)\s*[=:]\s*['\"]([^'\"]*/get_video[^'\"]*)['\"]"#,
-        #"(https?://[^\"'\s<>]*streamtape[^\"'\s<>]*/get_video[^\"'\s<>]*)"#
-    ]
-    guard let raw = firstMatch(patterns, in: html) else { return nil }
-    return URL(string: raw.replacingOccurrences(of: "\\/", with: "/"), relativeTo: pageURL)?.absoluteURL
+private let streamTapeLinkIDs = ["ideoolink", "botlink", "robotlink", "captchalink", "norobotlink", "ideoooolink"]
+
+private func streamTapeCandidateFailure(in html: String) -> String {
+    if html.range(of: #"document\.getElementById\(.*?\.innerHTML\s*="#, options: .regularExpression) != nil,
+       html.contains("get_video") {
+        return "StreamTape player assignment contained a malformed string expression."
+    }
+    if html.range(of: #"https?://[^\"'\s<>]+/get_video"#, options: .regularExpression) != nil {
+        return "StreamTape player exposed a media candidate on a rejected host."
+    }
+    return "StreamTape player did not expose a trusted media link."
 }
 
-private func isStreamTapeMediaURL(_ url: URL) -> Bool {
-    let host = url.host?.lowercased() ?? ""
-    return host == "tapecontent.net" || host.hasSuffix(".tapecontent.net")
-        || host == "streamtape.com" || host == "streamtape.net" || host == "streamta.pe"
-        || host.hasSuffix(".streamtape.com") || host.hasSuffix(".streamtape.net") || host.hasSuffix(".streamta.pe")
+private func streamTapeCandidates(in html: String, relativeTo pageURL: URL) -> [URL] {
+    var values: [(Int, String)] = []
+    let assignmentPattern = #"document\.getElementById\(\s*['"]([^'"]+)['"]\s*\)\.innerHTML\s*=\s*(.*?);"#
+    if let regex = try? NSRegularExpression(pattern: assignmentPattern, options: [.caseInsensitive, .dotMatchesLineSeparators]) {
+        for (index, match) in regex.matches(in: html, range: NSRange(html.startIndex..., in: html)).enumerated() {
+            guard let idRange = Range(match.range(at: 1), in: html),
+                  let expressionRange = Range(match.range(at: 2), in: html) else { continue }
+            let id = String(html[idRange]).lowercased()
+            let expression = String(html[expressionRange])
+            guard streamTapeLinkIDs.contains(id) || expression.contains("get_video"),
+                  let value = evaluateStreamTapeExpression(expression) else { continue }
+            values.append((streamTapeLinkIDs.firstIndex(of: id) ?? streamTapeLinkIDs.count + index, value))
+        }
+    }
+
+    for (index, pattern) in [
+        #"sources\s*:\s*\[\{file\s*:\s*['"]([^'"]+)['"]"#,
+        #"data-src\s*=\s*['"]([^'"]+)['"]"#
+    ].enumerated() {
+        for value in allMatches(pattern, in: html) { values.append((100 + index, value)) }
+    }
+    for (index, id) in streamTapeLinkIDs.enumerated() {
+        let pattern = #"id\s*=\s*['"]\#(NSRegularExpression.escapedPattern(for: id))['"][^>]*>(.*?)<"#
+        for value in allMatches(pattern, in: html, options: [.caseInsensitive, .dotMatchesLineSeparators]) {
+            values.append((200 + index, value))
+        }
+    }
+    for value in allMatches(#"(?:video_url|url)\s*[=:]\s*['"]([^'"]+)['"]"#, in: html) {
+        values.append((300, value))
+    }
+
+    var seen = Set<String>()
+    return values.sorted { $0.0 < $1.0 }.compactMap { _, raw in
+        guard let url = normalizeStreamTapeURL(raw, relativeTo: pageURL),
+              seen.insert(url.absoluteString).inserted else { return nil }
+        return url
+    }
+}
+
+private func evaluateStreamTapeExpression(_ expression: String) -> String? {
+    let parts = splitStreamTapeExpression(expression)
+    guard !parts.isEmpty else { return nil }
+    var result = ""
+    for part in parts {
+        guard let value = evaluateStreamTapeTerm(part) else { return nil }
+        result += value
+    }
+    return result
+}
+
+private func splitStreamTapeExpression(_ expression: String) -> [String] {
+    var parts: [String] = []
+    var current = ""
+    var quote: Character?
+    var escaped = false
+    var depth = 0
+    for character in expression {
+        if escaped {
+            current.append(character)
+            escaped = false
+            continue
+        }
+        if character == "\\", quote != nil {
+            current.append(character)
+            escaped = true
+            continue
+        }
+        if character == "'" || character == "\"" {
+            quote = quote == nil ? character : (quote == character ? nil : quote)
+            current.append(character)
+            continue
+        }
+        if quote == nil {
+            if character == "(" { depth += 1 }
+            if character == ")" { depth = max(0, depth - 1) }
+            if character == "+", depth == 0 {
+                parts.append(current.trimmingCharacters(in: .whitespacesAndNewlines))
+                current = ""
+                continue
+            }
+        }
+        current.append(character)
+    }
+    let tail = current.trimmingCharacters(in: .whitespacesAndNewlines)
+    if !tail.isEmpty { parts.append(tail) }
+    return parts
+}
+
+private func evaluateStreamTapeTerm(_ term: String) -> String? {
+    let text = term.trimmingCharacters(in: .whitespacesAndNewlines)
+    var index = text.startIndex
+    func skipWhitespace() {
+        while index < text.endIndex, text[index].isWhitespace { index = text.index(after: index) }
+    }
+    skipWhitespace()
+    var wrapped = false
+    if index < text.endIndex, text[index] == "(" {
+        wrapped = true
+        index = text.index(after: index)
+        skipWhitespace()
+    }
+    guard index < text.endIndex, text[index] == "'" || text[index] == "\"" else { return nil }
+    let quote = text[index]
+    index = text.index(after: index)
+    var value = ""
+    var escaped = false
+    var closed = false
+    while index < text.endIndex {
+        let character = text[index]
+        index = text.index(after: index)
+        if escaped {
+            value.append(character)
+            escaped = false
+        } else if character == "\\" {
+            escaped = true
+        } else if character == quote {
+            closed = true
+            break
+        } else {
+            value.append(character)
+        }
+    }
+    guard closed else { return nil }
+    skipWhitespace()
+    if wrapped {
+        guard index < text.endIndex, text[index] == ")" else { return nil }
+        index = text.index(after: index)
+    }
+    while true {
+        skipWhitespace()
+        guard index < text.endIndex else { return value }
+        guard text[index...].hasPrefix(".substring(") else { return nil }
+        index = text.index(index, offsetBy: ".substring(".count)
+        skipWhitespace()
+        let startIndex = index
+        while index < text.endIndex, text[index].isNumber { index = text.index(after: index) }
+        guard startIndex < index, let start = Int(text[startIndex..<index]) else { return nil }
+        skipWhitespace()
+        var end: Int?
+        if index < text.endIndex, text[index] == "," {
+            index = text.index(after: index)
+            skipWhitespace()
+            let endIndex = index
+            while index < text.endIndex, text[index].isNumber { index = text.index(after: index) }
+            guard endIndex < index, let parsed = Int(text[endIndex..<index]) else { return nil }
+            end = parsed
+            skipWhitespace()
+        }
+        guard index < text.endIndex, text[index] == ")" else { return nil }
+        index = text.index(after: index)
+        let characters = Array(value)
+        let upper = min(end ?? characters.count, characters.count)
+        value = start < upper ? String(characters[start..<upper]) : ""
+    }
+}
+
+private func normalizeStreamTapeURL(_ raw: String, relativeTo pageURL: URL) -> URL? {
+    let value = raw.replacingOccurrences(of: "\\/", with: "/")
+        .replacingOccurrences(of: "&amp;", with: "&")
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    let normalized: String
+    if value.hasPrefix("https://") {
+        normalized = value
+    } else if value.hasPrefix("//") {
+        normalized = "https:" + value
+    } else if value.hasPrefix("/streamtape.com/") || value.hasPrefix("/streamtape.net/") || value.hasPrefix("/streamta.pe/") {
+        normalized = "https:/" + value
+    } else if value.hasPrefix("streamtape.com/") || value.hasPrefix("streamtape.net/") || value.hasPrefix("streamta.pe/") {
+        normalized = "https://" + value
+    } else if value.hasPrefix("/get_video") {
+        normalized = "https://\(pageURL.host ?? "streamtape.com")\(value)"
+    } else if value.hasPrefix("get_video") {
+        normalized = "https://\(pageURL.host ?? "streamtape.com")/\(value)"
+    } else {
+        return nil
+    }
+    guard let url = URL(string: normalized), url.scheme == "https",
+          isStreamTapeGetVideoURL(url) || isTapeContentMediaURL(url) else { return nil }
+    return isStreamTapeGetVideoURL(url) ? streamTapeStreamingURL(url) : url
+}
+
+private func streamTapeStreamingURL(_ url: URL) -> URL {
+    guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return url }
+    var items = components.queryItems ?? []
+    if !items.contains(where: { $0.name == "stream" }) {
+        items.append(URLQueryItem(name: "stream", value: "1"))
+    }
+    components.queryItems = items
+    return components.url ?? url
+}
+
+private func isStreamTapeGetVideoURL(_ url: URL) -> Bool {
+    isStreamTapeHost(url.host) && url.scheme?.lowercased() == "https" && url.path.contains("/get_video")
+}
+
+private func isTapeContentMediaURL(_ url: URL) -> Bool {
+    guard url.scheme?.lowercased() == "https", let host = url.host?.lowercased() else { return false }
+    return (host == "tapecontent.net" || host.hasSuffix(".tapecontent.net"))
+        && url.path.lowercased().contains(".mp4")
+}
+
+private func allMatches(
+    _ pattern: String,
+    in text: String,
+    options: NSRegularExpression.Options = [.caseInsensitive]
+) -> [String] {
+    guard let regex = try? NSRegularExpression(pattern: pattern, options: options) else { return [] }
+    return regex.matches(in: text, range: NSRange(text.startIndex..., in: text)).compactMap { match in
+        guard match.numberOfRanges > 1, let range = Range(match.range(at: 1), in: text) else { return nil }
+        return String(text[range])
+    }
 }

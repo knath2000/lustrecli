@@ -375,49 +375,192 @@ final class StaticProviderResolverTests: XCTestCase {
     }
 
     func testResolvesStreamTapeStaticMediaConfiguration() async throws {
-        let resolver = StaticProviderResolver(
-            fetch: { url, _ in
-                HTTPPage(
-                    body: #"<title>Tape</title><script>sources:[{file: "https://streamta.pe/get_video?id=abc"}]</script>"#,
-                    finalURL: url,
-                    statusCode: 200
-                )
-            },
-            randomSuffix: { "unused" },
-            nowMilliseconds: { "0" }
-        )
-
-        let resolution = try await resolver.resolve(url: URL(string: "https://streamtape.com/e/xyz")!)
-
-        XCTAssertEqual(resolution.provider, .streamTape)
-        XCTAssertEqual(resolution.qualities.first?.url.absoluteString, "https://streamta.pe/get_video?id=abc")
-        XCTAssertEqual(resolution.qualities.first?.resolutionMethod, "Static StreamTape resolver")
-    }
-
-    func testResolvesStreamTapeHiddenGetVideoLinkAfterRedirect() async throws {
-        let embedURL = URL(string: "https://streamtape.com/e/abc")!
-        let getVideoURL = URL(string: "https://streamtape.com/get_video?id=abc&token=example")!
+        let embedURL = URL(string: "https://streamtape.com/e/xyz")!
         let mediaURL = URL(string: "https://delivery.tapecontent.net/radosgw/abc/video.mp4")!
         let resolver = StaticProviderResolver(
-            fetch: { url, headers in
-                if url == embedURL {
+            requestFetch: { request in
+                if request.url == embedURL {
                     return HTTPPage(
-                        body: #"<span id="captchalink">https://streamtape.com/get_video?id=abc&token=example</span>"#,
-                        finalURL: url,
+                        body: #"<title>Tape</title><script>sources:[{file: "https://streamta.pe/get_video?id=abc"}]</script>"#,
+                        finalURL: request.url,
                         statusCode: 200
                     )
                 }
-                XCTAssertEqual(url, getVideoURL)
-                XCTAssertEqual(headers["Referer"], embedURL.absoluteString)
+                XCTAssertEqual(request.method, "HEAD")
+                XCTAssertEqual(request.url.absoluteString, "https://streamta.pe/get_video?id=abc&stream=1")
                 return HTTPPage(body: "", finalURL: mediaURL, statusCode: 200)
-            },
-            randomSuffix: { "unused" },
-            nowMilliseconds: { "0" }
+            }
+        )
+
+        let resolution = try await resolver.resolve(url: embedURL)
+
+        XCTAssertEqual(resolution.provider, .streamTape)
+        XCTAssertEqual(resolution.qualities.first?.url, mediaURL)
+        XCTAssertEqual(resolution.qualities.first?.resolutionMethod, "Static StreamTape resolver")
+    }
+
+    func testStreamTapeCurrentAssignmentWinsOverDecoyHiddenTokens() async throws {
+        let embedURL = URL(string: "https://streamtape.com/e/abc")!
+        let mediaURL = URL(string: "https://delivery.tapecontent.net/radosgw/abc/video.mp4")!
+        let resolver = StaticProviderResolver(
+            requestFetch: { request in
+                if request.url == embedURL {
+                    return HTTPPage(
+                        body: #"""
+                        <div id="ideoolink">/streamtape.com/get_video?id=abc&token=decoy-one</div>
+                        <span id="botlink">/streamtape.com/get_video?id=abc&token=decoy-two</span>
+                        <script>
+                        document.getElementById('ideoolink').innerHTML = "/streamtape.c" + ''+ ('xcdbom/get_video?id=abc&token=current').substring(1).substring(2);
+                        document.getElementById('botlink').innerHTML = '//streamtape.'+ ('xyzacom/get_video?id=abc&token=current').substring(4);
+                        document.getElementById('robotlink').innerHTML = '//streamtape.'+ ('xcdcom/get_video?id=abc&token=current').substring(2).substring(1);
+                        </script>
+                        """#,
+                        finalURL: request.url,
+                        statusCode: 200
+                    )
+                }
+                XCTAssertEqual(request.method, "HEAD")
+                XCTAssertEqual(request.url.absoluteString, "https://streamtape.com/get_video?id=abc&token=current&stream=1")
+                XCTAssertEqual(request.headers["Referer"], embedURL.absoluteString)
+                XCTAssertEqual(request.headers["User-Agent"], NetworkConstants.chromeUserAgent)
+                return HTTPPage(body: "", finalURL: mediaURL, statusCode: 200)
+            }
         )
 
         let resolution = try await resolver.resolve(url: embedURL)
 
         XCTAssertEqual(resolution.qualities.first?.url, mediaURL)
         XCTAssertEqual(resolution.qualities.first?.headers["Referer"], embedURL.absoluteString)
+    }
+
+    func testStreamTapeFallsBackToOneByteRangeWhenHeadFails() async throws {
+        let embedURL = URL(string: "https://streamtape.com/e/abc")!
+        let mediaURL = URL(string: "https://delivery.tapecontent.net/radosgw/abc/video.mp4")!
+        let resolver = StaticProviderResolver(
+            requestFetch: { request in
+                if request.url == embedURL {
+                    return HTTPPage(
+                        body: #"<span id="captchalink">/get_video?id=abc&token=current</span>"#,
+                        finalURL: request.url,
+                        statusCode: 200
+                    )
+                }
+                XCTAssertEqual(request.headers["Referer"], embedURL.absoluteString)
+                XCTAssertEqual(request.headers["User-Agent"], NetworkConstants.chromeUserAgent)
+                if request.method == "HEAD" {
+                    return HTTPPage(body: "", finalURL: request.url, statusCode: 405)
+                }
+                XCTAssertEqual(request.method, "GET")
+                XCTAssertEqual(request.headers["Range"], "bytes=0-0")
+                return HTTPPage(body: "", finalURL: mediaURL, statusCode: 206)
+            }
+        )
+
+        let resolution = try await resolver.resolve(url: embedURL)
+
+        XCTAssertEqual(resolution.qualities.first?.url, mediaURL)
+    }
+
+    func testStreamTapeRejectsNonIntegerExpressionAndMaliciousHiddenHost() async throws {
+        let embedURL = URL(string: "https://streamtape.com/e/abc")!
+        let resolver = StaticProviderResolver(
+            requestFetch: { request in
+                XCTAssertEqual(request.url, embedURL)
+                return HTTPPage(
+                    body: #"""
+                    <div id="botlink">https://evil.example/get_video?id=abc</div>
+                    <script>
+                    document.getElementById('botlink').innerHTML = '//streamtape.' + ('xyzacom/get_video?id=abc').substring(window.start);
+                    </script>
+                    """#,
+                    finalURL: request.url,
+                    statusCode: 200
+                )
+            }
+        )
+
+        do {
+            _ = try await resolver.resolve(url: embedURL)
+            XCTFail("Expected malformed expression rejection")
+        } catch let error as ProviderResolverError {
+            XCTAssertTrue(error.localizedDescription.contains("malformed"))
+        }
+    }
+
+    func testStreamTapeRejectsUnrelatedRedirectHost() async throws {
+        let embedURL = URL(string: "https://streamtape.com/e/abc")!
+        let resolver = StaticProviderResolver(
+            requestFetch: { request in
+                if request.url == embedURL {
+                    return HTTPPage(
+                        body: #"<span id="captchalink">/get_video?id=abc&token=current</span>"#,
+                        finalURL: request.url,
+                        statusCode: 200
+                    )
+                }
+                return HTTPPage(
+                    body: "",
+                    finalURL: URL(string: "https://media.example/video.mp4")!,
+                    statusCode: 200
+                )
+            }
+        )
+
+        do {
+            _ = try await resolver.resolve(url: embedURL)
+            XCTFail("Expected unrelated redirect rejection")
+        } catch let error as ProviderResolverError {
+            XCTAssertTrue(error.localizedDescription.contains("rejected host"))
+        }
+    }
+
+    func testStreamTapeRejectsPrivateNetworkRedirect() async throws {
+        let embedURL = URL(string: "https://streamtape.com/e/abc")!
+        let resolver = StaticProviderResolver(
+            requestFetch: { request in
+                if request.url == embedURL {
+                    return HTTPPage(
+                        body: #"<span id="captchalink">/get_video?id=abc&token=current</span>"#,
+                        finalURL: request.url,
+                        statusCode: 200
+                    )
+                }
+                return HTTPPage(
+                    body: "",
+                    finalURL: URL(string: "https://127.0.0.1/video.mp4")!,
+                    statusCode: 200
+                )
+            }
+        )
+
+        do {
+            _ = try await resolver.resolve(url: embedURL)
+            XCTFail("Expected private redirect rejection")
+        } catch let error as ProviderResolverError {
+            XCTAssertTrue(error.localizedDescription.contains("redirect failed"))
+        }
+    }
+
+    func testStreamTapeRejectsHTMLTokenResponseWithoutRedirect() async throws {
+        let embedURL = URL(string: "https://streamtape.com/e/abc")!
+        let resolver = StaticProviderResolver(
+            requestFetch: { request in
+                if request.url == embedURL {
+                    return HTTPPage(
+                        body: #"<span id="captchalink">/get_video?id=abc&token=expired</span>"#,
+                        finalURL: request.url,
+                        statusCode: 200
+                    )
+                }
+                return HTTPPage(body: "<html>invalid token</html>", finalURL: request.url, statusCode: 200)
+            }
+        )
+
+        do {
+            _ = try await resolver.resolve(url: embedURL)
+            XCTFail("Expected invalid token response rejection")
+        } catch let error as ProviderResolverError {
+            XCTAssertTrue(error.localizedDescription.contains("did not redirect"))
+        }
     }
 }
