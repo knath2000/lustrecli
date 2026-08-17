@@ -189,6 +189,23 @@ public actor AgentService {
         try await jobs.allJobs()
     }
 
+    public func reorderQueuedJobs(_ ids: [UUID]) async throws -> [DownloadJob] {
+        let allJobs = try await jobs.allJobs()
+        let queuedIDs = Set(allJobs.filter { $0.status == .queued }.map(\.id))
+        var orderedIDs = ids.filter { queuedIDs.contains($0) }
+        orderedIDs.append(contentsOf: allJobs
+            .filter { $0.status == .queued && !orderedIDs.contains($0.id) }
+            .sorted { queueOrder($0, $1) }
+            .map(\.id))
+        for (priority, id) in orderedIDs.enumerated() {
+            guard var job = allJobs.first(where: { $0.id == id }) else { continue }
+            job.queuePriority = priority
+            job.updatedAt = .now
+            try await jobs.update(job)
+        }
+        return try await jobs.allJobs()
+    }
+
     public func feedSites() async -> [FeedSite] {
         let sites = feed.sites()
         return await pornHubAuth.status().state == .signedIn ? sites + FeedSite.authenticatedPornHub : sites
@@ -315,6 +332,11 @@ public actor AgentService {
             assistedResolution: request.assistedResolution,
             destination: destination
         )
+        job.queuePriority = (try await jobs.allJobs())
+            .filter { $0.status == .queued }
+            .compactMap(\.queuePriority)
+            .max()
+            .map { $0 + 1 } ?? 0
         let queueMessage = if RemoteDestination.googleDriveProfileID(from: destination) != nil {
             "Queued for Google Drive upload."
         } else if RemoteDestination.webDAVProfileID(from: destination) != nil {
@@ -644,10 +666,18 @@ public actor AgentService {
               let allJobs = try? await jobs.allJobs() else { return }
         let queued = allJobs
             .filter { $0.status == .queued && activeDownloadTasks[$0.id] == nil }
-            .sorted { $0.createdAt < $1.createdAt }
+            .sorted(by: queueOrder)
         for job in queued where activeDownloadTasks.count < maximumConcurrentDownloads {
             startDownload(job.id)
         }
+    }
+
+    private func queueOrder(_ left: DownloadJob, _ right: DownloadJob) -> Bool {
+        if left.queuePriority != right.queuePriority {
+            return (left.queuePriority ?? Int.max) < (right.queuePriority ?? Int.max)
+        }
+        if left.createdAt != right.createdAt { return left.createdAt < right.createdAt }
+        return left.id.uuidString < right.id.uuidString
     }
 
     private func ownsDownload(_ id: UUID, taskID: UUID?) -> Bool {

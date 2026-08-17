@@ -260,6 +260,7 @@ public struct DownloadJob: Codable, Identifiable, Equatable, Sendable {
     public var attempts: Int
     public var logs: [JobLogEntry]?
     public var completionArtifact: JobCompletionArtifact?
+    public var queuePriority: Int?
     public let createdAt: Date
     public var updatedAt: Date
 
@@ -286,6 +287,7 @@ public struct DownloadJob: Codable, Identifiable, Equatable, Sendable {
         attempts: Int = 0,
         logs: [JobLogEntry]? = nil,
         completionArtifact: JobCompletionArtifact? = nil,
+        queuePriority: Int? = nil,
         createdAt: Date = .now,
         updatedAt: Date = .now
     ) {
@@ -311,6 +313,7 @@ public struct DownloadJob: Codable, Identifiable, Equatable, Sendable {
         self.attempts = attempts
         self.logs = logs
         self.completionArtifact = completionArtifact
+        self.queuePriority = queuePriority
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }

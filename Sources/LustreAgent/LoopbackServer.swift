@@ -165,6 +165,10 @@ public final class LoopbackServer: @unchecked Sendable {
                 let input = try decoder.decode(CreateJobRequest.self, from: request.body)
                 return json(status: 201, value: try await service.createJob(input))
             }
+            if request.method == "POST", request.path == "/v1/jobs/order" {
+                let input = try decoder.decode(JobOrderRequest.self, from: request.body)
+                return json(status: 200, value: try await service.reorderQueuedJobs(input.ids))
+            }
             if request.method == "DELETE", routePath.hasPrefix("/v1/jobs/") {
                 let segments = routePath.split(separator: "/")
                 guard segments.count == 3, let id = UUID(uuidString: String(segments[2])) else {
@@ -223,6 +227,10 @@ private struct ExtractRequest: Decodable {
 
 private struct ActionRequest: Decodable {
     let action: JobAction
+}
+
+private struct JobOrderRequest: Decodable {
+    let ids: [UUID]
 }
 
 private struct EntitlementProjectionRequest: Decodable {
