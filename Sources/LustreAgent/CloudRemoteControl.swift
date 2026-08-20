@@ -45,8 +45,9 @@ struct CloudRemoteCommand: Decodable {
         let tags: [String]?
         let collection: String?
         let favorite: Bool?
+        let jobIDs: [UUID]?
 
-        init(url: URL?, title: String? = nil, preferredQualityLabel: String?, destination: String?, deliveryProtocol: String?, jobID: UUID?, action: JobAction?, siteID: String?, query: String?, page: Int?, name: String?, baseURL: URL?, username: String?, remotePath: String?, allowInvalidCertificate: String?, profileID: UUID? = nil, path: String? = nil, urls: [URL]? = nil, itemID: UUID? = nil, tags: [String]? = nil, collection: String? = nil, favorite: Bool? = nil) {
+        init(url: URL?, title: String? = nil, preferredQualityLabel: String?, destination: String?, deliveryProtocol: String?, jobID: UUID?, action: JobAction?, siteID: String?, query: String?, page: Int?, name: String?, baseURL: URL?, username: String?, remotePath: String?, allowInvalidCertificate: String?, profileID: UUID? = nil, path: String? = nil, urls: [URL]? = nil, itemID: UUID? = nil, tags: [String]? = nil, collection: String? = nil, favorite: Bool? = nil, jobIDs: [UUID]? = nil) {
             self.url = url
             self.title = title
             self.preferredQualityLabel = preferredQualityLabel
@@ -69,6 +70,7 @@ struct CloudRemoteCommand: Decodable {
             self.tags = tags
             self.collection = collection
             self.favorite = favorite
+            self.jobIDs = jobIDs
         }
     }
 }
@@ -328,10 +330,11 @@ struct CloudRemoteJobStatus: Codable {
     let totalBytes: Int64?
     let phase: String?
     let attempts: Int
+    let queuePriority: Int?
     let updatedAt: Date
 
     init(_ job: DownloadJob) {
-        id = job.id; sourcePageURL = job.sourcePageURL; displayName = job.title ?? (job.sourcePageURL.deletingLastPathComponent().lastPathComponent.isEmpty ? "Download" : job.sourcePageURL.lastPathComponent.removingPercentEncoding ?? job.sourcePageURL.lastPathComponent); preferredQualityLabel = job.preferredQualityLabel; status = job.status.rawValue; progress = job.progress; downloadedBytes = job.downloadedBytes; totalBytes = job.totalBytes; phase = job.transferPhase?.rawValue; attempts = job.attempts; updatedAt = job.updatedAt
+        id = job.id; sourcePageURL = job.sourcePageURL; displayName = job.title ?? (job.sourcePageURL.deletingLastPathComponent().lastPathComponent.isEmpty ? "Download" : job.sourcePageURL.lastPathComponent.removingPercentEncoding ?? job.sourcePageURL.lastPathComponent); preferredQualityLabel = job.preferredQualityLabel; status = job.status.rawValue; progress = job.progress; downloadedBytes = job.downloadedBytes; totalBytes = job.totalBytes; phase = job.transferPhase?.rawValue; attempts = job.attempts; queuePriority = job.queuePriority; updatedAt = job.updatedAt
     }
 }
 
@@ -582,6 +585,19 @@ actor CloudRemoteControl {
                 acknowledgement = CloudRemoteCommandAck(id: command.id, status: "completed", jobID: jobID, result: nil)
             } catch {
                 acknowledgement = CloudRemoteCommandAck(id: command.id, status: "failed", jobID: nil, result: nil)
+            }
+        case "jobs_reorder":
+            guard command.payload.deliveryProtocol == "gateway-v1",
+                  let jobIDs = command.payload.jobIDs,
+                  !jobIDs.isEmpty,
+                  jobIDs.count <= 50,
+                  Set(jobIDs).count == jobIDs.count
+            else { acknowledgement = CloudRemoteCommandAck(id: command.id, status: "failed", jobID: nil, result: nil, code: "invalid_request"); break }
+            do {
+                _ = try await service.reorderQueuedJobs(jobIDs)
+                acknowledgement = CloudRemoteCommandAck(id: command.id, status: "completed", jobID: nil, result: nil)
+            } catch {
+                acknowledgement = CloudRemoteCommandAck(id: command.id, status: "failed", jobID: nil, result: nil, code: "invalid_request")
             }
         case "feed_sites":
             acknowledgement = CloudRemoteCommandAck(id: command.id, status: "completed", jobID: nil, result: CloudRemoteResult(kind: "feed_sites", sites: await service.feedSites(), page: nil, destinations: nil))

@@ -96,7 +96,7 @@ final class StaticProviderResolverTests: XCTestCase {
             "https://s24.bigcdn.cc/pubs/6a61af23e66242.19596701/360.mp4"
         ])
         XCTAssertTrue(resolution.qualities.allSatisfy {
-            $0.headers["Referer"] == "https://hqporner.com/"
+            $0.headers["Referer"] == embedURL.absoluteString
                 && $0.headers["User-Agent"] == NetworkConstants.chromeUserAgent
         })
     }
@@ -138,7 +138,7 @@ final class StaticProviderResolverTests: XCTestCase {
             "https://cdn.example.com/video-720.mp4"
         ])
         XCTAssertTrue(resolution.qualities.allSatisfy {
-            $0.headers["Referer"] == "https://hqporner.com/"
+            $0.headers["Referer"] == embedURL.absoluteString
                 && $0.headers["User-Agent"] == NetworkConstants.chromeUserAgent
                 && $0.resolutionMethod == "Static mydaddy source resolver"
         })

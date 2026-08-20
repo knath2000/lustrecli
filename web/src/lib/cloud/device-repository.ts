@@ -507,6 +507,9 @@ export async function watchlistOwnsThumbnail(accountID: string, deviceID: string
 export async function jobActionCommand(accountID: string, deviceID: string, jobID: string, action: "pause" | "resume" | "cancel" | "retry") {
   return createCommand(accountID, deviceID, "job_action", { jobID, action, deliveryProtocol: "gateway-v1" });
 }
+export async function jobsReorderCommand(accountID: string, deviceID: string, jobIDs: string[]) {
+  return createCommand(accountID, deviceID, "jobs_reorder", { jobIDs, deliveryProtocol: "gateway-v1" });
+}
 async function createCommand(accountID: string, deviceID: string, kind: string, payload: Record<string, unknown>, id?: string) {
   const device = (await db.select({ id: lustreDevices.id }).from(lustreDevices).where(and(eq(lustreDevices.id, deviceID), eq(lustreDevices.accountID, accountID), isNull(lustreDevices.revokedAt))).limit(1))[0];
   if (!device) throw new DeviceContractError("device_not_found", "Device not found.");
@@ -649,7 +652,7 @@ export async function nextGatewayCommand(input: { deviceID: string; connectionID
           OR (${input.allowPornHubAuth} AND command.kind IN ('pornhub_auth_status', 'pornhub_auth_login', 'pornhub_auth_cancel', 'pornhub_auth_logout'))
           OR (${input.allowHomeWorkspace} AND command.kind IN ('home_status', 'extract_preview', 'feed_resolve'))
           OR (${input.allowLibrary} AND command.kind IN ('library_list', 'library_update', 'library_remove', 'library_verify'))
-          OR command.kind = 'job_action'
+          OR command.kind IN ('job_action', 'jobs_reorder')
         )
         AND command.status IN ('pending', 'running')
         AND expired_auth.id IS NULL
@@ -664,7 +667,7 @@ export async function nextGatewayCommand(input: { deviceID: string; connectionID
     WHERE command.id = candidate.id
     RETURNING command.id, command.kind, command.payload
   `);
-  const row = (result as unknown as { rows: Array<{ id: string; kind: "feed_sites" | "feed_page" | "destinations_list" | "gdrive_connect" | "gdrive_folders" | "gdrive_create_folder" | "gdrive_select_folder" | "gdrive_test" | "local_folder_status" | "local_folder_choose" | "local_folder_reset" | "queue_url" | "job_action" | "pornhub_auth_status" | "pornhub_auth_login" | "pornhub_auth_cancel" | "pornhub_auth_logout" | "home_status" | "extract_preview" | "feed_resolve" | "library_list" | "library_update" | "library_remove" | "library_verify"; payload: Record<string, unknown> }> }).rows[0];
+  const row = (result as unknown as { rows: Array<{ id: string; kind: "feed_sites" | "feed_page" | "destinations_list" | "gdrive_connect" | "gdrive_folders" | "gdrive_create_folder" | "gdrive_select_folder" | "gdrive_test" | "local_folder_status" | "local_folder_choose" | "local_folder_reset" | "queue_url" | "job_action" | "jobs_reorder" | "pornhub_auth_status" | "pornhub_auth_login" | "pornhub_auth_cancel" | "pornhub_auth_logout" | "home_status" | "extract_preview" | "feed_resolve" | "library_list" | "library_update" | "library_remove" | "library_verify"; payload: Record<string, unknown> }> }).rows[0];
   if (!row) return null;
   if (row.kind === "feed_sites") return { id: row.id, kind: "feed_sites" as const, payload: {} };
   if (row.kind === "destinations_list") return { id: row.id, kind: "destinations_list" as const, payload: {} };
@@ -674,6 +677,7 @@ export async function nextGatewayCommand(input: { deviceID: string; connectionID
   if (row.kind === "gdrive_folders" || row.kind === "gdrive_create_folder" || row.kind === "gdrive_select_folder") return { id: row.id, kind: row.kind, payload: { profileID: row.payload.profileID as string, path: row.payload.path as string, deliveryProtocol: "gateway-v1" as const } };
   if (row.kind === "queue_url") return { id: row.id, kind: "queue_url" as const, payload: { url: row.payload.url as string, ...(typeof row.payload.title === "string" ? { title: row.payload.title } : {}), destination: row.payload.destination as string, ...(typeof row.payload.preferredQualityLabel === "string" ? { preferredQualityLabel: row.payload.preferredQualityLabel } : {}), deliveryProtocol: "gateway-v1" as const } };
   if (row.kind === "job_action") return { id: row.id, kind: "job_action" as const, payload: { jobID: row.payload.jobID as string, action: row.payload.action as "pause" | "resume" | "cancel" | "retry", deliveryProtocol: "gateway-v1" as const } };
+  if (row.kind === "jobs_reorder") return { id: row.id, kind: "jobs_reorder" as const, payload: { jobIDs: row.payload.jobIDs as string[], deliveryProtocol: "gateway-v1" as const } };
   if (row.kind === "pornhub_auth_status" || row.kind === "pornhub_auth_login" || row.kind === "pornhub_auth_cancel" || row.kind === "pornhub_auth_logout") {
     return { id: row.id, kind: row.kind, payload: { deliveryProtocol: "gateway-v1" as const } };
   }
@@ -736,10 +740,10 @@ export async function recentCompletedFeedPageResults(accountID: string, deviceID
   const snapshot = (await db.select().from(lustreDeviceLibrarySnapshots).where(and(eq(lustreDeviceLibrarySnapshots.accountID, accountID), eq(lustreDeviceLibrarySnapshots.deviceID, deviceID))).limit(1))[0];
   return snapshot ? [...results, { result: { kind: "library_snapshot", library: { revision: snapshot.revision, page: 1, hasMore: false, items: snapshot.items } } }] : results;
 }
-export async function syncJobStatus(deviceID: string, jobs: Array<{ id: string; sourcePageURL?: string; displayName?: string; preferredQualityLabel?: string; status: string; progress?: number; downloadedBytes?: number; totalBytes?: number; phase?: string; attempts: number; updatedAt?: string }>) {
+export async function syncJobStatus(deviceID: string, jobs: Array<{ id: string; sourcePageURL?: string; displayName?: string; preferredQualityLabel?: string; status: string; progress?: number; downloadedBytes?: number; totalBytes?: number; phase?: string; attempts: number; queuePriority?: number; updatedAt?: string }>) {
   for (const job of jobs) {
     const updatedAt = job.updatedAt ? new Date(job.updatedAt) : now();
-    await db.insert(lustreDeviceJobStatus).values({ deviceID, jobID: job.id, sourcePageURL: job.sourcePageURL ?? null, displayName: job.displayName ?? "Download", preferredQualityLabel: job.preferredQualityLabel ?? null, status: job.status, progress: job.progress === undefined ? null : Math.round(job.progress * 10_000), downloadedBytes: job.downloadedBytes ?? null, totalBytes: job.totalBytes ?? null, phase: job.phase ?? null, attempts: job.attempts, updatedAt }).onConflictDoUpdate({ target: [lustreDeviceJobStatus.deviceID, lustreDeviceJobStatus.jobID], set: { sourcePageURL: job.sourcePageURL ?? null, displayName: job.displayName ?? "Download", preferredQualityLabel: job.preferredQualityLabel ?? null, status: job.status, progress: job.progress === undefined ? null : Math.round(job.progress * 10_000), downloadedBytes: job.downloadedBytes ?? null, totalBytes: job.totalBytes ?? null, phase: job.phase ?? null, attempts: job.attempts, updatedAt } });
+    await db.insert(lustreDeviceJobStatus).values({ deviceID, jobID: job.id, sourcePageURL: job.sourcePageURL ?? null, displayName: job.displayName ?? "Download", preferredQualityLabel: job.preferredQualityLabel ?? null, status: job.status, progress: job.progress === undefined ? null : Math.round(job.progress * 10_000), downloadedBytes: job.downloadedBytes ?? null, totalBytes: job.totalBytes ?? null, phase: job.phase ?? null, attempts: job.attempts, queuePriority: job.queuePriority ?? null, updatedAt }).onConflictDoUpdate({ target: [lustreDeviceJobStatus.deviceID, lustreDeviceJobStatus.jobID], set: { sourcePageURL: job.sourcePageURL ?? null, displayName: job.displayName ?? "Download", preferredQualityLabel: job.preferredQualityLabel ?? null, status: job.status, progress: job.progress === undefined ? null : Math.round(job.progress * 10_000), downloadedBytes: job.downloadedBytes ?? null, totalBytes: job.totalBytes ?? null, phase: job.phase ?? null, attempts: job.attempts, queuePriority: job.queuePriority ?? null, updatedAt } });
   }
 }
 export async function jobStatusForOwnedDevice(

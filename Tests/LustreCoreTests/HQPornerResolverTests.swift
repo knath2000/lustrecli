@@ -46,7 +46,7 @@ final class HQPornerResolverTests: XCTestCase {
         XCTAssertEqual(resolution.thumbnailURL?.absoluteString, "https://img.hqporner.com/poster.jpg")
         XCTAssertEqual(resolution.qualities.map(\.label), ["1080p", "720p"])
         XCTAssertTrue(resolution.qualities.allSatisfy {
-            $0.headers["Referer"] == "https://hqporner.com/"
+            $0.headers["Referer"] == embed.absoluteString
                 && $0.headers["User-Agent"] == NetworkConstants.chromeUserAgent
                 && $0.mediaKind == .direct
         })

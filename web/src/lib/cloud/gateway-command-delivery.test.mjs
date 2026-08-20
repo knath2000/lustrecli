@@ -79,6 +79,16 @@ test("command selection carries canonical job actions over base command delivery
   assert.equal((await invalid(request({ deviceID, connectionID, sequence: 17, correlationID: "job-action" }))).status, 400);
 });
 
+test("command selection carries a bounded unique queued download order", async () => {
+  process.env.LUSTRE_GATEWAY_RELAY_SECRET = secret;
+  const command = { id: deviceID, kind: "jobs_reorder", payload: { jobIDs: [deviceID, connectionID], deliveryProtocol: "gateway-v1" } };
+  const handler = gatewayCommandHandler(async () => command);
+  const response = await handler(request({ deviceID, connectionID, sequence: 18, correlationID: "jobs-reorder" }));
+  assert.deepEqual((await response.json()).command, command);
+  const duplicate = gatewayCommandHandler(async () => ({ ...command, payload: { ...command.payload, jobIDs: [deviceID, deviceID] } }));
+  assert.equal((await duplicate(request({ deviceID, connectionID, sequence: 19, correlationID: "jobs-reorder" }))).status, 400);
+});
+
 test("command selection gates PornHub auth and carries no session data", async () => {
   process.env.LUSTRE_GATEWAY_RELAY_SECRET = secret;
   const command = { id: deviceID, kind: "pornhub_auth_login", payload: { deliveryProtocol: "gateway-v1" } };

@@ -6,7 +6,7 @@ import { jsonError } from "@/lib/cloud/route";
 type RouteContext = { params: Promise<{ deviceID: string }> };
 
 function serializedJob(job: Awaited<ReturnType<typeof jobStatusForOwnedDevice>>[number]) {
-  return { id: job.jobID, sourcePageURL: job.sourcePageURL, displayName: job.displayName, preferredQualityLabel: job.preferredQualityLabel, status: job.status, progress: job.progress === null ? null : job.progress / 10_000, downloadedBytes: job.downloadedBytes, totalBytes: job.totalBytes, phase: job.phase, attempts: job.attempts, updatedAt: job.updatedAt.toISOString() };
+  return { id: job.jobID, sourcePageURL: job.sourcePageURL, displayName: job.displayName, preferredQualityLabel: job.preferredQualityLabel, status: job.status, progress: job.progress === null ? null : job.progress / 10_000, downloadedBytes: job.downloadedBytes, totalBytes: job.totalBytes, phase: job.phase, attempts: job.attempts, queuePriority: job.queuePriority, updatedAt: job.updatedAt.toISOString() };
 }
 
 function serializedPresence(presence: { revokedAt: Date | null; lastHeartbeatAt: Date | null; agentVersion: string | null }) {

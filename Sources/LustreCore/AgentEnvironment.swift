@@ -12,6 +12,7 @@ public enum AgentPaths {
     public static let remoteDestinations = applicationSupport.appending(path: "remote-destinations.json")
     public static let googleDriveDestinations = applicationSupport.appending(path: "google-drive-destinations.json")
     public static let localDownloadConfiguration = applicationSupport.appending(path: "local-download-folder.json")
+    public static let providerCDNObservations = applicationSupport.appending(path: "provider-cdn-observations.json")
     public static let loopbackPort: UInt16 = 63406
     public static let downloads: URL = {
         let base = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask)[0]

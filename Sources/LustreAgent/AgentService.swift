@@ -28,6 +28,7 @@ public actor AgentService {
     public typealias RemoteDestinationTester = @Sendable (WebDAVDestinationProfile, String) async throws -> RemoteDestinationTestResult
     public typealias FolderPicker = @Sendable () throws -> String
     public typealias AllPornStreamHTML = @Sendable (URL) async throws -> String
+    public typealias MediaProbe = @Sendable (ResolvedQuality) async -> Bool
 
     private struct ActiveDownload {
         let token: UUID
@@ -68,6 +69,8 @@ public actor AgentService {
     private let allPornStreamCapture: AllPornStreamCaptureCoordinator?
     private let allPornStreamHTML: AllPornStreamHTML?
     private let directExtractor: DirectExtractor
+    private let providerCDNRegistry: ProviderCDNRegistry
+    private let mediaProbe: MediaProbe
     private var maximumConcurrentDownloads: Int
     private var activeDownloadTasks: [UUID: ActiveDownload] = [:]
     private var lastProgressUpdates: [UUID: LastProgressUpdate] = [:]
@@ -95,6 +98,8 @@ public actor AgentService {
         pornHubAuth: PornHubAuthService = PornHubAuthService(),
         allPornStreamCapture: AllPornStreamCaptureCoordinator? = nil,
         allPornStreamHTML: AllPornStreamHTML? = nil,
+        providerCDNRegistry: ProviderCDNRegistry? = nil,
+        mediaProbe: MediaProbe? = nil,
         maximumConcurrentDownloads: Int = 1
     ) throws {
         self.jobs = try JobStore(databaseURL: databaseURL)
@@ -121,6 +126,8 @@ public actor AgentService {
         self.pornHubAuth = pornHubAuth
         self.allPornStreamCapture = allPornStreamCapture
         self.allPornStreamHTML = allPornStreamHTML
+        self.providerCDNRegistry = providerCDNRegistry ?? ProviderCDNRegistry(fileURL: AgentPaths.providerCDNObservations)
+        self.mediaProbe = mediaProbe ?? AgentService.probeDirectMedia
         self.pornHubResolver = pornHubResolver ?? { source in
             let cookies = (try? await pornHubAuth.cookiesForYtDlp()) ?? []
             do { return try await PornHubYtDlp.resolve(source: source, cookies: cookies) }
@@ -471,8 +478,18 @@ public actor AgentService {
             guard !resolution.qualities.isEmpty else {
                 throw AgentServiceError.noProviderResolved
             }
-            guard let quality = selectedQuality(in: resolution, selector: active.qualitySelector, preferredLabel: active.preferredQualityLabel) else {
+            guard var quality = selectedQuality(in: resolution, selector: active.qualitySelector, preferredLabel: active.preferredQualityLabel) else {
                 throw AgentServiceError.noSelectedQuality
+            }
+            if resolution.provider == .hqPorner || resolution.provider == .myDaddy {
+                let validated = try await validatedMyDaddyTransfer(
+                    resolution: resolution,
+                    quality: quality,
+                    selector: active.qualitySelector,
+                    preferredLabel: active.preferredQualityLabel
+                )
+                resolution = validated.resolution
+                quality = validated.quality
             }
             let resolvedTitle = active.title ?? resolution.title
             active.title = resolvedTitle
@@ -798,6 +815,54 @@ public actor AgentService {
         return resolution.qualities.first { $0.label == preferredLabel }
     }
 
+    private func validatedMyDaddyTransfer(
+        resolution initialResolution: ProviderResolution,
+        quality initialQuality: ResolvedQuality,
+        selector: StableQualitySelector?,
+        preferredLabel: String?
+    ) async throws -> (resolution: ProviderResolution, quality: ResolvedQuality) {
+        var resolution = initialResolution
+        var quality = initialQuality
+        var attemptedURLs = Set<URL>()
+
+        for attempt in 0..<4 {
+            for discovered in resolution.qualities where discovered.url != quality.url {
+                await providerCDNRegistry.observe(url: discovered.url, provider: resolution.provider, probeSucceeded: nil)
+            }
+            if attemptedURLs.insert(quality.url).inserted {
+                let succeeded = await mediaProbe(quality)
+                await providerCDNRegistry.observe(url: quality.url, provider: resolution.provider, probeSucceeded: succeeded)
+                if succeeded {
+                    return (
+                        ProviderResolution(
+                            sourcePageURL: resolution.sourcePageURL,
+                            provider: resolution.provider,
+                            title: resolution.title,
+                            thumbnailURL: resolution.thumbnailURL,
+                            qualities: resolution.qualities,
+                            trace: resolution.trace + ["Validated the selected MyDaddy media response before transfer."]
+                        ),
+                        quality
+                    )
+                }
+            }
+            guard attempt < 3 else { break }
+            let refreshed = try await extract(url: resolution.sourcePageURL)
+            guard let refreshedResolution = refreshed.resolution,
+                  refreshedResolution.provider == .hqPorner || refreshedResolution.provider == .myDaddy,
+                  let refreshedQuality = selectedQuality(
+                      in: refreshedResolution,
+                      selector: selector,
+                      preferredLabel: preferredLabel ?? quality.label
+                  ) else {
+                continue
+            }
+            resolution = refreshedResolution
+            quality = refreshedQuality
+        }
+        throw DownloadError.invalidResponse
+    }
+
     private func completionArtifact(output: URL, destination: String) -> JobCompletionArtifact {
         if destination == "local" || destination.hasPrefix("/") {
             return JobCompletionArtifact(kind: "local", path: output.path, destination: destination, filename: output.lastPathComponent)
@@ -893,6 +958,30 @@ public actor AgentService {
         try handle.close()
         try FileManager.default.moveItem(at: partial, to: destination)
         return destination
+    }
+
+    private static func probeDirectMedia(_ quality: ResolvedQuality) async -> Bool {
+        guard quality.mediaKind == .direct, URLSafetyPolicy.isAllowed(quality.url) else { return false }
+        var request = URLRequest(url: quality.url)
+        request.timeoutInterval = 20
+        quality.headers.forEach { request.setValue($0.value, forHTTPHeaderField: $0.key) }
+        request.setValue("bytes=0-0", forHTTPHeaderField: "Range")
+        let session = URLSession(configuration: .ephemeral, delegate: AgentDownloadRedirectDelegate(), delegateQueue: nil)
+        defer { session.invalidateAndCancel() }
+        do {
+            let (_, response) = try await session.bytes(for: request)
+            guard let http = response as? HTTPURLResponse,
+                  URLSafetyPolicy.isAllowed(http.url ?? quality.url),
+                  (200...299).contains(http.statusCode) else {
+                return false
+            }
+            let contentType = (http.value(forHTTPHeaderField: "Content-Type") ?? "").lowercased()
+            return contentType.hasPrefix("video/")
+                || contentType.hasPrefix("audio/")
+                || contentType.hasPrefix("application/octet-stream")
+        } catch {
+            return false
+        }
     }
 
     private static func uploadToWebDAV(

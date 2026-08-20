@@ -18,6 +18,15 @@ test("filterAndSortJobs treats queued, running, and paused jobs as active", () =
   assert.deepEqual(filterAndSortJobs(jobs, { status: "active" }).map((job) => job.id), ["paused", "running"]);
 });
 
+test("filterAndSortJobs presents queued jobs in durable priority order", () => {
+  const queued = [
+    { ...jobs[0], id: "later", status: "queued", queuePriority: 1 },
+    { ...jobs[0], id: "first", status: "queued", queuePriority: 0 },
+    { ...jobs[0], id: "unranked", status: "queued", queuePriority: undefined },
+  ];
+  assert.deepEqual(filterAndSortJobs(queued, { status: "queued" }).map((job) => job.id), ["first", "later", "unranked"]);
+});
+
 test("filterAndSortJobs combines status, destination, and text search", () => {
   assert.deepEqual(filterAndSortJobs(jobs, { status: "failed", destination: "webdav:seedbox", query: "provider" }).map((job) => job.id), ["failed"]);
   assert.deepEqual(filterAndSortJobs(jobs, { query: "1080P" }).map((job) => job.id), ["running"]);

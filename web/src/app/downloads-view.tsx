@@ -6,6 +6,7 @@ import { filterAndSortJobs, jobStatusCounts, type DownloadFilterStatus } from "@
 import { downloadProgressDisplay, formatBytes, formatETA, formatJobStatus, formatSpeed } from "@/lib/download-progress";
 import type { DownloadJob } from "@/lib/download-job";
 import { availableJobActions, jobActionLabel, type JobAction } from "@/lib/job-actions";
+import { moveQueuedJob, moveQueuedJobByOffset } from "@/lib/queue-order";
 
 export type Destination = { id: string; name: string; kind?: "webdav" | "google_drive"; baseURL?: string; remotePath: string };
 
@@ -17,6 +18,7 @@ type DownloadsViewProps = {
   onSelectJob: (id: string) => void;
   onQueue: () => void;
   onAction: (job: DownloadJob, action: JobAction) => Promise<void>;
+  onReorderQueued?: (jobIDs: string[]) => Promise<void>;
   initialStatus?: DownloadFilterStatus;
   fixedStatus?: DownloadFilterStatus;
   variant?: "page" | "modal";
@@ -54,15 +56,18 @@ function SearchGlyph() {
   return <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden><circle cx="11" cy="11" r="7" /><path d="m20 20-4-4" /></svg>;
 }
 
-export function DownloadsView({ jobs, destinations, error, selectedJobId, onSelectJob, onQueue, onAction, initialStatus = "all", fixedStatus, variant = "page" }: DownloadsViewProps) {
+export function DownloadsView({ jobs, destinations, error, selectedJobId, onSelectJob, onQueue, onAction, onReorderQueued, initialStatus = "all", fixedStatus, variant = "page" }: DownloadsViewProps) {
   const [status, setStatus] = useState<DownloadFilterStatus>(initialStatus);
   const [query, setQuery] = useState("");
   const [destination, setDestination] = useState("all");
   const [workingAction, setWorkingAction] = useState<{ jobId: string; action: JobAction } | null>(null);
+  const [draggedJobID, setDraggedJobID] = useState<string | null>(null);
+  const [reordering, setReordering] = useState(false);
 
   const effectiveStatus = fixedStatus ?? status;
   const filteredJobs = useMemo(() => filterAndSortJobs(jobs, { status: effectiveStatus, query, destination }), [jobs, effectiveStatus, query, destination]);
   const counts = useMemo(() => jobStatusCounts(jobs), [jobs]);
+  const queuedIDs = useMemo(() => jobs.filter((job) => job.status === "queued").sort((a, b) => (a.queuePriority ?? Number.MAX_SAFE_INTEGER) - (b.queuePriority ?? Number.MAX_SAFE_INTEGER)).map((job) => job.id), [jobs]);
   const selectedJob = filteredJobs.find((job) => job.id === selectedJobId) ?? filteredJobs[0] ?? null;
   const selectedProgress = selectedJob ? downloadProgressDisplay(selectedJob) : null;
   useEffect(() => setStatus(initialStatus), [initialStatus]);
@@ -72,6 +77,12 @@ export function DownloadsView({ jobs, destinations, error, selectedJobId, onSele
     setWorkingAction({ jobId: job.id, action });
     try { await onAction(job, action); }
     finally { setWorkingAction(null); }
+  };
+  const reorder = async (jobIDs: string[]) => {
+    if (!onReorderQueued || reordering || jobIDs.every((id, index) => id === queuedIDs[index])) return;
+    setReordering(true);
+    try { await onReorderQueued(jobIDs); }
+    finally { setReordering(false); setDraggedJobID(null); }
   };
 
   const heading = statusTabs.find((tab) => tab.value === effectiveStatus)?.label ?? "Downloads";
@@ -101,9 +112,24 @@ export function DownloadsView({ jobs, destinations, error, selectedJobId, onSele
           {filteredJobs.map((job) => {
             const progress = downloadProgressDisplay(job);
             const forcing = workingAction?.jobId === job.id && workingAction.action === "forceStart";
-            return <div key={job.id} className={`download-row status-${job.status} ${selectedJob?.id === job.id ? "selected" : ""}`}>
+            return <div
+              key={job.id}
+              className={`download-row status-${job.status} ${selectedJob?.id === job.id ? "selected" : ""} ${draggedJobID === job.id ? "dragging" : ""}`}
+              draggable={job.status === "queued" && !!onReorderQueued && !reordering}
+              tabIndex={job.status === "queued" && onReorderQueued ? 0 : undefined}
+              aria-label={job.status === "queued" && onReorderQueued ? `${jobTitle(job)}, queue position ${queuedIDs.indexOf(job.id) + 1} of ${queuedIDs.length}. Drag or press Alt with the Up or Down arrow to reorder.` : undefined}
+              onDragStart={(event) => { setDraggedJobID(job.id); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", job.id); }}
+              onDragEnd={() => setDraggedJobID(null)}
+              onDragOver={(event) => { if (job.status === "queued" && draggedJobID && draggedJobID !== job.id) { event.preventDefault(); event.dataTransfer.dropEffect = "move"; } }}
+              onDrop={(event) => { event.preventDefault(); const sourceID = draggedJobID ?? event.dataTransfer.getData("text/plain"); void reorder(moveQueuedJob(queuedIDs, sourceID, job.id)); }}
+              onKeyDown={(event) => {
+                if (event.target !== event.currentTarget || !event.altKey || (event.key !== "ArrowUp" && event.key !== "ArrowDown")) return;
+                event.preventDefault();
+                void reorder(moveQueuedJobByOffset(queuedIDs, job.id, event.key === "ArrowUp" ? -1 : 1));
+              }}
+            >
               <button className="download-row-select" onClick={() => onSelectJob(job.id)} aria-pressed={selectedJob?.id === job.id}>
-                <span className="download-name"><i>↓</i><span><strong>{jobTitle(job)}</strong><small>{job.preferredQualityLabel || job.sourcePageURL}</small></span></span>
+                <span className="download-name"><i>{job.status === "queued" && onReorderQueued ? "⠿" : "↓"}</i><span><strong>{jobTitle(job)}</strong><small>{job.status === "queued" && onReorderQueued ? `Priority ${queuedIDs.indexOf(job.id) + 1} · ${job.preferredQualityLabel || job.sourcePageURL}` : job.preferredQualityLabel || job.sourcePageURL}</small></span></span>
                 <span className="download-state"><i />{formatJobStatus(job.status)}</span>
                 <span className="download-progress"><span className={progress.state === "static" ? "static" : ""}><i style={progress.percent === undefined ? undefined : { width: `${progress.percent}%` }} className={progress.state === "indeterminate" ? "indeterminate" : ""} /></span><small>{progress.progressLabel}{progress.percent !== undefined && job.status === "running" ? <em>{progress.phaseLabel}</em> : null}</small></span>
                 <span className="download-destination">{destinationName(job, destinations)}</span>

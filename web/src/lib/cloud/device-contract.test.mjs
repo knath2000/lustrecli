@@ -13,9 +13,11 @@ test("display names are trimmed and bounded", () => {
 });
 
 test("heartbeat preserves an agent-reported job update timestamp", () => {
-  const frame = parseHeartbeatFrame({ version: 1, type: "heartbeat", sequence: 1, sentAt: "2026-07-25T10:00:00Z", agentVersion: "0.1.0", correlationID: "heartbeat-1", commandAcks: [], jobs: [{ id: "f8ca8705-69c4-4c73-81fb-7bb1dc5c1853", status: "completed", attempts: 1, updatedAt: "2026-07-24T18:04:03Z" }] });
+  const frame = parseHeartbeatFrame({ version: 1, type: "heartbeat", sequence: 1, sentAt: "2026-07-25T10:00:00Z", agentVersion: "0.1.0", correlationID: "heartbeat-1", commandAcks: [], jobs: [{ id: "f8ca8705-69c4-4c73-81fb-7bb1dc5c1853", status: "queued", attempts: 1, queuePriority: 2, updatedAt: "2026-07-24T18:04:03Z" }] });
   assert.equal(frame.jobs[0].updatedAt, "2026-07-24T18:04:03Z");
+  assert.equal(frame.jobs[0].queuePriority, 2);
   assert.throws(() => parseHeartbeatFrame({ ...frame, jobs: [{ ...frame.jobs[0], updatedAt: "not-a-date" }] }));
+  assert.throws(() => parseHeartbeatFrame({ ...frame, jobs: [{ ...frame.jobs[0], queuePriority: -1 }] }));
 });
 
 test("heartbeat validates acknowledgements and complete job projections", () => {

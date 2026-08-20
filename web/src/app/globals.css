@@ -54,6 +54,11 @@ button:focus-visible,a:focus-visible { outline:2px solid var(--cyan); outline-of
 .force-start-button { min-height:32px; padding:0 8px; border:1px solid rgba(43,233,239,.35); border-radius:6px; color:#8af9fc; background:rgba(43,233,239,.08); cursor:pointer; font:8px var(--font-geist-mono),monospace; text-transform:none; }
 .force-start-button:hover { background:rgba(43,233,239,.16); }.force-start-button:disabled { opacity:.55; cursor:wait; }
 .download-row:hover { border-color:rgba(255,255,255,.09); background:rgba(255,255,255,.035); }
+.download-row[draggable="true"] { cursor:grab; }
+.download-row[draggable="true"]:active { cursor:grabbing; }
+.download-row.dragging { opacity:.48; border-color:rgba(255,116,114,.58); background:rgba(255,116,114,.08); transform:scale(.992); }
+.download-row[draggable="true"]:focus-visible { outline:2px solid rgba(255,116,114,.72); outline-offset:2px; }
+.download-row[draggable="true"] .download-name > i { color:#ff8b89; font-size:17px; letter-spacing:-4px; }
 .download-row.selected { border-color:rgba(43,233,239,.35); background:linear-gradient(90deg,rgba(21,118,126,.23),rgba(61,53,103,.16)); box-shadow:inset 2px 0 #35e9ef; }
 .download-name { min-width:0; display:flex; align-items:center; gap:11px; }
 .download-name>i { width:34px; height:34px; flex:0 0 auto; display:grid; place-items:center; border:1px solid rgba(43,233,239,.17); border-radius:8px; color:#49edf2; background:rgba(43,233,239,.07); font-style:normal; }

@@ -1,6 +1,6 @@
 # Current implementation status
 
-Last updated: 2026-08-15
+Last updated: 2026-08-19
 
 This document records the accepted behavior in the current `main` working tree, including the pieces that are intentionally still incomplete. `ARCHITECTURE.md` remains the component-level design reference; `SESSION_LOG.md` records the delivery chronology.
 
@@ -11,13 +11,18 @@ This document records the accepted behavior in the current `main` working tree, 
 ### Durable local agent
 
 - `lustre-agent` is the persistent per-user worker. It owns SQLite jobs, fresh provider resolution, transfer execution, retries, local filesystem access, WebDAV, Keychain secrets, and the authenticated loopback API.
+- LustreStudio is a first-class Agent client. Jobs created through LustreStudio, LustreCLI, or its web application share the same durable queue and are projected into LustreStudio while it is open; Agent-owned transfers continue after LustreStudio quits.
+- The authenticated API supports durable `DELETE /v1/jobs/:id`. Missing job deletion returns HTTP 404, allowing clients to treat repeated removal as idempotent. LustreStudio can recreate a missing failed job from its stored durable source metadata when the user retries it.
 - The listener remains fixed to `127.0.0.1:63406`; all `/v1` routes require the Keychain-backed bearer token.
+- The installed per-user LaunchAgent runs release Runtime 12. Rebuilt unsigned runtimes may require one foreground macOS Keychain approval before launchd can reuse the existing loopback token.
 - Jobs preserve source page URLs and optional exact quality labels. Signed CDN URLs are resolved again immediately before transfer and are not persisted.
-- The default scheduler runs one ordinary transfer at a time. Later jobs remain queued in creation order; Force Start applies only to the explicitly selected queued job.
+- The scheduler fills the entitlement-controlled transfer slots from durable `queuePriority`, then creation time and UUID. New jobs append to the sequence; retry and resume preserve priority; Force Start remains the explicit bypass for only the selected queued job.
 
 ### Providers and feeds
 
 - Static/direct resolution supports direct media, PMVHaven, AllPornStream, Playmogo/Dood, MixDrop, StreamTape, mydaddy.cc, LuluStream/Vidara HLS, HQPorner, OnlyFan420, and PornHub through agent-owned yt-dlp. PMVHaven resolution recognizes exact HTTPS video-page hosts, decodes current escaped media data, excludes recommendation previews by anchoring candidates to the target master-playlist directory, and preserves required CDN Referer/User-Agent headers.
+- HQPorner/MyDaddy transfers treat generated CDN URLs as untrusted ephemeral candidates. Media requests use the exact trusted MyDaddy embed as Referer, and the Agent requires a bounded successful media probe before transfer. Dead candidates trigger up to three complete fresh resolutions while preserving the selected quality. Observed CDN hosts and probe outcomes are retained in the bounded atomic `provider-cdn-observations.json` registry for future provider adaptation; observation never expands URL or redirect trust.
+- StreamTape extraction recognizes the provider's obfuscated link assignments, validates token redirects with HEAD and bounded range fallbacks, and accepts final media only from trusted TapeContent hosts. The August 18 AllPornStream incident was caused by an installed Agent runtime that predated this resolver repair; rebuilding and activating Runtime 11 made the exact source resolve to 1080p through `/v1/extract`.
 - Vidara retains its original source page, resolves fresh stream metadata through `https://vidara.so/api/stream`, preserves its bounded browser request headers, and materializes the selected HLS variant locally. Current Vidara playlists may disguise MPEG-TS segments with `.woff2` names; only trusted `.vidara` resolutions add `woff2` to ffmpeg's explicit segment allowlist and disable format/extension matching. Other HLS providers keep the default strict ffmpeg policy.
 - Public HTTPS sources not recognized by the specialized resolver now fall back to an agent-owned generic yt-dlp path. The fallback is used only for `unsupportedProvider`; it cannot mask verification-required or provider-specific failures from an existing resolver. Preview output remains sanitized and bounded to safe labels/media kinds, while transfer-time resolution stores and reuses only the original source URL plus the chosen safe selector. Generic jobs never receive PornHub cookies.
 - MixDrop remains Foundation-only: original host first, then the known mirror only after transport failure or unusable HTML. The resolver accepts only strict `mxcontent.net` media paths and forwards the resolved page as Referer with the Chrome user agent. The same source has been verified to resolve statically on a compatible VPN route; a home-route TLS failure occurs before HTTP and is reported as an actionable transport failure without weakening TLS.
@@ -64,10 +69,19 @@ This document records the accepted behavior in the current `main` working tree, 
 - Feed navigation uses numbered previous/next pagination rather than append-only scrolling. The selection action surface is integrated with the floating navigation instead of splitting the card grid, and HQPorner protected thumbnails render through the existing device-bound asset path.
 - Feed cards expose a non-queueing Extract action that asks the paired agent for current playback candidates. Temporary direct-media URLs and required safe headers are returned to the authenticated browser for network playback or copying; they are not added to the download queue.
 - Downloads is no longer a standalone shell destination. Home's Active, Queued, Failed, and Completed counters open focused modals backed by the complete transfer ledger and inspector. Activity's transfer action returns to Home and opens the matching status modal with the selected job retained.
+- The shared floating navigation pill directly exposes Home, Feed, Watchlist, Library, Activity, Settings, and Account. The former hamburger popover is removed. Destinations and Devices are managed from Settings cards and retain their underlying screens and behavior.
+- Home, Feed, Watchlist, Library, Activity, Settings, device/destination management, and extraction overlays share the accepted neutral black/gray glass system, large display headings, rounded pill controls, red active accents, and responsive stacking. Feed and Watchlist no longer render the duplicate Lustre Watch header or internal navigation tabs.
+- Extraction progress and resolved-source presentation use a provider timeline, a resolution-status card, and compact quality rows while preserving cancellation, keyboard focus, Escape/backdrop closing, partial results, refresh, URL/header copying, source opening, and Infuse actions.
+- Feed cards use container-aware typography and controls. Cards at or below 500 px reduce and clamp titles and compact their actions; cards at or below 390 px switch those actions to 30 px icon-only buttons. Large feature cards retain the full presentation.
+- Firefox Provider Capture version 1.4.1 is restricted to the exact Cloud origin `https://lustrecli.vercel.app` and packaged at `watch-cloud/extensions/lustre-watch-provider-capture-firefox-1.4.1.zip`; its source remains in `watch-cloud/extensions/lustre-watch-allpornstream-firefox`. The stable Gecko ID `provider-capture@lustre-watch.vercel.app` is only the extension identity. Temporary installation uses Firefox's `about:debugging#/runtime/this-firefox`; a persistent package requires Mozilla signing.
+- AllPornStream card previews rotate every two seconds through the bounded thumbnail and distinct `data-images` frames. Hover and keyboard-focus activation are owned by the full card rather than the artwork element because the card's scrim/content siblings overlay the image layer; leaving or blurring the card resets the first frame.
 - The account-backed experimental Watchlist persists source-page metadata and watched state in Neon through migration `0008_lustre_watchlist`. The August 9 seed retained 30 same-day queued/completed source items. Extract and Refresh are separate actions; current resolved links remain browser-session state and can be refreshed after provider expiry.
 - Watchlist cards remain uniform and compact. Resolved qualities, full temporary URLs, copy actions, headers, source navigation, and refresh controls open in a responsive modal that closes by Escape or backdrop click rather than expanding one grid card.
+- Watchlist organization is client-side over the already account-scoped collection and adds no database or transfer traffic. It provides All, Unwatched, Watched, and Providers metrics; title/provider search; provider filtering; newest, oldest, title, and provider sorting; provider or watched-state grouping; and saved-date display. Select Visible follows the filtered result, while selections outside the filter remain intact for later batch actions.
 - Watchlist command resolution normalizes raw Drizzle/Neon snake-case rows at the repository boundary before returning the camel-case application contract. This prevents a successfully persisted resolve command from surfacing as the generic `Unable to process the device request` error.
 - Watchlist single and batch downloads use the same account-owned Watchlist-to-`queue_url` command path. The gateway accepts the optional stored title only when it is non-empty and at most 512 characters, then forwards it to the agent without weakening the existing URL, destination, quality, capability, payload-size, or replay boundaries.
+- The Home queued-download modal supports full-row pointer dragging and `Alt`+Arrow keyboard ordering while retaining click selection. The browser applies the order optimistically and rolls back on command failure. The bounded `jobs_reorder` command accepts 1–50 unique UUIDs, the Agent persists the resulting priorities, and heartbeat projections carry `queuePriority` back to Cloud.
+- Migration `0010_lustre_queue_priority.sql` adds the priority field to the Neon job projection. The migration and Cloud queue-ordering code are present in the current local working tree but are not yet applied or deployed.
 - The temporary `/feed-acceptance` canary requires an exact Clerk subject plus an explicit kill switch. It is disabled in the final production deployment and returns `404`, including for the previously allowlisted account.
 - Protected Feed media uses short-lived, device-bound Vercel tickets and the separate `lustre-feed-assets` Cloudflare Worker. Tickets bind the exact URL and media kind; the Worker enforces HTTPS provider-host allowlists, exact production CORS, safe redirects, expected content types, 6 MiB image and 16 MiB video limits, a 20-second upstream timeout, no credential forwarding, and `no-store` responses. The browser makes no direct protected-provider request.
 - K2 production acceptance rendered 50 protected HQPorner thumbnails, advanced a four-scene hover preview, and rendered 42 protected PornHub thumbnails. Blocking the asset Worker preserved metadata, agent connectivity, 29 unchanged jobs, and zero active transfers.
@@ -102,10 +116,22 @@ This document records the accepted behavior in the current `main` working tree, 
 
 Known follow-up risk: an earlier aggregate strict-concurrency run intermittently hung in a `StreamingProcessRunner.waitForExit()` fixture. The current full suite completed cleanly, including all runner lifecycle tests, but the prior intermittent result remains worth monitoring rather than declaring impossible from one clean aggregate run.
 
+## Native LustreStudio queue-priority contract — 2026-08-17
+
+- `DownloadJob.queuePriority` is optional for backward-compatible decoding of existing SQLite rows.
+- New jobs receive the next available numeric priority.
+- `POST /v1/jobs/order` accepts an ordered list of job IDs, ignores IDs that are not currently queued, preserves omitted queued jobs after the supplied IDs, and rewrites contiguous priorities.
+- Ordinary scheduling sorts queued jobs by `queuePriority`, then `createdAt`, then UUID. This is the authoritative order used when one of the three entitlement-controlled download slots becomes available.
+- Retry and resume preserve the durable job and its priority. Force Start remains the only action that intentionally bypasses ordinary priority and concurrency admission.
+- Native LustreStudio commit `e3b583f` consumes this contract; Agent commit `cfed14f` implements it.
+- The Agent Debug and release builds passed. Tests could not start in the selected local Swift toolchain because `XCTest` was unavailable.
+
 ## Verification commands
 
 Latest recorded verification:
 
+- The August 18 Cloud queue-ordering work passed 115 web tests (93 base plus 22 Lustre Watch tests), the Next.js 16.2.11 production build, focused queue/device-contract tests, the Swift release build, and `git diff --check`. Focused lint still reports the two pre-existing `set-state-in-effect` errors in `cloud-full-dashboard.tsx` and `downloads-view.tsx`.
+- The August 15 unified-shell, Firefox capture, Feed preview, compact-card, and Watchlist-organization work passed 111 web tests (89 base plus 22 Lustre Watch tests), the Next.js production build, four Firefox extension classifier tests, and `git diff --check`. The final full-card preview activation fix is commit `23402c2`.
 - The August 15 gateway title-contract fix passed 8 gateway tests, generated types, TypeScript, and a Wrangler dry run before gateway version `e2ee48a9-ea11-4fb1-9313-749c8e7a2816` deployed. Four previously stuck Watchlist commands completed after automatic reconnect and projected their durable jobs.
 - The August 15 Vidara fix passed a Swift release build, `git diff --check`, and an exact live one-second ffmpeg probe. The live source then completed successfully when retried by the user. Focused Swift tests could not start because the selected Command Line Tools SDK did not provide `XCTest`.
 - The last Cloud command-delivery acceptance passed 183 Swift tests. K1 later encountered an intermittent process-fixture aggregate flake; all 8 affected tests passed on immediate rerun. K2 did not change or restart the agent.
@@ -141,3 +167,15 @@ Real-account/manual checks that cannot be replaced by fixtures:
 4. Repeat real-account PornHub transfer checks after material provider/yt-dlp changes; the current revision has been observed resolving and materializing without exposing cookies.
 5. Repeat staged PornHub → WebDAV telemetry checks after transport changes; the current revision has been observed reporting both live materialization and upload phases.
 6. Repeat the Chrome-assisted AllPornStream Feed check after extension/native-message changes; the current revision completed `lustre feed verify --site allpornstream` against the live site and returned 50 bounded cards without queueing a transfer.
+
+## Current StreamTape player repair
+
+- Commit `0e16730c29940c1ec547c1edfea72ba1ddac7d4d` repairs current StreamTape resolution in the persistent Agent.
+- JavaScript-derived trusted link assignments outrank invalid hidden values. Evaluation is bounded to quoted strings, concatenation, and chained integer-only `.substring(...)`.
+- `/get_video` candidates receive `stream=1` and are probed with HEAD plus embed Referer/User-Agent, then a one-byte ranged GET fallback.
+- Redirects must remain public HTTPS and terminate on an approved `tapecontent.net` MP4 host. Malformed expressions, rejected hosts, invalid tokens, and redirect failures remain distinct diagnostics.
+- Queued jobs retain the AllPornStream post URL, not expiring StreamTape or CDN URLs.
+- Focused StreamTape and AllPornStream tests passed 33/33. Live embed `xmBe2WwJ2AtkM08` resolved to `tapecontent.net`; a one-byte media probe returned HTTP 206 and `video/mp4`.
+- The full run executed 229 tests with relevant coverage passing; one unrelated browser-extension-required Feed test failed.
+- LustreStudio commit `604abf1` pins this Agent in verified installer `LustreStudio-2.2.7-build10-unsigned.dmg`, SHA-256 `5c43314f4fdb0ea07e66f903d302f053c0c738b10216a9d8cddc8ea406855870`.
+- Later Runtime 11 activation is a separate deployment-state milestone; verify the running Agent independently of source and installer contents.

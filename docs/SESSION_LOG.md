@@ -1,5 +1,57 @@
 # Session Log
 
+## 2026-08-19 — HQPorner/MyDaddy generated-CDN recovery
+
+- Diagnosed `https://hqporner.com/hdporn/127495-weekend_plans.html`: the HQPorner page and trusted MyDaddy embed returned HTTP 200 and exposed complete 1080p/720p/360p metadata, but each newly generated `bigcdn.cc` path immediately returned HTTP 404. This is provider/CDN churn rather than an HQPorner parsing or general connectivity failure.
+- MyDaddy media now uses the exact resolved embed URL as Referer, matching the browser request boundary instead of using the HQPorner homepage for both page and media requests.
+- Before any MyDaddy-backed transfer, the Agent performs a one-byte bounded media probe with the resolved safe headers and redirect policy. A failed selected candidate triggers up to three fresh source-page/embed resolutions while retaining the requested stable quality label; only a public HTTPS response with a successful status and media content type reaches the downloader.
+- Added the bounded durable `provider-cdn-observations.json` registry. It records provider plus exact discovered host, first/last observation, discovery count, and successful/failed probe counts; it retains at most 256 recent entries and never converts discovery into trust.
+- Added focused coverage for registry persistence/bounds and dead-CDN-to-fresh-CDN recovery. The registry, HQPorner, and static-provider suites passed 29/29 under the external Xcode toolchain.
+- Confirmed the durable queue was idle, built the release executables, and installed them as Runtime 12. The rebuilt unsigned executable required one foreground Keychain authorization for the existing loopback token; after approval, the per-user LaunchAgent started as the sole managed process, served the loopback panel, and completed the Cloud gateway handshake and heartbeat.
+- Rechecked the exact Weekend Plans source with the release CLI after activation. It resolved 1080p, 720p, and 360p candidates on the current generated `bigcdn.cc` host, each carrying the exact trusted MyDaddy embed Referer. Transfer-time probing remains authoritative because extraction metadata alone does not prove that an ephemeral CDN object is live.
+
+## 2026-08-18 — StreamTape runtime activation and Cloud queue ordering
+
+- Diagnosed the AllPornStream source `151b3cad-2cba-4268-8626-19bf35d7bb6e` as a StreamTape-backed page with embed ID `26OWgz1pDZFzYQ`. Current source resolved it successfully, while the installed Runtime 10 predated the StreamTape repair in commit `0e16730`.
+- Confirmed the durable queue was idle, rebuilt the release Agent, installed Runtime 11, and verified the exact loopback `/v1/extract` request returned a usable 1080p source. The incident was runtime deployment drift rather than an unsupported provider.
+- Added full-row pointer dragging and `Alt`+Arrow keyboard ordering to the Cloud Home queued-download modal without taking away click selection. Reordering is optimistic and restores the previous order when delivery fails.
+- Added the bounded `jobs_reorder` device command across Vercel, the Cloudflare gateway contract, the Agent, and heartbeat projections. Payloads contain 1–50 unique UUID job IDs; the Agent persists contiguous `queuePriority` values and schedules by priority, creation time, then UUID.
+- Added Neon migration `0010_lustre_queue_priority.sql` so the Cloud job projection retains the Agent-owned order across refreshes.
+- Validation passed 115 web tests (93 base plus 22 Lustre Watch), the Next.js 16.2.11 production build, focused queue and device-contract coverage, the Swift release build, and `git diff --check`. Focused lint continues to report the two pre-existing `set-state-in-effect` errors in `cloud-full-dashboard.tsx` and `downloads-view.tsx`.
+- Built the unsigned installable LustreStudio 2.2.7 build 10 DMG entirely on the external volume. DerivedData is at `/Volumes/WD/BuildArtifacts/lustrestudio-queue-order-20260818`, staging is at `/Volumes/WD/BuildArtifacts/lustrestudio-queue-order-stage-20260818`, and the verified artifact is `/Volumes/WD/Projects/pmvhavendownloader/LustreStudio-2.2.7-build10-20260818-external-build-unsigned.dmg` with SHA-256 `5b039040534c191f30f0078ee31f04d056065b367398b5aa0247cf93a8856455`. The embedded Agent byte-matches the current release binary; the DMG is intentionally unsigned and unnotarized.
+- The queue-ordering changes and migration remain in the local working tree and have not been deployed.
+
+## 2026-08-17 — Native queue priority and LustreStudio release
+
+- Added optional durable `queuePriority` to Agent jobs and a loopback `POST /v1/jobs/order` contract.
+- New jobs append to the priority sequence. Reordering rewrites contiguous priorities for queued jobs while retaining omitted queued jobs after the supplied order.
+- The scheduler now fills entitlement-controlled slots by priority, then creation time and UUID. Retry/resume preserve priority; Force Start remains the explicit bypass.
+- Native LustreStudio displays numbered priorities in its queued modal, sorts by that order, and offers per-row up/down controls that update both the local projection and Agent.
+- Agent commit `cfed14f` is pinned by LustreStudio commit `e3b583f`.
+- Agent Debug/release builds and the native Xcode build succeeded. The selected local Swift toolchain lacked `XCTest`, so the attempted aggregate test command did not execute tests.
+- Packaged and verified `LustreStudio-2.2.7-build10-unsigned.dmg`, SHA-256 `ae80b342b053f889a39318ec672ef894868b673f8c7bd435d201545617d4b9e9`.
+
+## 2026-08-16 — LustreStudio ownership, durable removal, and retry recovery
+
+- Added the Agent contract used by LustreStudio for preview extraction, stable quality selection, Local and Google Drive queue creation, health/version reporting, completion artifacts, and browser-assisted resolution.
+- Confirmed the shared queue boundary: jobs created through LustreStudio, LustreCLI, or the web application live in the same SQLite store and are visible to all clients.
+- Added durable job deletion through `DELETE /v1/jobs/:id`; removal cancels active work, deletes the SQLite row, and reschedules queued work.
+- Corrected missing-job deletion to return HTTP 404 instead of the generic HTTP 400 mapping. LustreStudio treats repeated removal as idempotent and prevents its polling reconciler from racing an active user deletion.
+- LustreStudio retry now restores a locally projected failed job when the Agent row is missing, using the original source URL and stored selection/destination metadata rather than a stale media URL.
+- Agent commits: `3b81129`, `86f2b1f`, and `4657f47`. LustreStudio pins `4657f47fe81d05e68ec56f4a2e51e2f74fb393f7`.
+- Focused `JobStoreTests` passed 6/6 and the Agent release runtime linked successfully for LustreStudio build 10.
+
+## 2026-08-15 — Unified Cloud shell, Firefox capture, and Feed/Watchlist polish
+
+- Flattened the floating navigation pill into direct Home, Feed, Watchlist, Library, Activity, Settings, and Account destinations. The former hamburger popover is gone; Destinations and Devices moved into Settings management cards while retaining their existing views and behavior.
+- Applied the Home visual system across the Cloud workspace: neutral black/gray glass surfaces, large display headings, rounded pill controls, red active accents, and responsive stacking. Removed the duplicate Lustre Watch header and internal Feed/Watchlist tabs so the shared navigation pill is the sole application navigation.
+- Reworked extraction progress and results into the same visual language with a provider timeline, resolution-status card, and quality source rows while preserving cancellation, Escape/backdrop handling, focus behavior, copy actions, headers, source opening, refresh, and Infuse actions.
+- Added size-aware Feed card presentation with CSS container queries. Cards at or below 500 px use smaller three-line-clamped titles and controls; cards at or below 390 px use compact icon-only 30 px actions. Large feature cards retain their original title and action scale.
+- Updated and packaged the Firefox Provider Capture extension as version 1.4.1 for the exact production origin `https://lustrecli.vercel.app`. The source is in `watch-cloud/extensions/lustre-watch-allpornstream-firefox`, and the installable package is `watch-cloud/extensions/lustre-watch-provider-capture-firefox-1.4.1.zip`. The stable Gecko ID remains `provider-capture@lustre-watch.vercel.app` as extension identity, not an allowed web origin. Temporary Firefox installation uses `about:debugging#/runtime/this-firefox`; permanent installation still requires Mozilla signing.
+- Restored AllPornStream rotating card artwork from the bounded thumbnail plus distinct `data-images` preview frames. The initial thumbnail-layer hover listener was obscured by sibling scrim/content overlays. The final implementation owns hover and keyboard-focus state on the full `motion.article` card, passes that state into `FeedArtwork`, rotates every two seconds, shows frame progress, and resets on exit.
+- Added account-local Watchlist organization without new persistence or network reads: All/Unwatched/Watched/Providers metrics, title/provider search, provider filtering, newest/oldest/title/provider sorting, provider or watched-state grouping, and saved-date display. Select Visible follows the current filtered result while existing selections survive filter changes and continue to drive batch actions.
+- The final UI/provider set passed 111 web tests (89 base plus 22 Lustre Watch tests), the Next.js production build, four Firefox extension classifier tests, and `git diff --check`. Commits `8447a10`, `5969698`, `641d1f1`, `f479fd7`, and the full-card hover fix `23402c2` were pushed to `main`.
+
 ## 2026-08-15 — Watchlist queue recovery and Vidara obfuscated HLS
 
 - Removed Downloads as a standalone shell destination after the Home status-modal workflow was accepted. The shared `DownloadsView` remains the full transfer ledger and inspector inside Home's Active, Queued, Failed, and Completed modals. Activity inspection now returns to Home, opens the modal matching the selected job's state, and preserves the selected transfer; the standalone branch and bottom-menu entry are gone.
@@ -170,3 +222,13 @@
 - Confirmed AllPornStream's live search contract uses `s`; its structured JSON-LD remains compatible with the existing parser. Direct agent and Next.js proxy search both returned structured results. HQPorner's live `q`/`p` and PornHub's `/video/search?search=...` mappings were also probed successfully.
 - Reworked the Feed toolbar after search initially created an unintended grid row. Source, compound search, destination, and refresh now occupy explicit responsive grid areas; result count and active-query state live in a separate metadata row; clear search reloads the normal feed.
 - Final release verification completed cleanly: all 168 Swift tests passed, the Swift release build linked, all 33 frontend tests passed, ESLint and the Next.js production/TypeScript build passed, and `git diff --check` passed. The previously observed aggregate runner-fixture hang did not reproduce in this full run but remains documented as an intermittent risk to monitor.
+
+## 2026-08-20 — Recorded current StreamTape repair and installer evidence
+
+- Root cause: current StreamTape pages expose decoy hidden tokens while constructing the valid `get_video` token through bounded JavaScript assignments.
+- Commit `0e16730c29940c1ec547c1edfea72ba1ddac7d4d` added trusted link IDs, quoted concatenation, chained integer `.substring(...)`, JavaScript-first priority, URL normalization, automatic `stream=1`, HEAD redirect probing, one-byte Range fallback, and strict public HTTPS `tapecontent.net` MP4 acceptance.
+- Live AllPornStream post `097f75ca-da44-4729-9f37-849d633e1cd2` resolved through StreamTape embed `xmBe2WwJ2AtkM08`.
+- Acceptance returned HTTP 206, `Content-Type: video/mp4`, and exactly one response byte.
+- Focused resolver suites passed 33 tests. Release build passed. The full 229-test run had one unrelated browser-extension-required Feed failure.
+- Native pin commit `604abf1` produced verified unsigned installer `/Volumes/WD/Projects/pmvhavendownloader/LustreStudio-2.2.7-build10-unsigned.dmg`, SHA-256 `5c43314f4fdb0ea07e66f903d302f053c0c738b10216a9d8cddc8ea406855870`.
+- This source-and-installer milestone is separate from later Runtime 11 activation; installed runtime state must be checked independently.

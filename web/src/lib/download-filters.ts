@@ -18,6 +18,7 @@ type FilterableJob = {
   destination: string;
   status: Exclude<DownloadFilterStatus, "all" | "active">;
   message: string;
+  queuePriority?: number;
   updatedAt: AgentDate;
 };
 
@@ -37,7 +38,12 @@ export function filterAndSortJobs<T extends FilterableJob>(jobs: T[], filters: D
     .filter((job) => status === "all" || (status === "active" ? activeStatuses.has(job.status) : job.status === status))
     .filter((job) => !filters.destination || filters.destination === "all" || job.destination === filters.destination)
     .filter((job) => !query || [job.id, job.sourcePageURL, job.displayName, job.preferredQualityLabel, job.message].some((value) => value?.toLocaleLowerCase().includes(query)))
-    .sort((a, b) => agentDateMilliseconds(b.updatedAt) - agentDateMilliseconds(a.updatedAt));
+    .sort((a, b) => {
+      if (a.status === "queued" && b.status === "queued" && a.queuePriority !== b.queuePriority) {
+        return (a.queuePriority ?? Number.MAX_SAFE_INTEGER) - (b.queuePriority ?? Number.MAX_SAFE_INTEGER);
+      }
+      return agentDateMilliseconds(b.updatedAt) - agentDateMilliseconds(a.updatedAt);
+    });
 }
 
 export function jobStatusCounts(jobs: FilterableJob[]) {

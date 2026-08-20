@@ -72,6 +72,7 @@ type CloudJobPayload = {
   downloadedBytes?: number | null;
   totalBytes?: number | null;
   phase?: string | null;
+  queuePriority?: number | null;
   updatedAt: string;
 };
 
@@ -90,6 +91,7 @@ function cloudJobs(payload: { jobs?: CloudJobPayload[] }): DownloadJob[] {
     downloadedBytes: job.downloadedBytes ?? undefined,
     totalBytes: job.totalBytes ?? undefined,
     transferPhase: job.phase as DownloadJob["transferPhase"] | undefined,
+    queuePriority: job.queuePriority ?? undefined,
     logs: [{
       timestamp: job.updatedAt,
       level: ["failed", "verificationRequired"].includes(job.status) ? "error" as const : "info" as const,
@@ -370,6 +372,10 @@ async function agentRequest<T>(
       destination: input.destination ?? "local",
       requestID: input.requestID ?? undefined,
     };
+  } else if (path === "/v1/jobs/order" && options.method === "POST") {
+    target = `${base}/commands`;
+    const input = JSON.parse(String(options.body ?? "{}"));
+    body = { kind: "jobs_reorder", jobIDs: input.ids };
   } else {
     const match = path.match(/^\/v1\/jobs\/([^/]+)\/action$/);
     if (match && options.method === "POST") {
@@ -1056,6 +1062,22 @@ export function CloudFullDashboard({
       );
     }
   };
+  const reorderQueued = async (jobIDs: string[]) => {
+    const previous = jobs;
+    const priority = new Map(jobIDs.map((id, index) => [id, index]));
+    setJobs((current) => current.map((job) => priority.has(job.id) ? { ...job, queuePriority: priority.get(job.id) } : job));
+    try {
+      await agentRequest<DownloadJob[]>(token, "/v1/jobs/order", {
+        method: "POST",
+        body: JSON.stringify({ ids: jobIDs }),
+      });
+      await refresh(token, true);
+      notify("Queued download priority updated.");
+    } catch (reason) {
+      setJobs(previous);
+      setError(reason instanceof Error ? reason.message : "Unable to reorder queued downloads.");
+    }
+  };
   const saveDestination = async (
     input: { name: string; baseURL: string; username: string; remotePath: string; allowInvalidCertificate: boolean; password: string },
   ) => {
@@ -1443,6 +1465,7 @@ export function CloudFullDashboard({
               onSelectJob={setSelectedDownloadId}
               onQueue={() => setShowQueue(true)}
               onAction={apply}
+              onReorderQueued={homeDownloadsStatus === "queued" ? reorderQueued : undefined}
               fixedStatus={homeDownloadsStatus}
               variant="modal"
             />

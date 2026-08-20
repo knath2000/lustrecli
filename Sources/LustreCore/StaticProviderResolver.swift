@@ -174,7 +174,7 @@ public struct StaticProviderResolver: Sendable {
         let html = normalize(page.body)
             .replacingOccurrences(of: #"\""#, with: "\"")
         let headers = [
-            "Referer": referer.absoluteString,
+            "Referer": page.finalURL.absoluteString,
             "User-Agent": NetworkConstants.chromeUserAgent
         ]
         let qualities = myDaddySources(in: html, relativeTo: page.finalURL).map {

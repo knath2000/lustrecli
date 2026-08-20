@@ -28,5 +28,6 @@ export type DownloadJob = {
   phaseBytesPerSecond?: number;
   phaseETASeconds?: number;
   logs?: JobLog[];
+  queuePriority?: number;
   updatedAt: AgentDate;
 };

@@ -205,7 +205,7 @@ export function validLibraryResult(value: unknown): value is Record<string, unkn
 }
 
 export type RemoteCommandAck = { id: string; status: "completed" | "failed"; jobID?: string; result?: Record<string, unknown>; code?: string };
-export type RemoteJobStatus = { id: string; sourcePageURL?: string; displayName?: string; preferredQualityLabel?: string; status: "queued" | "running" | "paused" | "completed" | "failed" | "cancelled" | "verificationRequired"; progress?: number; downloadedBytes?: number; totalBytes?: number; phase?: "resolving" | "downloading" | "materializing" | "postProcessing" | "uploading" | "verifying"; attempts: number; updatedAt?: string };
+export type RemoteJobStatus = { id: string; sourcePageURL?: string; displayName?: string; preferredQualityLabel?: string; status: "queued" | "running" | "paused" | "completed" | "failed" | "cancelled" | "verificationRequired"; progress?: number; downloadedBytes?: number; totalBytes?: number; phase?: "resolving" | "downloading" | "materializing" | "postProcessing" | "uploading" | "verifying"; attempts: number; queuePriority?: number; updatedAt?: string };
 export type HeartbeatFrame = { version: 1; type: "heartbeat"; sequence: number; sentAt: string; agentVersion: string; correlationID: string; commandAcks: RemoteCommandAck[]; jobs: RemoteJobStatus[] };
 export function parseHeartbeatFrame(value: unknown): HeartbeatFrame {
   if (!record(value)) throw new DeviceContractError("invalid_request", "Invalid heartbeat.");
@@ -231,6 +231,7 @@ export function parseHeartbeatFrame(value: unknown): HeartbeatFrame {
     if (job.downloadedBytes !== undefined && !nonNegativeInteger(job.downloadedBytes)) throw new DeviceContractError("invalid_request", "Invalid heartbeat.");
     if (job.totalBytes !== undefined && !nonNegativeInteger(job.totalBytes)) throw new DeviceContractError("invalid_request", "Invalid heartbeat.");
     if (job.phase !== undefined && (typeof job.phase !== "string" || !JOB_PHASES.has(job.phase))) throw new DeviceContractError("invalid_request", "Invalid heartbeat.");
+    if (job.queuePriority !== undefined && !nonNegativeInteger(job.queuePriority)) throw new DeviceContractError("invalid_request", "Invalid heartbeat.");
     if (job.displayName !== undefined && !boundedString(job.displayName, MAX_JOB_STRING_CHARACTERS)) throw new DeviceContractError("invalid_request", "Invalid heartbeat.");
     if (job.preferredQualityLabel !== undefined && !boundedString(job.preferredQualityLabel, MAX_JOB_STRING_CHARACTERS)) throw new DeviceContractError("invalid_request", "Invalid heartbeat.");
     if (job.sourcePageURL !== undefined) {
