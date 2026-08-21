@@ -29,6 +29,7 @@ public actor AgentService {
     public typealias FolderPicker = @Sendable () throws -> String
     public typealias AllPornStreamHTML = @Sendable (URL) async throws -> String
     public typealias MediaProbe = @Sendable (ResolvedQuality) async -> Bool
+    public typealias CloudExtractor = @Sendable (URL) async throws -> ExtractionResult
 
     private struct ActiveDownload {
         let token: UUID
@@ -71,6 +72,7 @@ public actor AgentService {
     private let directExtractor: DirectExtractor
     private let providerCDNRegistry: ProviderCDNRegistry
     private let mediaProbe: MediaProbe
+    private let cloudExtractor: CloudExtractor?
     private var maximumConcurrentDownloads: Int
     private var activeDownloadTasks: [UUID: ActiveDownload] = [:]
     private var lastProgressUpdates: [UUID: LastProgressUpdate] = [:]
@@ -100,6 +102,7 @@ public actor AgentService {
         allPornStreamHTML: AllPornStreamHTML? = nil,
         providerCDNRegistry: ProviderCDNRegistry? = nil,
         mediaProbe: MediaProbe? = nil,
+        cloudExtractor: CloudExtractor? = nil,
         maximumConcurrentDownloads: Int = 1
     ) throws {
         self.jobs = try JobStore(databaseURL: databaseURL)
@@ -128,6 +131,7 @@ public actor AgentService {
         self.allPornStreamHTML = allPornStreamHTML
         self.providerCDNRegistry = providerCDNRegistry ?? ProviderCDNRegistry(fileURL: AgentPaths.providerCDNObservations)
         self.mediaProbe = mediaProbe ?? AgentService.probeDirectMedia
+        self.cloudExtractor = cloudExtractor
         self.pornHubResolver = pornHubResolver ?? { source in
             let cookies = (try? await pornHubAuth.cookiesForYtDlp()) ?? []
             do { return try await PornHubYtDlp.resolve(source: source, cookies: cookies) }
@@ -318,7 +322,17 @@ public actor AgentService {
     }
 
     public func extract(url: URL) async throws -> ExtractionResult {
-        try await directExtractor.extract(url: url)
+        if let cloudExtractor {
+            do {
+                return try await cloudExtractor(url)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                try Task.checkCancellation()
+                fputs("Lustre extraction fallback: cloud unavailable; using local Agent.\n", stderr)
+            }
+        }
+        return try await directExtractor.extract(url: url)
     }
 
     public func createJob(_ request: CreateJobRequest) async throws -> DownloadJob {

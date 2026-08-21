@@ -23,7 +23,8 @@ struct LustreAgentMain {
             let service = try AgentService(
                 pornHubAuth: pornHubAuth,
                 allPornStreamCapture: browserCapture,
-                allPornStreamHTML: { url in try await browserCapture.capturePost(url: url) }
+                allPornStreamHTML: { url in try await browserCapture.capturePost(url: url) },
+                cloudExtractor: CloudExtractionClient().extract
             )
             let cloudPresence = CloudPresenceConnection(service: service)
             let loopbackServer: LoopbackServer?

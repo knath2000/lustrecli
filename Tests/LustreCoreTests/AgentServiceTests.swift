@@ -4,6 +4,66 @@ import LustreCore
 import XCTest
 
 final class AgentServiceTests: XCTestCase {
+    func testExtractPrefersCloudResolution() async throws {
+        let database = FileManager.default.temporaryDirectory.appending(path: "lustre-agent-cloud-first-\(UUID().uuidString).sqlite3")
+        defer { try? FileManager.default.removeItem(at: database) }
+        let source = URL(string: "https://example.com/video")!
+        let quality = ResolvedQuality(
+            label: "1080p",
+            url: URL(string: "https://cdn.example.com/video.mp4")!,
+            resolutionMethod: "Lustre Cloud"
+        )
+        let cloud = ExtractionResult(
+            sourcePageURL: source,
+            isDirectMedia: false,
+            resolutionState: "resolved",
+            trace: ["Resolved by Lustre Cloud."],
+            resolution: ProviderResolution(
+                sourcePageURL: source,
+                provider: .direct,
+                qualities: [quality],
+                trace: ["Resolved by Lustre Cloud."]
+            )
+        )
+        let service = try AgentService(
+            databaseURL: database,
+            automaticallyStartsDownloads: false,
+            cloudExtractor: { _ in cloud }
+        )
+
+        let result = try await service.extract(url: source)
+
+        XCTAssertEqual(result, cloud)
+    }
+
+    func testExtractFallsBackLocallyWhenCloudFails() async throws {
+        let database = FileManager.default.temporaryDirectory.appending(path: "lustre-agent-cloud-fallback-\(UUID().uuidString).sqlite3")
+        defer { try? FileManager.default.removeItem(at: database) }
+        let source = URL(string: "https://mixdrop.co/e/xyz")!
+        let resolver = StaticProviderResolver(
+            fetch: { url, _ in
+                HTTPPage(
+                    body: #"<script>MDCore.wurl = "https://cdn.mxcontent.net/video.mp4"</script>"#,
+                    finalURL: url,
+                    statusCode: 200
+                )
+            },
+            randomSuffix: { "unused" },
+            nowMilliseconds: { "0" }
+        )
+        let service = try AgentService(
+            databaseURL: database,
+            resolver: resolver,
+            automaticallyStartsDownloads: false,
+            cloudExtractor: { _ in throw URLError(.timedOut) }
+        )
+
+        let result = try await service.extract(url: source)
+
+        XCTAssertEqual(result.resolutionState, "resolved")
+        XCTAssertEqual(result.resolution?.provider, .mixDrop)
+    }
+
     func testCreateJobUsesCallerSuppliedIDAndCannotCreateASecondJobForIt() async throws {
         let database = FileManager.default.temporaryDirectory.appending(path: "lustre-agent-command-id-\(UUID().uuidString).sqlite3")
         defer { try? FileManager.default.removeItem(at: database) }
