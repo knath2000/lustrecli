@@ -20,11 +20,15 @@ struct LustreAgentMain {
                 store: pornHubCookieStore,
                 helper: BrowserPornHubAuthHelper(capture: browserCapture, store: pornHubCookieStore)
             )
+            let stagingClient = CloudStagingClient()
             let service = try AgentService(
                 pornHubAuth: pornHubAuth,
                 allPornStreamCapture: browserCapture,
                 allPornStreamHTML: { url in try await browserCapture.capturePost(url: url) },
-                cloudExtractor: CloudExtractionClient().extract
+                cloudExtractor: CloudExtractionClient().extract,
+                cloudStagingTransfer: { stageID, token, directory, onStageID, onProgress in
+                    try await stagingClient.transfer(existingStageID: stageID, stagingToken: token, directory: directory, onStageID: onStageID, onProgress: onProgress)
+                }
             )
             let cloudPresence = CloudPresenceConnection(service: service)
             let loopbackServer: LoopbackServer?

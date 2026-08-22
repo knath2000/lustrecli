@@ -4,6 +4,77 @@ import LustreCore
 import XCTest
 
 final class AgentServiceTests: XCTestCase {
+    func testCloudResolvedMP4UsesStagingTransferForLocalDestination() async throws {
+        let database = FileManager.default.temporaryDirectory.appending(path: "lustre-agent-cloud-stage-\(UUID().uuidString).sqlite3")
+        let downloads = FileManager.default.temporaryDirectory.appending(path: "lustre-agent-cloud-stage-output-\(UUID().uuidString)", directoryHint: .isDirectory)
+        defer {
+            try? FileManager.default.removeItem(at: database)
+            try? FileManager.default.removeItem(at: downloads)
+        }
+        let source = URL(string: "https://hqporner.com/hdporn/example.html")!
+        let quality = ResolvedQuality(label: "1080p", url: URL(string: "https://media.example/video.mp4")!, resolutionMethod: "Lustre Cloud", cloudStagingToken: "signed-stage-token")
+        let cloud = ExtractionResult(sourcePageURL: source, isDirectMedia: false, resolutionState: "resolved", trace: [], resolution: ProviderResolution(sourcePageURL: source, provider: .direct, qualities: [quality], trace: []))
+        let service = try AgentService(
+            databaseURL: database,
+            downloadsDirectory: downloads,
+            automaticallyStartsDownloads: false,
+            cloudExtractor: { _ in cloud },
+            cloudStagingTransfer: { _, token, directory, onStageID, onProgress in
+                guard token == "signed-stage-token" else { throw CloudStagingError.requestFailed }
+                await onStageID(UUID())
+                await onProgress(DownloadProgress(bytesWritten: 512, totalBytes: 1024, phase: .cloudStaging))
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                let output = directory.appending(path: "staged.mp4")
+                try Data(repeating: 1, count: 1024).write(to: output)
+                await onStageID(nil)
+                return output
+            }
+        )
+        let job = try await service.createJob(CreateJobRequest(sourcePageURL: source))
+
+        await service.processQueuedJob(id: job.id)
+
+        let stored = try await service.job(id: job.id)
+        let completed = try XCTUnwrap(stored)
+        XCTAssertEqual(completed.status, .completed)
+        XCTAssertNil(completed.cloudStageID)
+        XCTAssertEqual(completed.completionArtifact?.filename, "staged.mp4")
+    }
+
+    func testCloudStagingFailureFallsBackToLocalDirectDownload() async throws {
+        let database = FileManager.default.temporaryDirectory.appending(path: "lustre-agent-cloud-stage-fallback-\(UUID().uuidString).sqlite3")
+        let downloads = FileManager.default.temporaryDirectory.appending(path: "lustre-agent-cloud-stage-fallback-output-\(UUID().uuidString)", directoryHint: .isDirectory)
+        defer {
+            try? FileManager.default.removeItem(at: database)
+            try? FileManager.default.removeItem(at: downloads)
+        }
+        let source = URL(string: "https://example.com/video")!
+        let quality = ResolvedQuality(label: "Video", url: URL(string: "https://media.example/video.mp4")!, resolutionMethod: "Lustre Cloud", cloudStagingToken: "signed-stage-token")
+        let cloud = ExtractionResult(sourcePageURL: source, isDirectMedia: false, resolutionState: "resolved", trace: [], resolution: ProviderResolution(sourcePageURL: source, provider: .direct, qualities: [quality], trace: []))
+        let service = try AgentService(
+            databaseURL: database,
+            downloadsDirectory: downloads,
+            automaticallyStartsDownloads: false,
+            progressDownloader: { _, _, directory, _ in
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                let output = directory.appending(path: "local-fallback.mp4")
+                try Data(repeating: 2, count: 1024).write(to: output)
+                return output
+            },
+            cloudExtractor: { _ in cloud },
+            cloudStagingTransfer: { _, _, _, _, _ in throw CloudStagingError.requestFailed }
+        )
+        let job = try await service.createJob(CreateJobRequest(sourcePageURL: source))
+
+        await service.processQueuedJob(id: job.id)
+
+        let stored = try await service.job(id: job.id)
+        let completed = try XCTUnwrap(stored)
+        XCTAssertEqual(completed.status, .completed)
+        XCTAssertTrue(completed.logs?.contains(where: { $0.message.contains("downloading locally") }) == true)
+        XCTAssertEqual(completed.completionArtifact?.filename, "local-fallback.mp4")
+    }
+
     func testExtractPrefersCloudResolution() async throws {
         let database = FileManager.default.temporaryDirectory.appending(path: "lustre-agent-cloud-first-\(UUID().uuidString).sqlite3")
         defer { try? FileManager.default.removeItem(at: database) }

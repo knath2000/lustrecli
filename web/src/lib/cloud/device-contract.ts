@@ -61,7 +61,7 @@ export function deviceError(error: unknown): { error: { code: DeviceErrorCode; m
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const JOB_STATUSES = new Set(["queued", "running", "paused", "completed", "failed", "cancelled", "verificationRequired"]);
-const JOB_PHASES = new Set(["resolving", "downloading", "materializing", "postProcessing", "uploading", "verifying"]);
+const JOB_PHASES = new Set(["resolving", "cloudStaging", "downloading", "materializing", "postProcessing", "uploading", "verifying"]);
 const MAX_JOB_STRING_CHARACTERS = 512;
 const MAX_SOURCE_URL_CHARACTERS = 4_096;
 const ACKNOWLEDGEMENT_CODES = new Set(["provider_verification_required", "provider_http_error", "provider_unreachable", "provider_changed", "authentication_required", "browser_extension_required", "result_too_large", "invalid_request", "signed_out", "signing_in", "cancelled", "expired", "auth_helper_unavailable", "auth_helper_failed", "auth_timeout", "invalid_session", "auth_storage_unavailable"]);
@@ -205,7 +205,7 @@ export function validLibraryResult(value: unknown): value is Record<string, unkn
 }
 
 export type RemoteCommandAck = { id: string; status: "completed" | "failed"; jobID?: string; result?: Record<string, unknown>; code?: string };
-export type RemoteJobStatus = { id: string; sourcePageURL?: string; displayName?: string; preferredQualityLabel?: string; status: "queued" | "running" | "paused" | "completed" | "failed" | "cancelled" | "verificationRequired"; progress?: number; downloadedBytes?: number; totalBytes?: number; phase?: "resolving" | "downloading" | "materializing" | "postProcessing" | "uploading" | "verifying"; attempts: number; queuePriority?: number; updatedAt?: string };
+export type RemoteJobStatus = { id: string; sourcePageURL?: string; displayName?: string; preferredQualityLabel?: string; status: "queued" | "running" | "paused" | "completed" | "failed" | "cancelled" | "verificationRequired"; progress?: number; downloadedBytes?: number; totalBytes?: number; phase?: "resolving" | "cloudStaging" | "downloading" | "materializing" | "postProcessing" | "uploading" | "verifying"; attempts: number; queuePriority?: number; updatedAt?: string };
 export type HeartbeatFrame = { version: 1; type: "heartbeat"; sequence: number; sentAt: string; agentVersion: string; correlationID: string; commandAcks: RemoteCommandAck[]; jobs: RemoteJobStatus[] };
 export function parseHeartbeatFrame(value: unknown): HeartbeatFrame {
   if (!record(value)) throw new DeviceContractError("invalid_request", "Invalid heartbeat.");

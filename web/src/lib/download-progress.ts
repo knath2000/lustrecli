@@ -2,6 +2,7 @@ import type { DownloadJob, TransferPhase } from "@/lib/download-job";
 
 const phaseLabels: Record<TransferPhase, string> = {
   resolving: "Resolving",
+  cloudStaging: "Cloud staging",
   downloading: "Downloading",
   materializing: "Materializing",
   postProcessing: "Post-processing",

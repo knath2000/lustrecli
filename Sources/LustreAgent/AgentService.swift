@@ -30,6 +30,7 @@ public actor AgentService {
     public typealias AllPornStreamHTML = @Sendable (URL) async throws -> String
     public typealias MediaProbe = @Sendable (ResolvedQuality) async -> Bool
     public typealias CloudExtractor = @Sendable (URL) async throws -> ExtractionResult
+    public typealias CloudStagingTransfer = @Sendable (UUID?, String, URL, @escaping @Sendable (UUID?) async -> Void, @escaping @Sendable (DownloadProgress) async -> Void) async throws -> URL
 
     private struct ActiveDownload {
         let token: UUID
@@ -73,6 +74,7 @@ public actor AgentService {
     private let providerCDNRegistry: ProviderCDNRegistry
     private let mediaProbe: MediaProbe
     private let cloudExtractor: CloudExtractor?
+    private let cloudStagingTransfer: CloudStagingTransfer?
     private var maximumConcurrentDownloads: Int
     private var activeDownloadTasks: [UUID: ActiveDownload] = [:]
     private var lastProgressUpdates: [UUID: LastProgressUpdate] = [:]
@@ -103,6 +105,7 @@ public actor AgentService {
         providerCDNRegistry: ProviderCDNRegistry? = nil,
         mediaProbe: MediaProbe? = nil,
         cloudExtractor: CloudExtractor? = nil,
+        cloudStagingTransfer: CloudStagingTransfer? = nil,
         maximumConcurrentDownloads: Int = 1
     ) throws {
         self.jobs = try JobStore(databaseURL: databaseURL)
@@ -132,6 +135,7 @@ public actor AgentService {
         self.providerCDNRegistry = providerCDNRegistry ?? ProviderCDNRegistry(fileURL: AgentPaths.providerCDNObservations)
         self.mediaProbe = mediaProbe ?? AgentService.probeDirectMedia
         self.cloudExtractor = cloudExtractor
+        self.cloudStagingTransfer = cloudStagingTransfer
         self.pornHubResolver = pornHubResolver ?? { source in
             let cookies = (try? await pornHubAuth.cookiesForYtDlp()) ?? []
             do { return try await PornHubYtDlp.resolve(source: source, cookies: cookies) }
@@ -631,6 +635,28 @@ public actor AgentService {
                 record(&active, level: .info, message: "Streaming \(quality.label) to \(profile.name).")
                 try await jobs.update(active)
                 output = try await remoteDownloader(resolution, quality, profile, password, reportProgress)
+            } else if let stagingToken = quality.cloudStagingToken, let cloudStagingTransfer {
+                record(&active, level: .info, message: "Staging \(quality.label) in Lustre Cloud.")
+                active.transferPhase = .cloudStaging
+                active.updatedAt = .now
+                try await jobs.update(active)
+                let stageUpdate: @Sendable (UUID?) async -> Void = { [weak self] stageID in
+                    await self?.setCloudStageID(stageID, for: id, taskID: taskID)
+                }
+                do {
+                    output = try await cloudStagingTransfer(current.cloudStageID, stagingToken, try downloadDirectory(for: current.destination), stageUpdate, reportProgress)
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {
+                    await setCloudStageID(nil, for: id, taskID: taskID)
+                    if var fallback = try await jobs.job(id: id), fallback.status == .running {
+                        record(&fallback, level: .info, message: "Cloud staging unavailable; downloading locally.")
+                        fallback.transferPhase = .downloading
+                        fallback.updatedAt = .now
+                        try await jobs.update(fallback)
+                    }
+                    output = try await progressDownloader(resolution, quality, try downloadDirectory(for: current.destination), reportProgress)
+                }
             } else {
                 output = try await progressDownloader(resolution, quality, try downloadDirectory(for: current.destination), reportProgress)
             }
@@ -642,6 +668,7 @@ public actor AgentService {
             completed.status = .completed
             completed.progress = 1
             completed.assistedResolution = nil
+            completed.cloudStageID = nil
             completed.completionArtifact = completionArtifact(output: output, destination: completed.destination)
             completed.phaseBytesPerSecond = nil
             completed.phaseETASeconds = nil
@@ -662,6 +689,13 @@ public actor AgentService {
                 // The job store is the source of truth; there is no secondary error channel here.
             }
         }
+    }
+
+    private func setCloudStageID(_ stageID: UUID?, for id: UUID, taskID: UUID?) async {
+        guard ownsDownload(id, taskID: taskID), var job = try? await jobs.job(id: id), job.status == .running else { return }
+        job.cloudStageID = stageID
+        job.updatedAt = .now
+        try? await jobs.update(job)
     }
 
     private func enqueueDownload(_ id: UUID) async {

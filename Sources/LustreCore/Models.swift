@@ -120,18 +120,20 @@ public struct ResolvedQuality: Codable, Equatable, Sendable {
     public let resolutionMethod: String
     public let mediaKind: MediaKind
     public let formatSelector: String?
+    public let cloudStagingToken: String?
 
-    public init(label: String, url: URL, headers: [String: String] = [:], resolutionMethod: String, mediaKind: MediaKind = .direct, formatSelector: String? = nil) {
+    public init(label: String, url: URL, headers: [String: String] = [:], resolutionMethod: String, mediaKind: MediaKind = .direct, formatSelector: String? = nil, cloudStagingToken: String? = nil) {
         self.label = label
         self.url = url
         self.headers = headers
         self.resolutionMethod = resolutionMethod
         self.mediaKind = mediaKind
         self.formatSelector = formatSelector
+        self.cloudStagingToken = cloudStagingToken
     }
 
     private enum CodingKeys: String, CodingKey {
-        case label, url, headers, resolutionMethod, mediaKind, formatSelector
+        case label, url, headers, resolutionMethod, mediaKind, formatSelector, cloudStagingToken
     }
 
     public init(from decoder: Decoder) throws {
@@ -142,6 +144,7 @@ public struct ResolvedQuality: Codable, Equatable, Sendable {
         resolutionMethod = try container.decode(String.self, forKey: .resolutionMethod)
         mediaKind = try container.decodeIfPresent(MediaKind.self, forKey: .mediaKind) ?? .direct
         formatSelector = try container.decodeIfPresent(String.self, forKey: .formatSelector)
+        cloudStagingToken = try container.decodeIfPresent(String.self, forKey: .cloudStagingToken)
     }
 }
 
@@ -212,7 +215,7 @@ public struct ProviderResolution: Codable, Equatable, Sendable {
     }
 }
 
-public enum TransferPhase: String, Codable, Equatable, Sendable { case resolving, downloading, materializing, postProcessing, uploading, verifying }
+public enum TransferPhase: String, Codable, Equatable, Sendable { case resolving, cloudStaging, downloading, materializing, postProcessing, uploading, verifying }
 
 public struct DownloadProgress: Equatable, Sendable {
     public let bytesWritten: Int64
@@ -260,6 +263,7 @@ public struct DownloadJob: Codable, Identifiable, Equatable, Sendable {
     public var attempts: Int
     public var logs: [JobLogEntry]?
     public var completionArtifact: JobCompletionArtifact?
+    public var cloudStageID: UUID?
     public var queuePriority: Int?
     public let createdAt: Date
     public var updatedAt: Date
@@ -287,6 +291,7 @@ public struct DownloadJob: Codable, Identifiable, Equatable, Sendable {
         attempts: Int = 0,
         logs: [JobLogEntry]? = nil,
         completionArtifact: JobCompletionArtifact? = nil,
+        cloudStageID: UUID? = nil,
         queuePriority: Int? = nil,
         createdAt: Date = .now,
         updatedAt: Date = .now
@@ -313,6 +318,7 @@ public struct DownloadJob: Codable, Identifiable, Equatable, Sendable {
         self.attempts = attempts
         self.logs = logs
         self.completionArtifact = completionArtifact
+        self.cloudStageID = cloudStageID
         self.queuePriority = queuePriority
         self.createdAt = createdAt
         self.updatedAt = updatedAt

@@ -45,6 +45,7 @@ export const playbackQualitySchema = z.object({
   provider: z.string().min(1).max(80).optional(),
   resolutionMethod: z.enum(["native", "browser_capture"]).optional(),
   infuseCompatibility: z.enum(["verified", "header_required", "unknown"]).optional(),
+  stagingToken: z.string().min(32).max(8192).optional(),
 });
 
 export const providerAttemptSchema = z.object({

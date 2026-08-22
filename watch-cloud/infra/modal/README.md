@@ -19,4 +19,6 @@ python3 -m venv .venv-modal
 
 Copy the deployed Web Function URL, Proxy Token ID, and Proxy Token secret into Vercel as `RESOLVER_ORIGIN`, `MODAL_PROXY_KEY`, and `MODAL_PROXY_SECRET`.
 
+Cloud MP4 staging also requires a private R2 Standard bucket and a Modal secret named `lustre-r2-staging` containing `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, and `R2_STAGING_BUCKET`. Set the staging API Web Function URL in Vercel as `STAGING_ORIGIN`, copy the same scoped R2 values into Vercel, and set a separate random `LUSTRE_STAGING_TOKEN_SECRET`. Apply `infra/r2/staging-lifecycle.json` to the bucket before enabling `LUSTRE_CLOUD_STAGING_ENABLED=true`.
+
 Before every release, verify the current Starter recurring credit and workspace budget enforcement in Modal’s dashboard. Do not deploy if the workspace hard cap is absent, above `$10`, or not enforced.

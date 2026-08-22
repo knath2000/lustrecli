@@ -1,7 +1,7 @@
 import type { AgentDate } from "@/lib/agent-date";
 import type { JobStatus } from "@/lib/job-actions";
 
-export type TransferPhase = "resolving" | "downloading" | "materializing" | "postProcessing" | "uploading" | "verifying";
+export type TransferPhase = "resolving" | "cloudStaging" | "downloading" | "materializing" | "postProcessing" | "uploading" | "verifying";
 
 export type JobLog = {
   timestamp: AgentDate;

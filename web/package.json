@@ -10,6 +10,8 @@
     "test": "node --no-warnings --test --experimental-strip-types src/lib/*.test.mjs src/lib/cloud/*.test.mjs && node --import tsx --test src/lib/lustre-watch/*.test.ts"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1115.0",
+    "@aws-sdk/s3-request-presigner": "^3.1115.0",
     "@clerk/nextjs": "^7.6.1",
     "@neondatabase/serverless": "^1.1.0",
     "@vercel/functions": "^3.7.6",

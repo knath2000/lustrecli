@@ -3,6 +3,7 @@ import { DeviceContractError } from "@/lib/cloud/device-contract";
 import { verifyDeviceToken } from "@/lib/cloud/device-token";
 import { feedPlaybackResolutionSchema, resolveRequestSchema, type FeedPlaybackResolution } from "@/lib/lustre-watch/contracts";
 import { errorResponse, resolverRequest } from "@/lib/lustre-watch/resolver";
+import { issueStagingToken } from "@/lib/cloud/staging";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -31,7 +32,20 @@ export async function POST(request: Request) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(input.data),
     });
-    return Response.json(feedPlaybackResolutionSchema.parse(result), {
+    const resolution = feedPlaybackResolutionSchema.parse(result);
+    const qualities = await Promise.all(resolution.qualities.map(async (quality) => process.env.LUSTRE_CLOUD_STAGING_ENABLED === "true" && quality.mediaKind === "video"
+      ? {
+          ...quality,
+          stagingToken: await issueStagingToken(deviceID, {
+            sourcePageURL: resolution.sourcePageURL,
+            mediaURL: quality.url,
+            headers: quality.headers,
+            title: resolution.title,
+            label: quality.label,
+          }),
+        }
+      : quality));
+    return Response.json({ ...resolution, qualities }, {
       headers: { "Cache-Control": "no-store" },
     });
   } catch (reason) {

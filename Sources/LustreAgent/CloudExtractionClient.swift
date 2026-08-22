@@ -123,6 +123,7 @@ private struct CloudResolution: Decodable {
         let headers: [String: String]
         let provider: String?
         let resolutionMethod: String?
+        let stagingToken: String?
     }
 
     func extractionResult(requestedURL: URL) throws -> ExtractionResult {
@@ -145,7 +146,8 @@ private struct CloudResolution: Decodable {
                 url: quality.url,
                 headers: quality.headers,
                 resolutionMethod: quality.resolutionMethod.map { "Lustre Cloud · \($0)" } ?? "Lustre Cloud",
-                mediaKind: mediaKind
+                mediaKind: mediaKind,
+                cloudStagingToken: quality.stagingToken
             )
         }
         let provider = providerKind(qualities.first?.provider)
