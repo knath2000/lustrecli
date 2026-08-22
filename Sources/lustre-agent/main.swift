@@ -30,10 +30,13 @@ struct LustreAgentMain {
                     try await stagingClient.transfer(existingStageID: stageID, stagingToken: token, directory: directory, onStageID: onStageID, onProgress: onProgress)
                 }
             )
+            let collectionStore = try CloudCollectionStore(databaseURL: AgentPaths.cloudCollections)
+            let collectionSync = CloudCollectionSync(service: service, store: collectionStore)
+            try await collectionSync.refreshLocalProjection()
             let cloudPresence = CloudPresenceConnection(service: service)
             let loopbackServer: LoopbackServer?
             if let token = try? KeychainTokenStore.token() {
-                let server = try LoopbackServer(service: service, token: token)
+                let server = try LoopbackServer(service: service, token: token, collections: collectionStore)
                 let port = try await server.start()
                 guard port != 0 else { throw AgentLaunchError.noPort }
                 let endpoint = try JSONEncoder().encode(AgentEndpoint(port: port))
@@ -46,8 +49,10 @@ struct LustreAgentMain {
                 loopbackServer = nil
             }
             defer { loopbackServer?.cancel() }
+            defer { Task { await collectionSync.stop() } }
             defer { Task { await browserCapture.stop() } }
             Task { await cloudPresence.startIfEnrolled() }
+            Task { await collectionSync.start() }
             await withUnsafeContinuation { (_: UnsafeContinuation<Void, Never>) in }
         } catch {
             fputs("lustre-agent: \(error.localizedDescription)\n", stderr)

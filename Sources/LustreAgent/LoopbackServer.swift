@@ -5,17 +5,19 @@ import Network
 public final class LoopbackServer: @unchecked Sendable {
     private let listener: NWListener
     private let service: AgentService
+    private let collections: CloudCollectionStore?
     private let token: String
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
     private var selfRetain: LoopbackServer?
 
-    public init(service: AgentService, token: String) throws {
+    public init(service: AgentService, token: String, collections: CloudCollectionStore? = nil) throws {
         let parameters = NWParameters.tcp
         parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: AgentPaths.loopbackPort)!)
         self.listener = try NWListener(using: parameters)
         self.service = service
         self.token = token
+        self.collections = collections
     }
 
     public func start() async throws -> UInt16 {
@@ -70,8 +72,68 @@ public final class LoopbackServer: @unchecked Sendable {
         }
 
         do {
-            if request.method == "GET", request.path == "/v1/jobs" {
+            if request.method == "GET", routePath == "/v1/collections" {
+                guard let collections else { return json(status: 503, value: ErrorResponse(error: "Cloud collections are unavailable.")) }
+                return json(status: 200, value: try await collections.snapshot())
+            }
+            if request.method == "POST", routePath == "/v1/collections/watchlist" {
+                guard let collections else { return json(status: 503, value: ErrorResponse(error: "Cloud collections are unavailable.")) }
+                let input = try decoder.decode(CloudWatchlistItem.self, from: request.body)
+                try await collections.saveWatchlist(input)
+                return json(status: 200, value: try await collections.snapshot())
+            }
+            if request.method == "DELETE", routePath == "/v1/collections/watchlist" {
+                guard let collections else { return json(status: 503, value: ErrorResponse(error: "Cloud collections are unavailable.")) }
+                let input = try decoder.decode(CollectionSourceRequest.self, from: request.body)
+                try await collections.removeWatchlist(sourceURL: input.sourcePageURL)
+                return json(status: 200, value: try await collections.snapshot())
+            }
+            if request.method == "PATCH", routePath == "/v1/collections/library" {
+                guard let collections else { return json(status: 503, value: ErrorResponse(error: "Cloud collections are unavailable.")) }
+                let input = try decoder.decode(LibraryOrganizationRequest.self, from: request.body)
+                try await collections.organizeLibrary(sourceURL: input.sourcePageURL, tags: input.tags, collection: input.collection, favorite: input.favorite)
+                return json(status: 200, value: try await collections.snapshot())
+            }
+            if request.method == "DELETE", routePath == "/v1/collections/library" {
+                guard let collections else { return json(status: 503, value: ErrorResponse(error: "Cloud collections are unavailable.")) }
+                let input = try decoder.decode(CollectionSourceRequest.self, from: request.body)
+                try await collections.removeLibrary(sourceURL: input.sourcePageURL)
+                return json(status: 200, value: try await collections.snapshot())
+            }
+            if request.method == "GET", routePath == "/v1/snapshot" {
+                let query = (components?.queryItems ?? []).reduce(into: [String: String]()) { values, item in
+                    if let value = item.value { values[item.name] = value }
+                }
+                return json(
+                    status: 200,
+                    value: try await service.operationalSnapshot(
+                        terminalLimit: query["terminalLimit"].flatMap(Int.init) ?? 25
+                    )
+                )
+            }
+            if request.method == "GET", routePath == "/v1/jobs" {
+                let query = (components?.queryItems ?? []).reduce(into: [String: String]()) { values, item in
+                    if let value = item.value { values[item.name] = value }
+                }
+                if query["scope"] == "active" {
+                    return json(
+                        status: 200,
+                        value: try await service.operationalJobs(terminalLimit: query["terminalLimit"].flatMap(Int.init) ?? 25)
+                    )
+                }
                 return json(status: 200, value: try await service.allJobs())
+            }
+            if request.method == "GET", routePath == "/v1/job-history" {
+                let query = (components?.queryItems ?? []).reduce(into: [String: String]()) { values, item in
+                    if let value = item.value { values[item.name] = value }
+                }
+                return json(
+                    status: 200,
+                    value: try await service.completedJobHistory(
+                        cursor: query["cursor"].flatMap(Int.init) ?? 0,
+                        limit: query["limit"].flatMap(Int.init) ?? 50
+                    )
+                )
             }
             if request.method == "POST", routePath == "/v1/entitlement" {
                 let input = try decoder.decode(EntitlementProjectionRequest.self, from: request.body)
@@ -194,6 +256,17 @@ public final class LoopbackServer: @unchecked Sendable {
         } catch {
             return json(status: 400, value: ErrorResponse(error: error.localizedDescription))
         }
+    }
+
+    private struct CollectionSourceRequest: Decodable {
+        let sourcePageURL: URL
+    }
+
+    private struct LibraryOrganizationRequest: Decodable {
+        let sourcePageURL: URL
+        let tags: [String]
+        let collection: String?
+        let favorite: Bool
     }
 
     private func json<T: Encodable>(status: Int, value: T) -> HTTPResponse {

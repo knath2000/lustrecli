@@ -8,6 +8,7 @@ public enum AgentPaths {
     }()
 
     public static let database = applicationSupport.appending(path: "jobs.sqlite3")
+    public static let cloudCollections = applicationSupport.appending(path: "cloud-collections.sqlite3")
     public static let endpoint = applicationSupport.appending(path: "endpoint.json")
     public static let remoteDestinations = applicationSupport.appending(path: "remote-destinations.json")
     public static let googleDriveDestinations = applicationSupport.appending(path: "google-drive-destinations.json")

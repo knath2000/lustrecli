@@ -156,6 +156,29 @@ final class AgentServiceTests: XCTestCase {
         }
     }
 
+    func testOperationalJobsBoundsTerminalHistoryAndKeepsUnfinishedJobs() async throws {
+        let database = FileManager.default.temporaryDirectory.appending(path: "lustre-agent-operational-\(UUID().uuidString).sqlite3")
+        defer { try? FileManager.default.removeItem(at: database) }
+        let service = try AgentService(databaseURL: database, automaticallyStartsDownloads: false)
+
+        let first = try await service.createJob(CreateJobRequest(sourcePageURL: URL(string: "https://example.com/first")!))
+        let second = try await service.createJob(CreateJobRequest(sourcePageURL: URL(string: "https://example.com/second")!))
+        let third = try await service.createJob(CreateJobRequest(sourcePageURL: URL(string: "https://example.com/third")!))
+        let unfinished = try await service.createJob(CreateJobRequest(sourcePageURL: URL(string: "https://example.com/unfinished")!))
+        _ = try await service.apply(.cancel, to: first.id)
+        _ = try await service.apply(.cancel, to: second.id)
+        _ = try await service.apply(.cancel, to: third.id)
+
+        let jobs = try await service.operationalJobs(terminalLimit: 2)
+        let snapshot = try await service.operationalSnapshot(terminalLimit: 2)
+
+        XCTAssertEqual(jobs.count, 3)
+        XCTAssertTrue(jobs.contains { $0.id == unfinished.id })
+        XCTAssertEqual(jobs.filter { $0.status == .cancelled }.count, 2)
+        XCTAssertEqual(snapshot.jobs.map(\.id), jobs.map(\.id))
+        XCTAssertTrue(snapshot.health.databaseReady)
+    }
+
     func testExtractSurfacesStaticProviderResolution() async throws {
         let resolver = StaticProviderResolver(
             fetch: { url, _ in

@@ -1,5 +1,18 @@
 # Session Log
 
+## 2026-08-22 — Neon collections production deployment and Runtime 17
+
+- Added normalized Neon Library/location/mutation/change tables, Watchlist tombstones, and authenticated device collection synchronization.
+- Applied migration `0012_lustre_cloud_collections.sql` independently to development and production. Vercel Production uses a different Neon branch from `web/.env.local`; inspect the exact linked environment before claiming Production migration success.
+- Raised only the collection-sync body limit to 1 MiB for its bounded 100-mutation batches. Preserved the 16 KiB default elsewhere.
+- Added a dedicated Postgres transaction client for collection writes because the existing Neon HTTP driver rejects callback transactions.
+- Deployed Production `dpl_4ow5CZGELVW85FqXDFhVLvokFaBa` and retained the `https://lustrecli.vercel.app` alias.
+- Confirmed Production Neon atomically holds 100 mutation receipts, 100 Library items, 100 device locations, and 100 collection changes.
+- Activated Runtime 17 after confirming all 274 durable jobs were completed. Health is `ok`, the database is ready, the loopback listener responds, and no jobs are active.
+- Runtime 17 adds bounded decoding diagnostics and finalizes the SQLite cursor statement before commit. It currently reports a root ISO-8601 date decoding failure, so all 246 local mutations remain safely queued with cursor zero.
+- Packaged and verified `/Volumes/WD/Projects/pmvhavendownloader/LustreStudio-2.2.7-build17-unsigned.dmg`, SHA-256 `047bb513684e3bc8f3e3fa7205d6d8cb5919afc76018355b648f3b3f3a113196`.
+- Next action: isolate the exact response date field, add a Swift contract fixture, deploy the fix, and verify pending mutations reach zero without duplicate cloud rows.
+
 ## 2026-08-19 — HQPorner/MyDaddy generated-CDN recovery
 
 - Diagnosed `https://hqporner.com/hdporn/127495-weekend_plans.html`: the HQPorner page and trusted MyDaddy embed returned HTTP 200 and exposed complete 1080p/720p/360p metadata, but each newly generated `bigcdn.cc` path immediately returned HTTP 404. This is provider/CDN churn rather than an HQPorner parsing or general connectivity failure.

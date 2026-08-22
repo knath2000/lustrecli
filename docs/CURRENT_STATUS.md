@@ -1,6 +1,6 @@
 # Current implementation status
 
-Last updated: 2026-08-19
+Last updated: 2026-08-22
 
 This document records the accepted behavior in the current `main` working tree, including the pieces that are intentionally still incomplete. `ARCHITECTURE.md` remains the component-level design reference; `SESSION_LOG.md` records the delivery chronology.
 
@@ -14,7 +14,7 @@ This document records the accepted behavior in the current `main` working tree, 
 - LustreStudio is a first-class Agent client. Jobs created through LustreStudio, LustreCLI, or its web application share the same durable queue and are projected into LustreStudio while it is open; Agent-owned transfers continue after LustreStudio quits.
 - The authenticated API supports durable `DELETE /v1/jobs/:id`. Missing job deletion returns HTTP 404, allowing clients to treat repeated removal as idempotent. LustreStudio can recreate a missing failed job from its stored durable source metadata when the user retries it.
 - The listener remains fixed to `127.0.0.1:63406`; all `/v1` routes require the Keychain-backed bearer token.
-- The installed per-user LaunchAgent runs release Runtime 12. Rebuilt unsigned runtimes may require one foreground macOS Keychain approval before launchd can reuse the existing loopback token.
+- The installed per-user LaunchAgent runs release Runtime 17. Its authenticated listener and database health are confirmed with zero active jobs. Rebuilt unsigned runtimes may require one foreground macOS Keychain approval before launchd can reuse existing Keychain material.
 - Jobs preserve source page URLs and optional exact quality labels. Signed CDN URLs are resolved again immediately before transfer and are not persisted.
 - The scheduler fills the entitlement-controlled transfer slots from durable `queuePriority`, then creation time and UUID. New jobs append to the sequence; retry and resume preserve priority; Force Start remains the explicit bypass for only the selected queued job.
 
@@ -52,6 +52,10 @@ This document records the accepted behavior in the current `main` working tree, 
 - Cancellation, helper failure, storage failure, and sign-out remain distinct. A cancelled/closed helper cannot save a late session, and partial sessions are removed after cancellation or failure.
 
 ### Lustre Cloud
+
+- Account-scoped Library and Watchlist storage is implemented across the Agent's separate `cloud-collections.sqlite3` cache/outbox, authenticated collection-sync API, and normalized Neon tables. Migration `0012_lustre_cloud_collections.sql` must be applied independently to development and production Neon branches.
+- Production collection sync accepts bounded 100-mutation batches with a route-specific 1 MiB request ceiling. Other cloud routes retain the shared 16 KiB ceiling. Mutation writes use a dedicated Postgres transaction client because the Neon HTTP driver cannot execute callback transactions.
+- Production Neon has atomically accepted the first 100 Library mutations and their device-location/change records. Runtime 17 currently retains all 246 local outbox mutations because response application fails closed with `Expected date string to be ISO8601-formatted`; the cursor remains zero. Resolving that response date contract and proving the outbox drains is the current collection-sync blocker.
 
 - Slice 1 is implemented and deployed: Clerk authenticates browser users; Lustre-owned accounts, devices, pairing challenges, enrollment/session challenges, audits, and revocation live in Neon through Drizzle migrations. Device signatures use one permanent macOS Keychain P-256 key and deterministic, domain-separated envelopes. Local `lustre cloud disconnect` only removes local enrollment metadata.
 - The durable transport is a dedicated Cloudflare Worker plus Durable Object gateway. The enrolled agent obtains a fresh signed session, opens the outbound WebSocket, receives `gateway_hello_ack`, and then sends bounded sequenced heartbeats. The Durable Object accepts the socket before parsing application data, restores per-socket attachment metadata after hibernation, rejects malformed or stale messages with stable `4400` close reasons, and sends a local heartbeat acknowledgement before any Vercel request.

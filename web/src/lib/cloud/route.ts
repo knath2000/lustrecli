@@ -7,9 +7,9 @@ export function jsonError(error: unknown) {
   const status = code === "rate_limited" ? 429 : code === "device_not_found" ? 404 : code === "already_enrolled" || code === "conflict" ? 409 : code === "internal_error" ? 500 : 400;
   return Response.json(payload, { status });
 }
-export async function requestBody(request: Request): Promise<Record<string, unknown>> {
+export async function requestBody(request: Request, maximumBytes = 16_384): Promise<Record<string, unknown>> {
   const size = Number(request.headers.get("content-length") ?? "0");
-  if (size > 16_384) throw new DeviceContractError("invalid_request", "Request body is too large.");
+  if (size > maximumBytes) throw new DeviceContractError("invalid_request", "Request body is too large.");
   const value: unknown = await request.json();
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new DeviceContractError("invalid_request", "Request body must be an object.");
   return value as Record<string, unknown>;

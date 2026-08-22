@@ -12,6 +12,37 @@ public struct LocalDownloadFolderStatus: Codable, Equatable, Sendable {
     }
 }
 
+public struct JobHistoryPage: Codable, Equatable, Sendable {
+    public let jobs: [DownloadJob]
+    public let nextCursor: Int?
+
+    public init(jobs: [DownloadJob], nextCursor: Int?) {
+        self.jobs = jobs
+        self.nextCursor = nextCursor
+    }
+}
+
+public struct AgentOperationalSnapshot: Codable, Equatable, Sendable {
+    public let health: AgentHealth
+    public let jobs: [DownloadJob]
+
+    public init(health: AgentHealth, jobs: [DownloadJob]) {
+        self.health = health
+        self.jobs = jobs
+    }
+}
+
+private extension JobStatus {
+    var isTerminal: Bool {
+        switch self {
+        case .completed, .failed, .cancelled:
+            true
+        case .queued, .running, .paused, .verificationRequired:
+            false
+        }
+    }
+}
+
 private struct LocalDownloadFolderConfiguration: Codable {
     let path: String
 }
@@ -202,6 +233,43 @@ public actor AgentService {
 
     public func allJobs() async throws -> [DownloadJob] {
         try await jobs.allJobs()
+    }
+
+    public func operationalJobs(terminalLimit: Int = 25) async throws -> [DownloadJob] {
+        Self.operationalJobs(from: try await jobs.allJobs(), terminalLimit: terminalLimit)
+    }
+
+    public func operationalSnapshot(terminalLimit: Int = 25) async throws -> AgentOperationalSnapshot {
+        let allJobs = try await jobs.allJobs()
+        return AgentOperationalSnapshot(
+            health: AgentHealth(
+                status: "ok",
+                runtimeVersion: ProcessInfo.processInfo.environment["LUSTRE_RUNTIME_VERSION"] ?? "development",
+                databaseReady: true,
+                activeJobs: allJobs.filter { $0.status == .running }.count
+            ),
+            jobs: Self.operationalJobs(from: allJobs, terminalLimit: terminalLimit)
+        )
+    }
+
+    private static func operationalJobs(from allJobs: [DownloadJob], terminalLimit: Int) -> [DownloadJob] {
+        let unfinished = allJobs.filter { !$0.status.isTerminal }
+        let recentTerminal = allJobs.filter(\.status.isTerminal).prefix(min(max(terminalLimit, 0), 100))
+        return (unfinished + recentTerminal).sorted { $0.updatedAt > $1.updatedAt }
+    }
+
+    public func completedJobHistory(cursor: Int = 0, limit: Int = 50) async throws -> JobHistoryPage {
+        let offset = max(cursor, 0)
+        let pageLimit = min(max(limit, 1), 100)
+        let completed = try await jobs.allJobs().filter { $0.status == .completed }
+        guard offset < completed.count else {
+            return JobHistoryPage(jobs: [], nextCursor: nil)
+        }
+        let end = min(offset + pageLimit, completed.count)
+        return JobHistoryPage(
+            jobs: Array(completed[offset..<end]),
+            nextCursor: end < completed.count ? end : nil
+        )
     }
 
     public func reorderQueuedJobs(_ ids: [UUID]) async throws -> [DownloadJob] {
