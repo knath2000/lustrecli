@@ -13,6 +13,14 @@ struct LustreCLI {
                 print(try KeychainTokenStore.token())
                 return
             }
+            if command == "config" {
+                try await config(arguments: Array(arguments.dropFirst()))
+                return
+            }
+            if command == "bench" {
+                try await bench(arguments: Array(arguments.dropFirst()))
+                return
+            }
             if command == "cloud" {
                 try await cloud(arguments: Array(arguments.dropFirst()))
                 return
@@ -75,8 +83,17 @@ struct LustreCLI {
             let client = try AgentClient()
             switch command {
             case "status":
-                let jobs = try await client.jobs()
-                try printJSON(jobs)
+                if arguments.count >= 3, arguments[1] == "--job" {
+                    guard let id = UUID(uuidString: arguments[2]) else { throw CLIError.usage }
+                    if let job = try await client.job(id: id) {
+                        try printJSON(job)
+                    } else {
+                        print("Job not found.")
+                    }
+                } else {
+                    let jobs = try await client.jobs()
+                    try printJSON(jobs)
+                }
             case "auth":
                 guard arguments.count == 2 else { throw CLIError.usage }
                 switch arguments[1] {
@@ -129,6 +146,84 @@ struct LustreCLI {
         return arguments[index + 1]
     }
 
+    private static func config(arguments: [String]) async throws {
+        let current = AgentConfiguration.load()
+        guard let subcommand = arguments.first else {
+            try printJSON(current)
+            return
+        }
+        switch subcommand {
+        case "get":
+            guard arguments.count == 2 else { throw CLIError.usage }
+            switch arguments[1] {
+            case "download.parallelRangeEnabled":
+                print(current.downloadParallelRangeEnabled ? "true" : "false")
+            case "download.maxStreamsPerJob":
+                print(current.downloadMaxStreamsPerJob)
+            case "download.resumeTTLHours":
+                print(current.downloadResumeTTLHours)
+            case "download.benchEnabled":
+                print(current.downloadBenchEnabled ? "true" : "false")
+            default:
+                throw CLIError.usage
+            }
+        case "set":
+            guard arguments.count == 3 else { throw CLIError.usage }
+            var updated = current
+            switch arguments[1] {
+            case "download.parallelRangeEnabled":
+                guard let value = parseBool(arguments[2]) else { throw CLIError.usage }
+                updated.downloadParallelRangeEnabled = value
+            case "download.maxStreamsPerJob":
+                guard let value = Int(arguments[2]) else { throw CLIError.usage }
+                updated.downloadMaxStreamsPerJob = value
+            case "download.resumeTTLHours":
+                guard let value = Int(arguments[2]) else { throw CLIError.usage }
+                updated.downloadResumeTTLHours = value
+            case "download.benchEnabled":
+                guard let value = parseBool(arguments[2]) else { throw CLIError.usage }
+                updated.downloadBenchEnabled = value
+            default:
+                throw CLIError.usage
+            }
+            try AgentPaths.prepare()
+            try updated.write(to: AgentConfiguration.fileURL)
+            try printJSON(updated)
+        case "reset":
+            let defaults = AgentConfiguration.default
+            try AgentPaths.prepare()
+            try defaults.write(to: AgentConfiguration.fileURL)
+            try printJSON(defaults)
+        default:
+            throw CLIError.usage
+        }
+    }
+
+    private static func bench(arguments: [String]) async throws {
+        let configuration = AgentConfiguration.load()
+        guard configuration.downloadBenchEnabled else {
+            fputs("lustre bench: download.benchEnabled must be true in agent_config.json before running benchmarks.\n", stderr)
+            throw CLIError.usage
+        }
+        guard arguments.count >= 1, let url = URL(string: arguments[0]) else { throw CLIError.usage }
+        let concurrency = arguments.dropFirst().first.flatMap { Int($0) } ?? 1
+        let trials = arguments.dropFirst(2).first.flatMap { Int($0) } ?? 3
+        guard URLSafetyPolicy.isAllowed(url) else {
+            fputs("lustre bench: refusing unsafe URL\n", stderr)
+            throw CLIError.usage
+        }
+        let report = try await DownloadBenchmark.run(url: url, concurrency: concurrency, trials: trials)
+        try printJSON(report)
+    }
+
+    private static func parseBool(_ string: String) -> Bool? {
+        switch string.lowercased() {
+        case "true", "yes", "1": true
+        case "false", "no", "0": false
+        default: nil
+        }
+    }
+
     private static func cloud(arguments: [String]) async throws {
         guard let command = arguments.first else { throw CLIError.usage }
         switch command {
@@ -169,7 +264,9 @@ private enum CLIError: Error, LocalizedError {
         """
         Usage:
           lustre token
-          lustre status
+          lustre status [--job <job-id>]
+          lustre config [get|set|reset] [download.parallelRangeEnabled|download.maxStreamsPerJob|download.resumeTTLHours|download.benchEnabled] [value]
+          lustre bench <url> [concurrency=1] [trials=3]
           lustre auth status|login|logout
           lustre cloud pair <code> --name <name>
           lustre cloud reset-identity

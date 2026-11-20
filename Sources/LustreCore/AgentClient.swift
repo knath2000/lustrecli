@@ -33,6 +33,10 @@ public struct AgentClient {
         try await request(path: "/v1/jobs", method: "GET", body: Optional<Data>.none)
     }
 
+    public func job(id: UUID) async throws -> DownloadJob? {
+        try await request(path: "/v1/jobs/\(id.uuidString)", method: "GET", body: Optional<Data>.none)
+    }
+
     public func googleDriveDestinations() async throws -> [GoogleDriveDestinationProfile] {
         try await request(path: "/v1/destinations/google-drive", method: "GET", body: Optional<Data>.none)
     }

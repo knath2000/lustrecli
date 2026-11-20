@@ -240,6 +240,41 @@ public struct DownloadProgress: Equatable, Sendable {
     }
 }
 
+public struct DownloadResumeState: Codable, Equatable, Sendable {
+    public var byteOffset: Int64
+    public var totalBytes: Int64?
+    public var etag: String?
+    public var lastModified: String?
+    public var startedAt: Date
+    public var rangesCompleted: [ClosedRange<Int64>]
+
+    public init(
+        byteOffset: Int64 = 0,
+        totalBytes: Int64? = nil,
+        etag: String? = nil,
+        lastModified: String? = nil,
+        startedAt: Date = .now,
+        rangesCompleted: [ClosedRange<Int64>] = []
+    ) {
+        self.byteOffset = byteOffset
+        self.totalBytes = totalBytes
+        self.etag = etag
+        self.lastModified = lastModified
+        self.startedAt = startedAt
+        self.rangesCompleted = rangesCompleted
+    }
+
+    public static let ttlHoursDefault = 72
+
+    public var ageHours: Double {
+        Date().timeIntervalSince(startedAt) / 3600
+    }
+
+    public func isFresh(ttlHours: Int = DownloadResumeState.ttlHoursDefault) -> Bool {
+        ageHours <= Double(ttlHours)
+    }
+}
+
 public struct DownloadJob: Codable, Identifiable, Equatable, Sendable {
     public let id: UUID
     public let sourcePageURL: URL
@@ -265,6 +300,7 @@ public struct DownloadJob: Codable, Identifiable, Equatable, Sendable {
     public var completionArtifact: JobCompletionArtifact?
     public var cloudStageID: UUID?
     public var queuePriority: Int?
+    public var resumeState: DownloadResumeState?
     public let createdAt: Date
     public var updatedAt: Date
 
@@ -293,6 +329,7 @@ public struct DownloadJob: Codable, Identifiable, Equatable, Sendable {
         completionArtifact: JobCompletionArtifact? = nil,
         cloudStageID: UUID? = nil,
         queuePriority: Int? = nil,
+        resumeState: DownloadResumeState? = nil,
         createdAt: Date = .now,
         updatedAt: Date = .now
     ) {
@@ -320,6 +357,7 @@ public struct DownloadJob: Codable, Identifiable, Equatable, Sendable {
         self.completionArtifact = completionArtifact
         self.cloudStageID = cloudStageID
         self.queuePriority = queuePriority
+        self.resumeState = resumeState
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }

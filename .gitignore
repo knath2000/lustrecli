@@ -7,6 +7,7 @@ gateway/.wrangler/
 gateway/node_modules/
 .hermes/
 .playwright-mcp/
+.openclaude/
 .DS_Store
 watch-cloud/node_modules/
 watch-cloud/services/resolver/dist/

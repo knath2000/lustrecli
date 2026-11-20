@@ -123,6 +123,13 @@ public final class LoopbackServer: @unchecked Sendable {
                 }
                 return json(status: 200, value: try await service.allJobs())
             }
+            if request.method == "GET", routePath.hasPrefix("/v1/jobs/") {
+                let idString = String(routePath.dropFirst("/v1/jobs/".count))
+                if let id = UUID(uuidString: idString), let job = try await service.job(id: id) {
+                    return json(status: 200, value: job)
+                }
+                return json(status: 404, value: ErrorResponse(error: "Job not found."))
+            }
             if request.method == "GET", routePath == "/v1/job-history" {
                 let query = (components?.queryItems ?? []).reduce(into: [String: String]()) { values, item in
                     if let value = item.value { values[item.name] = value }

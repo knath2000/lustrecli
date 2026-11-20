@@ -529,6 +529,7 @@ public actor AgentService {
         activeDownloadTasks[id]?.task.cancel()
         activeDownloadTasks[id] = nil
         lastProgressUpdates[id] = nil
+        ParallelRangeDownloader.removePartials(for: id)
         try await jobs.delete(id: id)
         await scheduleQueuedDownloads()
     }
@@ -726,7 +727,30 @@ public actor AgentService {
                     output = try await progressDownloader(resolution, quality, try downloadDirectory(for: current.destination), reportProgress)
                 }
             } else {
-                output = try await progressDownloader(resolution, quality, try downloadDirectory(for: current.destination), reportProgress)
+                let downloadDirectory = try downloadDirectory(for: current.destination)
+                if AgentConfiguration.load().downloadParallelRangeEnabled, quality.mediaKind == .direct {
+                    let workerEvent: @Sendable (String) async -> Void = { [weak self] message in
+                        guard let self else { return }
+                        await self.recordWorkerEvent(message, for: id, taskID: taskID)
+                    }
+                    let (downloaded, resume) = try await AgentService.downloadWithResume(
+                        jobID: id,
+                        resolution: resolution,
+                        quality: quality,
+                        directory: downloadDirectory,
+                        resumeState: current.resumeState,
+                        onProgress: reportProgress,
+                        onWorkerEvent: workerEvent
+                    )
+                    if var storing = try await jobs.job(id: id), storing.status == .running {
+                        storing.resumeState = resume
+                        storing.updatedAt = .now
+                        try? await jobs.update(storing)
+                    }
+                    output = downloaded
+                } else {
+                    output = try await progressDownloader(resolution, quality, downloadDirectory, reportProgress)
+                }
             }
 
             guard !Task.isCancelled,
@@ -1016,9 +1040,133 @@ public actor AgentService {
         job.logs = Array(logs.suffix(200))
     }
 
-    private static func downloadToLocalDirectory(resolution: ProviderResolution, quality: ResolvedQuality, directory: URL, onProgress: @escaping @Sendable (DownloadProgress) async -> Void) async throws -> URL {
+    private func recordWorkerEvent(_ message: String, for id: UUID, taskID: UUID?) async {
+        guard ownsDownload(id, taskID: taskID),
+              var job = try? await jobs.job(id: id),
+              job.status == .running else { return }
+        record(&job, level: .info, message: message)
+        job.updatedAt = .now
+        try? await jobs.update(job)
+    }
+
+    static func downloadToLocalDirectory(
+        resolution: ProviderResolution,
+        quality: ResolvedQuality,
+        directory: URL,
+        onProgress: @escaping @Sendable (DownloadProgress) async -> Void
+    ) async throws -> URL {
+        let destination = uniqueDestination(in: directory, title: resolution.title, mediaURL: quality.url)
+        let stubResume = DownloadResumeState()
+        let result = try await downloadToLocalDirectory(
+            resolution: resolution,
+            quality: quality,
+            destination: destination,
+            resumeState: stubResume,
+            onProgress: onProgress,
+            onWorkerEvent: { _ in }
+        )
+        return result
+    }
+
+    static func downloadToLocalDirectory(
+        resolution: ProviderResolution,
+        quality: ResolvedQuality,
+        destination: URL,
+        resumeState: DownloadResumeState?,
+        onProgress: @escaping @Sendable (DownloadProgress) async -> Void,
+        onWorkerEvent: @escaping @Sendable (String) async -> Void
+    ) async throws -> URL {
         guard URLSafetyPolicy.isAllowed(quality.url) else { throw DownloadError.invalidURL }
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+
+        if AgentConfiguration.load().downloadParallelRangeEnabled, quality.mediaKind == .direct {
+            let stubJobID = UUID()
+            let stubRequest = ParallelRangeRequest(
+                jobID: stubJobID,
+                sourcePageURL: resolution.sourcePageURL,
+                title: resolution.title,
+                mediaURL: quality.url,
+                headers: quality.headers,
+                destinationDirectory: destination.deletingLastPathComponent(),
+                destinationFilename: destination,
+                maxStreams: AgentConfiguration.load().downloadMaxStreamsPerJob,
+                chunkSize: 8 * 1_024 * 1_024,
+                resumeState: resumeState,
+                onProgress: onProgress,
+                onWorkerEvent: onWorkerEvent
+            )
+            do {
+                let result = try await ParallelRangeDownloader.download(stubRequest)
+                return result.destination
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch let error as ParallelRangeDownloadError {
+                throw mapParallelRangeError(error)
+            } catch {
+                throw error
+            }
+        }
+
+        return try await singleStreamDownload(resolution: resolution, quality: quality, destination: destination, resumeState: resumeState, onProgress: onProgress, onWorkerEvent: onWorkerEvent)
+    }
+
+    static func downloadWithResume(
+        jobID: UUID,
+        resolution: ProviderResolution,
+        quality: ResolvedQuality,
+        directory: URL,
+        resumeState: DownloadResumeState?,
+        onProgress: @escaping @Sendable (DownloadProgress) async -> Void,
+        onWorkerEvent: @escaping @Sendable (String) async -> Void
+    ) async throws -> (URL, DownloadResumeState) {
+        let destination = uniqueDestination(in: directory, title: resolution.title, mediaURL: quality.url)
+        let configuration = AgentConfiguration.load()
+        if configuration.downloadParallelRangeEnabled, quality.mediaKind == .direct {
+            let request = ParallelRangeRequest(
+                jobID: jobID,
+                sourcePageURL: resolution.sourcePageURL,
+                title: resolution.title,
+                mediaURL: quality.url,
+                headers: quality.headers,
+                destinationDirectory: directory,
+                destinationFilename: destination,
+                maxStreams: configuration.downloadMaxStreamsPerJob,
+                chunkSize: 8 * 1_024 * 1_024,
+                resumeState: resumeState,
+                onProgress: onProgress,
+                onWorkerEvent: onWorkerEvent
+            )
+            do {
+                let result = try await ParallelRangeDownloader.download(request)
+                return (result.destination, result.resumeState)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch let error as ParallelRangeDownloadError {
+                throw mapParallelRangeError(error)
+            }
+        }
+        let url = try await singleStreamDownload(resolution: resolution, quality: quality, destination: destination, resumeState: resumeState, onProgress: onProgress, onWorkerEvent: onWorkerEvent)
+        let storedResume = DownloadResumeState(
+            byteOffset: (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int64) ?? 0,
+            totalBytes: resumeState?.totalBytes,
+            etag: resumeState?.etag,
+            lastModified: resumeState?.lastModified,
+            startedAt: resumeState?.startedAt ?? .now,
+            rangesCompleted: []
+        )
+        return (url, storedResume)
+    }
+
+    private static func singleStreamDownload(
+        resolution: ProviderResolution,
+        quality: ResolvedQuality,
+        destination: URL,
+        resumeState: DownloadResumeState?,
+        onProgress: @escaping @Sendable (DownloadProgress) async -> Void,
+        onWorkerEvent: @escaping @Sendable (String) async -> Void
+    ) async throws -> URL {
+        guard URLSafetyPolicy.isAllowed(quality.url) else { throw DownloadError.invalidURL }
+        try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
         var request = URLRequest(url: quality.url)
         request.timeoutInterval = 60
         quality.headers.forEach { request.setValue($0.value, forHTTPHeaderField: $0.key) }
@@ -1040,7 +1188,6 @@ public actor AgentService {
             throw DownloadError.unexpectedContentType
         }
 
-        let destination = uniqueDestination(in: directory, title: resolution.title, mediaURL: quality.url)
         let partial = destination.appendingPathExtension("part")
         FileManager.default.createFile(atPath: partial.path, contents: nil)
         let handle = try FileHandle(forWritingTo: partial)
@@ -1073,7 +1220,18 @@ public actor AgentService {
         guard totalWritten >= 1_024 else { throw DownloadError.responseTooSmall }
         try handle.close()
         try FileManager.default.moveItem(at: partial, to: destination)
+        await onWorkerEvent("Single-stream download completed.")
         return destination
+    }
+
+    private static func mapParallelRangeError(_ error: ParallelRangeDownloadError) -> Error {
+        switch error {
+        case .invalidURL: DownloadError.invalidURL
+        case .invalidResponse: DownloadError.invalidResponse
+        case .unexpectedContentType: DownloadError.unexpectedContentType
+        case .responseTooSmall: DownloadError.responseTooSmall
+        case .rangeRejected, .rangesUnsupported, .ifRangeMismatch: error
+        }
     }
 
     private static func probeDirectMedia(_ quality: ResolvedQuality) async -> Bool {
@@ -1685,7 +1843,7 @@ private final class WebDAVUploadDelegate: NSObject, URLSessionDataDelegate, @unc
     }
 }
 
-private final class AgentDownloadRedirectDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+final class AgentDownloadRedirectDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
 
     func urlSession(
         _ session: URLSession,
@@ -1703,7 +1861,7 @@ private final class AgentDownloadRedirectDelegate: NSObject, URLSessionTaskDeleg
 
 }
 
-private func expectedBytes(from response: HTTPURLResponse?) -> Int64? {
+func expectedBytes(from response: HTTPURLResponse?) -> Int64? {
     guard let response else { return nil }
     if response.expectedContentLength > 0 { return response.expectedContentLength }
     if let contentRange = response.value(forHTTPHeaderField: "Content-Range"),
@@ -1714,14 +1872,14 @@ private func expectedBytes(from response: HTTPURLResponse?) -> Int64? {
     return response.value(forHTTPHeaderField: "Content-Length").flatMap(Int64.init).flatMap { $0 > 0 ? $0 : nil }
 }
 
-private func validateMediaResponse(_ response: HTTPURLResponse) throws {
+func validateMediaResponse(_ response: HTTPURLResponse) throws {
     let contentType = (response.value(forHTTPHeaderField: "Content-Type") ?? "").lowercased()
     guard contentType.hasPrefix("video/") || contentType.hasPrefix("audio/") || contentType.hasPrefix("application/octet-stream") else {
         throw DownloadError.unexpectedContentType
     }
 }
 
-private func requiresInitialRange(_ url: URL) -> Bool {
+func requiresInitialRange(_ url: URL) -> Bool {
     guard let host = url.host?.lowercased() else { return false }
     return host == "cloudatacdn.com" || host.hasSuffix(".cloudatacdn.com") || host == "mxcontent.net" || host.hasSuffix(".mxcontent.net")
 }

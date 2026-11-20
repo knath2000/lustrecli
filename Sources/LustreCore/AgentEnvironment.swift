@@ -14,6 +14,8 @@ public enum AgentPaths {
     public static let googleDriveDestinations = applicationSupport.appending(path: "google-drive-destinations.json")
     public static let localDownloadConfiguration = applicationSupport.appending(path: "local-download-folder.json")
     public static let providerCDNObservations = applicationSupport.appending(path: "provider-cdn-observations.json")
+    public static let agentConfiguration = applicationSupport.appending(path: "agent_config.json")
+    public static let partialsDirectory = applicationSupport.appending(path: "Partials", directoryHint: .isDirectory)
     public static let loopbackPort: UInt16 = 63406
     public static let downloads: URL = {
         let base = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask)[0]
@@ -22,6 +24,7 @@ public enum AgentPaths {
 
     public static func prepare() throws {
         try FileManager.default.createDirectory(at: applicationSupport, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: partialsDirectory, withIntermediateDirectories: true)
     }
 }
 
