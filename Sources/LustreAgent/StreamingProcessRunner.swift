@@ -33,9 +33,9 @@ enum StreamingProcessRunner {
             throw StreamingProcessRunnerError.processFailed
         }
 
-        let stdoutTask = Task.detached { try await readStdout(stdout.fileHandleForReading, cap: max(0, stdoutCap), lifecycle: lifecycle) }
+        let stdoutTask = Task.detached { try await readStdout(stdout.fileHandleForReading, cap: max(0, stdoutCap), channel: channel, lifecycle: lifecycle) }
         let stderrTask = Task.detached { try await readStderr(stderr.fileHandleForReading, cap: max(0, stderrCap), channel: channel, lifecycle: lifecycle) }
-        let waitTask = Task.detached { lifecycle.waitForExit() }
+        let waitTask = Task.detached { await lifecycle.waitForExit() }
         let timeoutTask = Task.detached {
             guard timeout.isFinite, timeout > 0 else {
                 await abort(.timedOut, lifecycle: lifecycle, channel: channel, consumer: consumer)
@@ -95,18 +95,41 @@ enum StreamingProcessRunner {
     }
 
     private static func abortClaimed(lifecycle: RunnerLifecycle, channel: YtDlpProgressEventChannel, consumer: Task<Void, Never>) async {
-        lifecycle.terminate()
+        await lifecycle.terminate()
         lifecycle.closeReads()
         await channel.cancel()
         consumer.cancel()
     }
 
-    private static func readStdout(_ handle: FileHandle, cap: Int, lifecycle: RunnerLifecycle) async throws -> Data {
+    private static func readStdout(_ handle: FileHandle, cap: Int, channel: YtDlpProgressEventChannel, lifecycle: RunnerLifecycle) async throws -> Data {
         var retained = Data()
+        // yt-dlp writes its progress (including the `--progress-template` output) to stdout, while
+        // warnings and errors go to stderr. Parse progress from here so materialized downloads
+        // (yt-dlp-backed PornHub and generic sources) report byte progress instead of sitting at
+        // "Materializing media" with no percentage.
+        var decoder = BoundedLineDecoder(maximumLineBytes: YtDlpProgressParser.maximumLineBytes)
         while let chunk = try readChunk(handle, lifecycle: lifecycle) {
             if retained.count < cap { retained.append(chunk.prefix(cap - retained.count)) }
+            do {
+                await offerProgress(try decoder.append(chunk), to: channel)
+            } catch {
+                // A line longer than the progress cap (e.g. `--dump-json` metadata) is not a
+                // progress line; reset the decoder and keep retaining raw stdout.
+                decoder = BoundedLineDecoder(maximumLineBytes: YtDlpProgressParser.maximumLineBytes)
+            }
+        }
+        if !lifecycle.isAbortive, let lines = try? decoder.finish() {
+            await offerProgress(lines, to: channel)
         }
         return retained
+    }
+
+    private static func offerProgress(_ lines: [Data], to channel: YtDlpProgressEventChannel) async {
+        for line in lines {
+            guard let sample = try? YtDlpProgressParser.parse(line) else { continue }
+            // A dropped progress sample must never fail the underlying download.
+            do { try await channel.offer(sample) } catch {}
+        }
     }
 
     private static func readStderr(_ handle: FileHandle, cap: Int, channel: YtDlpProgressEventChannel, lifecycle: RunnerLifecycle) async throws -> Data {
@@ -129,6 +152,7 @@ enum StreamingProcessRunner {
     }
 
     private static func readChunk(_ handle: FileHandle, lifecycle: RunnerLifecycle) throws -> Data? {
+        if lifecycle.isReadsClosed { return nil }
         var bytes = [UInt8](repeating: 0, count: chunkSize)
         let count = bytes.withUnsafeMutableBytes { Darwin.read(handle.fileDescriptor, $0.baseAddress, $0.count) }
         if count < 0 {
@@ -161,6 +185,7 @@ private final class RunnerLifecycle: @unchecked Sendable {
     init(process: Process, stdout: FileHandle, stderr: FileHandle) { self.process = process; self.stdout = stdout; self.stderr = stderr }
 
     var isAbortive: Bool { lock.lock(); defer { lock.unlock() }; return outcome != .running && outcome != .succeeded }
+    var isReadsClosed: Bool { lock.lock(); defer { lock.unlock() }; return readsClosed }
     var error: StreamingProcessRunnerError {
         lock.lock(); defer { lock.unlock() }
         switch outcome { case .timedOut: return .timedOut; case .cancelled: return .cancelled; default: return .streamFailed }
@@ -178,19 +203,46 @@ private final class RunnerLifecycle: @unchecked Sendable {
         guard !readsClosed else { lock.unlock(); return }
         readsClosed = true
         lock.unlock()
-        stdout.closeFile()
-        stderr.closeFile()
+        // Deliberately do NOT call `stdout.closeFile()` / `stderr.closeFile()` here. Closing the
+        // handle races with `readChunk`'s `handle.fileDescriptor` access, which raises an
+        // uncatchable Objective-C exception (NSFileHandleRaiseOperationExceptionWhileReading) and
+        // aborts the entire agent with SIGABRT. Reads unblock when the child process exits and its
+        // pipe write ends close; `readChunk` also short-circuits once `readsClosed` is set.
     }
 
-    func terminate() {
-        lock.lock()
-        guard !terminating, process.isRunning else { lock.unlock(); return }
-        terminating = true
-        lock.unlock()
+    func terminate() async {
+        guard beginTerminating() else { return }
         process.terminate()
-        for _ in 0..<10 where process.isRunning { usleep(100_000) }
+        // Bounded grace period, then escalate. Async so it yields the thread instead of
+        // blocking a cooperative-pool thread for up to a second on every cancellation.
+        for _ in 0..<10 {
+            if !process.isRunning { return }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
         if process.isRunning { kill(process.processIdentifier, SIGKILL) }
     }
 
-    func waitForExit() -> Int32 { process.waitUntilExit(); return process.terminationStatus }
+    /// Claims the one-shot terminate flag. Kept synchronous so the lock never crosses an
+    /// `await` (Swift 6 rejects `NSLock` use in asynchronous contexts).
+    private func beginTerminating() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !terminating, process.isRunning else { return false }
+        terminating = true
+        return true
+    }
+
+    /// Waits for the child to exit without blocking a cooperative-pool thread.
+    ///
+    /// `Process.waitUntilExit()` blocks the calling thread on a private run loop. When
+    /// `terminate()` raced it from another thread the termination notification was missed and
+    /// the wait never returned even though the child was already gone, wedging the runner (and
+    /// its job) forever — made worse because the abort path also needed a cooperative thread.
+    /// Polling `isRunning` keeps the thread yielding so cancellation can always make progress.
+    func waitForExit() async -> Int32 {
+        while process.isRunning {
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        return process.terminationStatus
+    }
 }

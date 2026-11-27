@@ -102,6 +102,54 @@ final class StreamingProcessRunnerTests: XCTestCase {
         XCTAssertEqual(String(decoding: exceeded.stdout, as: UTF8.self), "abcdef")
     }
 
+    func testParsesProgressFromStdoutLikeYtDlp() async throws {
+        let fixture = try Fixture()
+        // yt-dlp writes its `--progress-template` progress lines to stdout, not stderr.
+        let executable = try fixture.script("printf 'LUSTRE_PROGRESS:v1\\tdownloading\\t10\\t100\\tNA\\tNA\\tNA\\tNA\\tNA\\tmedia\\nLUSTRE_PROGRESS:v1\\tdownloading\\t50\\t100\\tNA\\tNA\\tNA\\tNA\\tNA\\tmedia\\n'; printf 'trailing-noise\\n' >&2")
+        let recorder = ProgressRecorder()
+
+        let result = try await StreamingProcessRunner.run(executable: executable, arguments: [], timeout: 3, stdoutCap: 4096, stderrCap: 64) { sample in
+            await recorder.record(sample.progress.bytesWritten)
+        }
+
+        let values = await recorder.values()
+        XCTAssertEqual(values, [10, 50])
+        // Raw stdout is still retained verbatim for metadata callers.
+        XCTAssertEqual(
+            String(decoding: result.stdout, as: UTF8.self),
+            "LUSTRE_PROGRESS:v1\tdownloading\t10\t100\tNA\tNA\tNA\tNA\tNA\tmedia\nLUSTRE_PROGRESS:v1\tdownloading\t50\t100\tNA\tNA\tNA\tNA\tNA\tmedia\n"
+        )
+        XCTAssertEqual(String(decoding: result.stderrDiagnostics, as: UTF8.self), "trailing-noise\n")
+    }
+
+    func testLongStdoutLineDoesNotFailAndIsRetained() async throws {
+        let fixture = try Fixture()
+        // Simulates `--dump-json` metadata: one stdout line far longer than the progress cap.
+        let payload = String(repeating: "a", count: 4096)
+        let executable = try fixture.script("printf '%s' '\(payload)'")
+
+        let result = try await StreamingProcessRunner.run(executable: executable, arguments: [], timeout: 3, stdoutCap: 8192, stderrCap: 64) { _ in }
+
+        XCTAssertEqual(String(decoding: result.stdout, as: UTF8.self), payload)
+    }
+
+    func testCancellationDuringHeavyStdoutProgressDoesNotCrash() async throws {
+        let fixture = try Fixture()
+        // Flood stdout with progress lines so a read is in flight when cancellation closes reads.
+        // Before the fix this raced with `readChunk`'s `handle.fileDescriptor` access and aborted
+        // the process with SIGABRT (NSFileHandleRaiseOperationExceptionWhileReading).
+        let executable = try fixture.script("i=1; while :; do printf 'LUSTRE_PROGRESS:v1\\tdownloading\\t%s\\t1000000\\tNA\\tNA\\tNA\\tNA\\tNA\\tmedia\\n' $i; i=$((i+1)); done")
+        for _ in 0..<25 {
+            let task = Task<Result<StreamingProcessResult, Error>, Never> {
+                do { return .success(try await StreamingProcessRunner.run(executable: executable, arguments: [], timeout: 5, stdoutCap: 4096, stderrCap: 4096) { _ in }) }
+                catch { return .failure(error) }
+            }
+            try await Task.sleep(for: .milliseconds(40))
+            task.cancel()
+            _ = await task.value
+        }
+    }
+
     func testTimeoutReapsFixtureChild() async throws {
         let fixture = try Fixture()
         let pid = fixture.url.appendingPathComponent("pid")
